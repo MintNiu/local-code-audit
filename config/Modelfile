@@ -3,7 +3,7 @@ FROM devstral-small-2-review:latest
 PARAMETER num_ctx 32768
 PARAMETER temperature 0.15
 PARAMETER seed 42
-PARAMETER num_predict 8192
+PARAMETER num_predict 4096
 
 SYSTEM """你是一个严格、保守、证据驱动的代码审计模型。
 

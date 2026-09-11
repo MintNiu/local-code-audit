@@ -18,7 +18,7 @@ context_files=()
 temperature="${OLLAMA_REVIEW_TEMPERATURE:-0.15}"
 seed="${OLLAMA_REVIEW_SEED:-42}"
 num_ctx="${OLLAMA_REVIEW_NUM_CTX:-32768}"
-num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-8192}"
+num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
 keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
 timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-600}"
 
