@@ -134,7 +134,17 @@ devstral-small-2-review-tuned
 - 本地项目已使用 SSH 推送到公开仓库 `MintNiu/local-code-audit`；
 - 公开仓库使用 Apache License 2.0。
 
-## 6. 当前限制与下一阶段
+## 6. Codex 接入过程中遇到的问题
+
+调优期间也验证了 Codex 与 Ollama 的两种接入方式，这些问题影响的是接入稳定性，不是基础模型权重：
+
+- 直接使用 Codex OSS/Ollama 路径时，模型列表刷新曾因为客户端期待的响应字段与 Ollama 兼容接口返回的 OpenAI 风格列表结构不一致而报错；这不应通过反复下载模型来解决。
+- `devstral-small-2` 不支持 thinking。Codex 默认推理强度会触发重连，改为 `model_reasoning_effort="none"` 后，profile 调用成功返回。
+- `codex exec review --commit <sha>` 不接受额外的普通提示词参数。提交审查应按该子命令的参数约定调用，避免把 CLI 用法错误误判成模型故障。
+
+最终保留两条互补链路：Codex profile 用于交互式探索，`local-review` 用于可复现的批量审计、输出完整性检查和跨仓库使用。两条链路共享同一个 Ollama 派生模型，但不把交互式成功误认为审计质量已经经过量化验证。
+
+## 7. 当前限制与下一阶段
 
 当前仍然没有完成真正的 20～30 个历史提交评测，因此还不能声称已经达到 90% 的 P0/P1 召回率目标。下一阶段应：
 
