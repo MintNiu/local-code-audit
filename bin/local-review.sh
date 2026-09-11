@@ -17,7 +17,7 @@ examples_file="${LOCAL_REVIEW_EXAMPLES_FILE:-$local_review_data_dir/examples.md}
 context_files=()
 temperature="${OLLAMA_REVIEW_TEMPERATURE:-0.15}"
 seed="${OLLAMA_REVIEW_SEED:-42}"
-num_ctx="${OLLAMA_REVIEW_NUM_CTX:-32768}"
+num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
 keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
 timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-1800}"
 
@@ -252,7 +252,7 @@ request_body="$(jq -n \
   }')"
 
 if ! response_json="$(curl --silent --show-error --fail \
-  --retry 2 --retry-delay 2 --connect-timeout 10 --max-time "$timeout_seconds" \
+  --retry 1 --retry-delay 2 --connect-timeout 10 --max-time "$timeout_seconds" \
   http://127.0.0.1:11434/api/generate \
   -H 'Content-Type: application/json' \
   -d "$request_body")"; then

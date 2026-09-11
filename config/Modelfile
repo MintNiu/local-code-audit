@@ -1,6 +1,6 @@
 FROM devstral-small-2-review:latest
 
-PARAMETER num_ctx 32768
+PARAMETER num_ctx 16384
 PARAMETER temperature 0.15
 PARAMETER seed 42
 
