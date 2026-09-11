@@ -17,9 +17,10 @@ examples_file="${LOCAL_REVIEW_EXAMPLES_FILE:-$local_review_data_dir/examples.md}
 context_files=()
 temperature="${OLLAMA_REVIEW_TEMPERATURE:-0.15}"
 seed="${OLLAMA_REVIEW_SEED:-42}"
-num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
+num_ctx="${OLLAMA_REVIEW_NUM_CTX:-32768}"
+num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-8192}"
 keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
-timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-1800}"
+timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-600}"
 
 usage() {
   cat <<'EOF'
@@ -237,6 +238,7 @@ request_body="$(jq -n \
   --arg temperature "$temperature" \
   --arg seed "$seed" \
   --arg num_ctx "$num_ctx" \
+  --arg num_predict "$num_predict" \
   --arg keep_alive "$keep_alive" \
   '{
     model: $model,
@@ -244,15 +246,16 @@ request_body="$(jq -n \
     prompt: $prompt,
     stream: false,
     keep_alive: (($keep_alive | tonumber?) // $keep_alive),
-    options: {
-      temperature: ($temperature | tonumber),
-      seed: ($seed | tonumber),
-      num_ctx: ($num_ctx | tonumber)
-    }
+      options: {
+        temperature: ($temperature | tonumber),
+        seed: ($seed | tonumber),
+        num_ctx: ($num_ctx | tonumber),
+        num_predict: ($num_predict | tonumber)
+      }
   }')"
 
 if ! response_json="$(curl --silent --show-error --fail \
-  --retry 1 --retry-delay 2 --connect-timeout 10 --max-time "$timeout_seconds" \
+  --connect-timeout 10 --max-time "$timeout_seconds" \
   http://127.0.0.1:11434/api/generate \
   -H 'Content-Type: application/json' \
   -d "$request_body")"; then

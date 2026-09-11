@@ -45,7 +45,7 @@ local-review --repo /path/to/repo
 
 默认 `keep_alive=0`，一次审查结束后释放模型，减少长期占用内存和电量。需要连续审查时可以临时设置 `OLLAMA_REVIEW_KEEP_ALIVE=5m`。
 
-默认上下文为 16k，优先保证 Mac 上的响应时间和稳定性；大型变更可临时设置 `OLLAMA_REVIEW_NUM_CTX=32768`，但应配合分文件审查并观察内存和耗电。
+默认上下文为 32k，以审计完整性优先；如果单次差异过大，可临时设置更大的 `OLLAMA_REVIEW_NUM_PREDICT` 或按文件拆分审查。模型输出达到上限时命令会失败并提示，不会静默返回半截结果。
 
 ## 评测
 
