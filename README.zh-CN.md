@@ -56,6 +56,8 @@ local-review --repo /path/to/repo
 
 `examples/` 目录只保存公开的格式说明。真实 few-shot 示例放在本机私有文件 `~/.local/share/local-review/examples.md`。
 
+完整调优过程和期间遇到的问题记录在 [docs/tuning-process.zh-CN.md](docs/tuning-process.zh-CN.md)。
+
 ## 隐私与 GitHub
 
 公开仓库是 [MintNiu/local-code-audit](https://github.com/MintNiu/local-code-audit)，许可证为 Apache License 2.0。不要提交业务源码、真实 diff、访问令牌、模型权重或私有 Review 数据。

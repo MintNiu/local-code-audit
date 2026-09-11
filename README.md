@@ -56,6 +56,8 @@ Create a private set of at least 20 human-verified historical commits and follow
 
 The `examples/` directory contains only the public format specification. Real few-shot examples belong in the local private file `~/.local/share/local-review/examples.md`.
 
+The tuning history and known failure modes are documented in [docs/tuning-process.zh-CN.md](docs/tuning-process.zh-CN.md).
+
 ## Privacy and GitHub
 
 The public repository is [MintNiu/local-code-audit](https://github.com/MintNiu/local-code-audit) and uses Apache License 2.0. Do not commit business source code, real diffs, access tokens, model weights, or private review data.
