@@ -55,4 +55,4 @@ local-review --repo /path/to/repo
 
 ## 隐私与 GitHub
 
-这个仓库可以提交到 GitHub；请确认只提交脚本、配置模板和评测规范，不要提交业务源码、真实 diff、访问令牌、模型权重或私有 Review 数据。当前未配置任何 GitHub remote，后续拿到目标仓库地址后再添加。
+这个仓库已发布到 GitHub；请确认后续只提交脚本、配置模板和评测规范，不要提交业务源码、真实 diff、访问令牌、模型权重或私有 Review 数据。当前远程仓库为 `git@github.com:MintNiu/local-code-audit.git`。
