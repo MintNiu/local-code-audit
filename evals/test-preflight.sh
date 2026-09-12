@@ -7,12 +7,14 @@ fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
 context="$fixture_root/downstream/Downstream.java"
 capture="$fixture_root/request.json"
+show_log="$fixture_root/ollama-show.log"
 trap 'rm -rf "$fixture_root"' EXIT
 
 mkdir -p "$fake_bin" "$repo/src/main/java/com/example/api/client" "$repo/src/main/java/com/example/api/dto" "$(dirname "$context")"
 
 cat >"$fake_bin/ollama" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"${OLLAMA_SHOW_LOG:-/dev/null}"
 exit 0
 EOF
 
@@ -54,10 +56,15 @@ public interface Client {
 }
 EOF
 
-PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" \
+PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_SHOW_LOG="$show_log" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null
+[[ "$(wc -l <"$show_log" | tr -d ' ')" == "1" ]] || {
+  echo 'automatic model selection performed a redundant model probe' >&2
+  cat "$show_log" >&2
+  exit 1
+}
 
 cat >"$repo/src/main/java/com/example/api/dto/DeletedDTO.java" <<'EOF'
 package com.example.api.dto;
