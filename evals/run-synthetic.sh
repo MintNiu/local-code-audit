@@ -79,6 +79,18 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "tenant" ]]; then
+      if ! grep -Eiq 'tenant|租户|跨租户|tenantId' "$output_file"; then
+        echo "$name run $run missed the expected tenant-isolation risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -Eo 'P[0-3]' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     else
       if ! grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run did not return the clean marker: $output_file" >&2
@@ -101,6 +113,8 @@ run_review java-divide 2
 run_review java-safe 0
 run_review java-token-url 1
 run_review java-token-header 0
+run_review java-tenant-leak tenant
+run_review java-tenant-safe 0
 
 truncation_output="$output_root/truncation.txt"
 truncation_exit=0
@@ -115,4 +129,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: divide=$runs, token-url=$runs, clean=$((runs * 2)), truncation=explicit-failure"
+echo "synthetic evaluation passed: divide=$runs, security=$runs, tenant=$runs, clean=$((runs * 3)), truncation=explicit-failure"
