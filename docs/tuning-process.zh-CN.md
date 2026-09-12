@@ -173,6 +173,8 @@ context_files[@]: unbound variable
 
 公开合成回归新增脱敏的 `java-secret-config` 夹具，验证环境变量占位符被提交为字面量 AccessKey/Secret 时能稳定命中；同时保留数据库迁移删除夹具。新增规则后一轮回归结果为：所有既有正/负样例、迁移风险和字面量凭据风险均通过，截断门禁仍按预期失败。夹具只使用 `AKID_EXAMPLE`/`SECRET_EXAMPLE`，不包含真实密钥。
 
+又加入脱敏的 `java-presigned-replay` 夹具，固定展示 15 分钟预签名 PUT、取消后旧票据仍可写入同一对象键、以及清理任务只扫描活动会话。个人 wrapper 的贪心采样在该夹具上返回 P1，普通采样曾出现漏报，因此该样例专门用于个人高性能 profile 的召回回归，不把单个样例外推成生产召回率。
+
 ## 4. 当前运行链路
 
 ```text

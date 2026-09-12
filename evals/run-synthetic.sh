@@ -121,6 +121,18 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "presigned" ]]; then
+      if ! grep -Eiq 'presign|预签名|ticket|票据|replay|重放|孤儿|竞态' "$output_file"; then
+        echo "$name run $run missed the expected presigned-ticket risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 presigned-ticket finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     else
       if ! grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run did not return the clean marker: $output_file" >&2
@@ -148,6 +160,7 @@ run_review java-tenant-safe 0
 run_review java-maintenance-safe 0
 run_review java-migration-delete migration
 run_review java-secret-config secret
+run_review java-presigned-replay presigned
 
 truncation_output="$output_root/truncation.txt"
 truncation_exit=0
