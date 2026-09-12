@@ -56,9 +56,17 @@ run_review() {
     local exit_code=0
 
     start="$(date +%s)"
-    OLLAMA_REVIEW_MODEL="$model" \
-    OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
-      "$repo_root/bin/local-review.sh" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+    if [[ "$expected_findings" == "presigned" ]]; then
+      OLLAMA_REVIEW_MODEL="$model" \
+      OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
+      OLLAMA_REVIEW_TOP_K="${PRESIGNED_REVIEW_TOP_K:-1}" \
+      OLLAMA_REVIEW_TOP_P="${PRESIGNED_REVIEW_TOP_P:-1}" \
+        "$repo_root/bin/local-review.sh" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+    else
+      OLLAMA_REVIEW_MODEL="$model" \
+      OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
+        "$repo_root/bin/local-review.sh" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+    fi
     end="$(date +%s)"
 
     if [[ "$exit_code" -ne 0 ]]; then

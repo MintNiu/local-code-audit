@@ -27,7 +27,7 @@ ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 The installer only installs the local command. It never downloads a model automatically.
 The audit boundary is kept in `config/Modelfile` for direct Ollama use, and `local-review` sends the same boundary explicitly on every request; rebuild the tuned model after changing that policy.
 
-Prerequisites are a running Ollama service, the selected local model, Git, `jq`, and `rg` (ripgrep). macOS already provides `curl`, `awk`, `tr`, and `sort`; check the required tools with `command -v ollama jq git curl awk tr sort rg`. On a Homebrew setup, install the missing utilities with `brew install jq ripgrep`.
+Prerequisites are a running Ollama service, the selected local model, Git, `jq`, `rg` (ripgrep), and Perl for output redaction. macOS already provides `curl`, `awk`, `tr`, `sort`, and `/usr/bin/perl`; check the required tools with `command -v ollama jq git curl awk tr sort rg perl`. On a Homebrew setup, install the missing utilities with `brew install jq ripgrep`.
 
 ## Usage
 
@@ -51,9 +51,11 @@ local-review-local --repo /path/to/repo --base origin/main
 truncation gates. Its default budgets remain the validated 16k/4096 profile and
 it keeps the model resident for consecutive reviews; this avoids the timeout
 observed with oversized 32k/8192 requests on real cross-repository diffs.
-For higher recall stability on high-impact findings, it also defaults to greedy
-decoding (`OLLAMA_REVIEW_TOP_K=1`, `OLLAMA_REVIEW_TOP_P=1`); override either
-variable when you explicitly want a different sampling trade-off.
+It keeps the validated general-purpose decoding defaults
+(`OLLAMA_REVIEW_TOP_K=40`, `OLLAMA_REVIEW_TOP_P=0.9`). For a focused,
+high-impact check you can opt into greedy decoding with
+`OLLAMA_REVIEW_TOP_K=1 OLLAMA_REVIEW_TOP_P=1`; this is intentionally not the
+default because some real configuration diffs can make greedy generation stall.
 Override any value with the same
 `OLLAMA_REVIEW_*` environment variables when needed. The team-safe `local-review`
 command remains the default and is the one to share with collaborators.
