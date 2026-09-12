@@ -672,10 +672,31 @@ split_diff_into_chunks() {
       for (i = start; i <= end; i++) text = text lines[i] "\n"
       return text
     }
-    function write_hunk(header, hunk,    text) {
-      text = header hunk
-      write_unit((first_section ? preamble : "") text)
-      first_section = 0
+    function write_hunk(header, hunk,    lines, n, i, hunk_header, body, line, limit, prefix, text) {
+      # A single unified-diff hunk can be larger than the model budget (for
+      # example, a newly added 600-line class). Keep every original line, but
+      # split the hunk body into ordered line windows. Repeating the file and
+      # hunk headers preserves the changed path and original line coordinates
+      # for each independent review request.
+      n = split(hunk, lines, "\n")
+      hunk_header = lines[1] "\n"
+      limit = max_bytes - length(header) - length(hunk_header)
+      body = ""
+      for (i = 2; i <= n; i++) {
+        line = lines[i] "\n"
+        if (body != "" && length(body) + length(line) > limit) {
+          text = header hunk_header body
+          write_unit((first_section ? preamble : "") text)
+          first_section = 0
+          body = ""
+        }
+        body = body line
+      }
+      if (body != "") {
+        text = header hunk_header body
+        write_unit((first_section ? preamble : "") text)
+        first_section = 0
+      }
     }
     function emit_section(    i, n, hunk_start, header, hunk) {
       if (section == "") return
