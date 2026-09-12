@@ -149,6 +149,8 @@ context_files[@]: unbound variable
 
 针对 `a1284658` 暴露的误报，个人规则补充了 Java `instanceof` 模式匹配的 null 语义、Spring 拦截器异常透传契约，以及 POM/Gradle optional/provided 和 `@ConditionalOnClass` 的外部依赖边界；同时按问题首行合并模型在代码块周围插入的续行，仅用于格式校验，不改写最终输出。复测结果：`a1284658` 返回 clean，`420ae70c` 仍命中 5 个缺失 DTO 的 P1，带显式 context 的 `f6fc2f89` 仍命中跨仓库删除类型 P1；合成回归一轮全部通过。
 
+`2fa4cf1` 首次复测曾因把已有默认值和集中式 `Duration` 边界校验误判为多个问题而输出截断；补充“默认值 + helper 已覆盖 null/非正值/溢出/上限”的边界规则后，同一提交在当前个人 profile 下 35 秒返回 clean。该规则不豁免 helper 未覆盖的具体非法值，也没有提高预测长度。
+
 跨仓库兼容性仍是独立能力边界：在加入“删除类型 + 下游引用”确定性预检后，显式提供 `platform-file` 的控制器和 POM context 可以让 `f6fc2f89` 稳定识别 P1 构建阻断。删除公开契约的风险不能只依赖模型自由推理，跨仓库样本仍需单独计入召回率。
 
 ## 4. 当前运行链路
