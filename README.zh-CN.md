@@ -48,6 +48,8 @@ local-review --repo /path/to/repo
 
 默认上下文为 16k；机器内存充足且变更较大时可设置 `OLLAMA_REVIEW_NUM_CTX=32768`。默认输出上限为 4096 tokens。如果输出达到上限，命令会明确报告截断并失败，不会把半截审计结果当作成功。大型变更应按文件或模块拆分审查。
 
+当收集到的 diff 超过 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（默认 `6000`）且包含多个文件时，`local-review` 会按文件边界自动进行确定性分片。每个分片独立审查，最后完整拼接结果，不会去重。分片默认使用 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` 和 `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048`；任何分片超时、截断或输出格式不合格都会使整次审查失败，已完成分片只作为诊断输出。
+
 默认采样参数为 `top_k=40`、`top_p=0.9`；除非在评测记录中明确记录覆盖值，否则不要随意修改。
 
 默认温度为 `0`，用于提高本地审查的可重复性；它不能替代人工复核。

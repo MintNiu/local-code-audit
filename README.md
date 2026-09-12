@@ -48,6 +48,8 @@ local-review --repo /path/to/repo
 
 The default context is 16k; set `OLLAMA_REVIEW_NUM_CTX=32768` for larger changes when the machine has enough memory. The default output budget is 4096 tokens. If the output reaches the limit, the command fails and reports truncation instead of returning an incomplete review. Large changes should be reviewed by file or module.
 
+When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (default `6000`) and contains multiple files, `local-review` automatically performs deterministic file-boundary sharding. Each shard is reviewed separately and the complete findings are concatenated without deduplication. A shard uses `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` and `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048` by default; any shard timeout, truncation, or invalid output fails the whole review and prints completed shards only as diagnostic output.
+
 Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during comparisons unless the evaluation record includes the override.
 
 The default temperature is `0` for repeatable local audits. This is a stability setting, not a substitute for human verification.

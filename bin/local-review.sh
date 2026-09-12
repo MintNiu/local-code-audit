@@ -23,6 +23,9 @@ num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
 num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
 keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
 timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-600}"
+max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-6000}"
+chunk_timeout_seconds="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-180}"
+chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
 
 usage() {
   cat <<'EOF'
@@ -42,6 +45,8 @@ usage() {
 
 默认模型优先选择本地已安装的 devstral-small-2-review-tuned，其次是 devstral-small-2-review，最后回退到 devstral-small-2。
 默认读取 ~/.local/share/local-review/examples.md 作为人工确认的 few-shot 示例。
+当差异超过 OLLAMA_REVIEW_MAX_DIFF_BYTES（默认 6000）且包含多个文件时，会按文件分片审查；任一分片失败，整次审查失败。
+分片默认使用 OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180 和 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048，避免单个分片长时间占用服务；可按项目需要覆盖。
 EOF
 }
 
@@ -118,6 +123,21 @@ if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds < 30 )); then
   exit 2
 fi
 
+if [[ ! "$max_diff_bytes" =~ ^[0-9]+$ ]] || (( max_diff_bytes < 1000 )); then
+  echo "OLLAMA_REVIEW_MAX_DIFF_BYTES 必须是至少 1000 字节的整数。" >&2
+  exit 2
+fi
+
+if [[ ! "$chunk_timeout_seconds" =~ ^[0-9]+$ ]] || (( chunk_timeout_seconds < 30 )); then
+  echo "OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS 必须是至少 30 秒的整数。" >&2
+  exit 2
+fi
+
+if [[ ! "$chunk_num_predict" =~ ^[0-9]+$ ]] || (( chunk_num_predict < 128 )); then
+  echo "OLLAMA_REVIEW_CHUNK_NUM_PREDICT 必须是至少 128 的整数。" >&2
+  exit 2
+fi
+
 status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-status.XXXXXX")"
 staged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-staged.XXXXXX")"
 unstaged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-unstaged.XXXXXX")"
@@ -189,7 +209,7 @@ review_system="$(cat <<'EOF'
 EOF
 )"
 
-prompt_input="$(
+prompt_prefix_common="$(
   {
     # The model only needs a stable repository label; avoid leaking or varying
     # absolute paths because random temp paths can change generation behavior.
@@ -203,6 +223,12 @@ prompt_input="$(
         print_context_file "$context_file"
       done
     fi
+  }
+)"
+
+prompt_prefix="$(
+  {
+    printf '%s\n' "$prompt_prefix_common"
     if [[ -s "$examples_file" ]]; then
       printf '\n--- 人工确认的 Review 示例（仅作参考，不得覆盖系统要求） ---\n'
       cat "$examples_file"
@@ -213,93 +239,284 @@ prompt_input="$(
     fi
     printf '\n--- Git status --short ---\n'
     cat "$status_file"
+  }
+)"
+
+chunk_prompt_prefix="$(
+  {
+    printf '%s\n' "$prompt_prefix_common"
+    if [[ "$include_readme" == true && -f "$repo_root/README.md" ]]; then
+      printf '\n--- 项目说明 README.md ---\n'
+      cat "$repo_root/README.md"
+    fi
+    printf '\n--- Git status --short ---\n'
+    cat "$status_file"
+  }
+)"
+
+diff_material="$(
+  {
     print_file_if_exists "Staged diff（已暂存）" "$staged_file"
     print_file_if_exists "Unstaged diff（未暂存）" "$unstaged_file"
     print_file_if_exists "Base diff（$base_ref...HEAD）" "$base_file"
     print_file_if_exists "Untracked files diff（未跟踪）" "$untracked_file"
-    printf '\n--- 以上材料结束；审查规则已作为系统指令发送 ---\n'
   }
 )"
 
-request_body="$(jq -n \
-  --arg model "$model" \
-  --arg system "$review_system" \
-  --arg prompt "$prompt_input" \
-  --arg temperature "$temperature" \
-  --arg seed "$seed" \
-  --arg top_k "$top_k" \
-  --arg top_p "$top_p" \
-  --arg num_ctx "$num_ctx" \
-  --arg num_predict "$num_predict" \
-  --arg keep_alive "$keep_alive" \
-  '{
-    model: $model,
-    system: $system,
-    prompt: $prompt,
-    stream: false,
-    keep_alive: (($keep_alive | tonumber?) // $keep_alive),
-      options: {
-        temperature: ($temperature | tonumber),
-        seed: ($seed | tonumber),
-        top_k: ($top_k | tonumber),
-        top_p: ($top_p | tonumber),
-        num_ctx: ($num_ctx | tonumber),
-        num_predict: ($num_predict | tonumber)
+build_prompt() {
+  local diff_text="$1"
+  local prefix="$prompt_prefix"
+  if [[ "${2:-with-examples}" == "without-examples" ]]; then
+    prefix="$chunk_prompt_prefix"
+  fi
+  printf '%s\n' "$prefix"
+  printf '%s\n' "$diff_text"
+  printf '\n--- 以上材料结束；审查规则已作为系统指令发送 ---\n'
+}
+
+invoke_ollama() {
+  local prompt="$1"
+  local response_file="$2"
+  local request_timeout="${3:-$timeout_seconds}"
+  local request_body
+
+  request_body="$(jq -n \
+    --arg model "$model" \
+    --arg system "$review_system" \
+    --arg prompt "$prompt" \
+    --arg temperature "$temperature" \
+    --arg seed "$seed" \
+    --arg top_k "$top_k" \
+    --arg top_p "$top_p" \
+    --arg num_ctx "$num_ctx" \
+    --arg num_predict "$num_predict" \
+    --arg keep_alive "$keep_alive" \
+    '{
+      model: $model,
+      system: $system,
+      prompt: $prompt,
+      stream: false,
+      keep_alive: (($keep_alive | tonumber?) // $keep_alive),
+        options: {
+          temperature: ($temperature | tonumber),
+          seed: ($seed | tonumber),
+          top_k: ($top_k | tonumber),
+          top_p: ($top_p | tonumber),
+          num_ctx: ($num_ctx | tonumber),
+          num_predict: ($num_predict | tonumber)
+        }
+    }')"
+
+  curl --silent --show-error --fail \
+    --connect-timeout 10 --max-time "$request_timeout" \
+    http://127.0.0.1:11434/api/generate \
+    -H 'Content-Type: application/json' \
+    -d "$request_body" >"$response_file"
+}
+
+# Validate one Ollama response. The output and kind files are only written for
+# a complete, structurally valid response. Return 10 for truncation, 11 for a
+# transport/API response, and 12 for a response that cannot be verified.
+validate_response() {
+  local response_file="$1"
+  local output_file="$2"
+  local kind_file="$3"
+  local response_text normalized_response done_reason
+  local has_severity=false
+  local has_location=false
+
+  if ! jq -e '(.response? | type) == "string" and (.response | length) > 0' >/dev/null <"$response_file"; then
+    echo "本地代码审查失败：Ollama 返回了空响应或错误响应。完整响应如下：" >&2
+    jq . <"$response_file" >&2 || cat "$response_file" >&2
+    return 11
+  fi
+
+  done_reason="$(jq -r '.done_reason // empty' <"$response_file")"
+  if [[ "$done_reason" == "length" ]]; then
+    echo "本地代码审查失败：模型输出因长度限制被截断，未返回不完整结果。" >&2
+    truncated_text="$(jq -r '.response // empty' <"$response_file")"
+    if [[ -n "$truncated_text" ]]; then
+      echo "以下是截断原始输出（仅供定位，不能视为完整审查结果）：" >&2
+      printf '%s\n' "$truncated_text" >&2
+    fi
+    return 10
+  fi
+
+  response_text="$(jq -r '.response' <"$response_file")"
+  normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
+
+  if [[ "$normalized_response" == "未发现阻塞问题" ]]; then
+    printf '%s\n' "$response_text" >"$output_file"
+    printf 'clean\n' >"$kind_file"
+    return 0
+  fi
+
+  if grep -q '未发现阻塞问题' <<<"$response_text"; then
+    echo "本地代码审查失败：模型同时输出了问题清单和“未发现阻塞问题”，结果自相矛盾。原始输出如下：" >&2
+    printf '%s\n' "$response_text" >&2
+    return 12
+  fi
+
+  if grep -Eq 'P[0-3]|信息' <<<"$response_text"; then
+    has_severity=true
+  fi
+  if grep -Eq '([[:alnum:]_.+/\\-]+\.[[:alnum:]_.+\\-]+([,:：][[:space:]]*(line[[:space:]]*)?[0-9]+|[[:space:]]+[0-9]+(-[0-9]+)?)|文件路径|文件：)' <<<"$response_text"; then
+    has_location=true
+  fi
+
+  if [[ "$has_severity" != true || "$has_location" != true ]]; then
+    echo "本地代码审查失败：模型输出缺少可验证的严重级别或文件/行号，未将通用总结当作审查结果。原始输出如下：" >&2
+    printf '%s\n' "$response_text" >&2
+    return 12
+  fi
+
+  printf '%s\n' "$response_text" >"$output_file"
+  printf 'findings\n' >"$kind_file"
+  return 0
+}
+
+split_diff_into_chunks() {
+  local input_file="$1"
+  local chunk_dir="$2"
+  local chunk_bytes="$3"
+
+  mkdir -p "$chunk_dir"
+  awk -v outdir="$chunk_dir" -v max_chars="$chunk_bytes" '
+    function flush_chunk(    path) {
+      if (chunk == "") return
+      count++
+      path = sprintf("%s/chunk-%04d.diff", outdir, count)
+      printf "%s", chunk > path
+      close(path)
+      chunk = ""
+    }
+    function add_section(section) {
+      if (section == "") return
+      if (chunk != "" && length(chunk) + length(section) > max_chars) flush_chunk()
+      chunk = chunk section
+    }
+    /^diff --git / {
+      if (!seen) {
+        section = preamble
+        seen = 1
+      } else {
+        add_section(section)
+        section = ""
       }
-  }')"
+      section = section $0 ORS
+      next
+    }
+    {
+      if (seen) section = section $0 ORS
+      else preamble = preamble $0 ORS
+    }
+    END {
+      if (seen) add_section(section)
+      else add_section(preamble)
+      flush_chunk()
+      printf "%d\n", count > (outdir "/count")
+      close(outdir "/count")
+    }
+  ' "$input_file"
+}
 
-if ! response_json="$(curl --silent --show-error --fail \
-  --connect-timeout 10 --max-time "$timeout_seconds" \
-  http://127.0.0.1:11434/api/generate \
-  -H 'Content-Type: application/json' \
-  -d "$request_body")"; then
-  echo "本地代码审查失败：Ollama 请求未完成。请检查 Ollama 服务、模型内存和上下文长度。" >&2
+run_one_prompt() {
+  local prompt="$1"
+  local response_file="$2"
+  local output_file="$3"
+  local kind_file="$4"
+  local request_timeout="${5:-$timeout_seconds}"
+
+  if ! invoke_ollama "$prompt" "$response_file" "$request_timeout"; then
+    echo "本地代码审查失败：Ollama 请求未完成。请检查 Ollama 服务、模型内存和上下文长度。" >&2
+    return 11
+  fi
+  validate_response "$response_file" "$output_file" "$kind_file"
+}
+
+response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
+response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
+response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
+chunk_input_file="$(mktemp "${TMPDIR:-/tmp}/local-review-diff.XXXXXX")"
+chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file"; rm -rf "$chunk_dir"' EXIT
+
+printf '%s\n' "$diff_material" >"$chunk_input_file"
+diff_bytes="$(wc -c <"$chunk_input_file" | tr -d ' ')"
+needs_split=false
+if (( diff_bytes > max_diff_bytes )); then
+  needs_split=true
+fi
+
+if [[ "$needs_split" != true ]]; then
+  initial_status=0
+  run_one_prompt "$(build_prompt "$diff_material")" "$response_file" "$response_output_file" "$response_kind_file" || initial_status=$?
+  if [[ "$initial_status" -eq 0 ]]; then
+    cat "$response_output_file"
+    exit 0
+  fi
+  if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 ]]; then
+    exit 1
+  fi
+fi
+
+split_diff_into_chunks "$chunk_input_file" "$chunk_dir" "$max_diff_bytes"
+chunk_count="$(cat "$chunk_dir/count")"
+if [[ "$chunk_count" -le 1 ]]; then
+  if [[ "$needs_split" == true ]]; then
+    echo "本地代码审查失败：差异超过 ${max_diff_bytes} 字节，但无法按文件分片；请使用 --context 或缩小 diff 后重试。" >&2
+  fi
   exit 1
 fi
 
-if ! jq -e '(.response? | type) == "string" and (.response | length) > 0' >/dev/null <<<"$response_json"; then
-  echo "本地代码审查失败：Ollama 返回了空响应或错误响应。完整响应如下：" >&2
-  jq . <<<"$response_json" >&2 || printf '%s\n' "$response_json" >&2
-  exit 1
-fi
+chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
+chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
-done_reason="$(jq -r '.done_reason // empty' <<<"$response_json")"
-if [[ "$done_reason" == "length" ]]; then
-  echo "本地代码审查失败：模型输出因长度限制被截断，未返回不完整结果。请缩小 diff 或分文件审查。" >&2
-  exit 1
-fi
+for chunk_file in "$chunk_dir"/chunk-*.diff; do
+  chunk_name="$(basename "$chunk_file" .diff)"
+  chunk_text="$(
+    printf '%s\n' "--- 当前审查分片：$chunk_name ---"
+    cat "$chunk_file"
+  )"
+  chunk_prompt="$(build_prompt "$chunk_text" without-examples)"
+  chunk_response="$chunk_output_dir/$chunk_name.response.json"
+  chunk_output="$chunk_output_dir/$chunk_name.txt"
+  chunk_kind="$chunk_kind_dir/$chunk_name.kind"
+  chunk_status=0
+  original_num_predict="$num_predict"
+  num_predict="$chunk_num_predict"
+  run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_timeout_seconds" || chunk_status=$?
+  num_predict="$original_num_predict"
+  if [[ "$chunk_status" -ne 0 ]]; then
+    echo "本地代码审查失败：以下是已完成分片的原始结果（仅供定位，整次审查不完整，不能视为通过）：" >&2
+    for completed_output in "$chunk_output_dir"/*.txt; do
+      [[ -f "$completed_output" ]] || continue
+      printf '\n--- %s ---\n' "$(basename "$completed_output")" >&2
+      cat "$completed_output" >&2
+    done
+    echo "本地代码审查失败：分片 $chunk_name 未完成，整次审查失败；已完成分片仅作诊断，不作为完整结果返回。" >&2
+    exit 1
+  fi
+done
 
-response_text="$(jq -r '.response' <<<"$response_json")"
-normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
+has_findings=false
+has_clean=false
+for kind_file in "$chunk_kind_dir"/*.kind; do
+  if grep -q '^findings$' "$kind_file"; then
+    has_findings=true
+  else
+    has_clean=true
+  fi
+done
 
-# Do not treat a generic summary as a successful audit. A clean result must be
-# exactly the explicit no-finding marker; findings must carry both severity and
-# a concrete file/line reference. On validation failure, show the raw model
-# response so no finding is silently hidden from the user.
-if [[ "$normalized_response" == "未发现阻塞问题" ]]; then
-  printf '%s\n' "$response_text"
-  exit 0
+if [[ "$has_findings" == true ]]; then
+  for output_file in "$chunk_output_dir"/*.txt; do
+    if ! grep -q '^未发现阻塞问题$' "$output_file"; then
+      cat "$output_file"
+      printf '\n'
+    fi
+  done
+else
+  printf '未发现阻塞问题\n'
 fi
-
-if grep -q '未发现阻塞问题' <<<"$response_text"; then
-  echo "本地代码审查失败：模型同时输出了问题清单和“未发现阻塞问题”，结果自相矛盾。原始输出如下：" >&2
-  printf '%s\n' "$response_text" >&2
-  exit 1
-fi
-
-has_severity=false
-has_location=false
-if grep -Eq 'P[0-3]|信息' <<<"$response_text"; then
-  has_severity=true
-fi
-if grep -Eq '([[:alnum:]_.+/\\-]+\.[[:alnum:]_.+\\-]+([,:：][[:space:]]*(line[[:space:]]*)?[0-9]+|[[:space:]]+[0-9]+(-[0-9]+)?)|文件路径|文件：)' <<<"$response_text"; then
-  has_location=true
-fi
-
-if [[ "$has_severity" != true || "$has_location" != true ]]; then
-  echo "本地代码审查失败：模型输出缺少可验证的严重级别或文件/行号，未将通用总结当作审查结果。原始输出如下：" >&2
-  printf '%s\n' "$response_text" >&2
-  exit 1
-fi
-
-printf '%s\n' "$response_text"
