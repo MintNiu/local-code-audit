@@ -56,17 +56,26 @@ run_review() {
     fi
 
     if [[ "$expected_findings" == "2" ]]; then
-      grep -Eq 'Integer|null|空' "$output_file"
-      grep -Eq '除|ArithmeticException|除数' "$output_file"
+      if ! grep -Eq 'Integer|null|空' "$output_file" || ! grep -Eq '除|ArithmeticException|除数' "$output_file"; then
+        echo "$name run $run missed one of the expected risk families: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
       finding_count="$(grep -Eo 'P[0-3]' "$output_file" | wc -l | tr -d ' ')"
       if [[ "$finding_count" -ne 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 2: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
         return 1
       fi
     else
-      grep -q '未发现阻塞问题' "$output_file"
+      if ! grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return the clean marker: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
       if grep -Eq 'P[0-3]' "$output_file"; then
         echo "$name run $run reported a finding for the clean fixture: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
         return 1
       fi
     fi
