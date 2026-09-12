@@ -1,10 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ollama_probe_timeout_seconds="${OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS:-10}"
+if [[ ! "$ollama_probe_timeout_seconds" =~ ^[0-9]+$ ]] || (( ollama_probe_timeout_seconds < 1 )); then
+  echo "OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS 必须是正整数。" >&2
+  exit 2
+fi
+
+ollama_api_url="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+if [[ "$ollama_api_url" != *://* ]]; then
+  ollama_api_url="http://$ollama_api_url"
+fi
+ollama_api_url="${ollama_api_url%/}"
+
+ollama_show_with_timeout() {
+  local show_model="$1"
+  local show_pid
+  local elapsed=0
+
+  ollama show "$show_model" >/dev/null 2>&1 &
+  show_pid=$!
+  while kill -0 "$show_pid" 2>/dev/null; do
+    if (( elapsed >= ollama_probe_timeout_seconds )); then
+      kill "$show_pid" 2>/dev/null || true
+      wait "$show_pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$show_pid"
+}
+
 default_model="devstral-small-2"
-if ollama show devstral-small-2-review-tuned >/dev/null 2>&1; then
+if ollama_show_with_timeout devstral-small-2-review-tuned; then
   default_model="devstral-small-2-review-tuned"
-elif ollama show devstral-small-2-review >/dev/null 2>&1; then
+elif ollama_show_with_timeout devstral-small-2-review; then
   default_model="devstral-small-2-review"
 fi
 
@@ -46,6 +77,7 @@ usage() {
 
 默认模型优先选择本地已安装的 devstral-small-2-review-tuned，其次是 devstral-small-2-review，最后回退到 devstral-small-2。
 默认读取 ~/.local/share/local-review/examples.md 作为人工确认的 few-shot 示例。
+模型探测默认最多等待 10 秒，可用 OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS 覆盖；请求地址遵循 OLLAMA_HOST（默认 http://127.0.0.1:11434）。
 当差异超过 OLLAMA_REVIEW_MAX_DIFF_BYTES（默认 3000）时，会按文件再按 unified diff hunk 分片审查；任一分片失败，整次审查失败。
 分片默认使用 OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180 和 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048，避免单个分片长时间占用服务；可按项目需要覆盖。
 EOF
@@ -115,11 +147,58 @@ if [[ -z "$repo_root" ]]; then
   exit 2
 fi
 
-if ! ollama show "$model" >/dev/null 2>&1; then
+if ! ollama_show_with_timeout "$model"; then
   echo "本地未找到模型: $model" >&2
   echo "请先执行: ollama pull $model" >&2
   exit 2
 fi
+
+validate_nonnegative_decimal() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "$name 必须是非负整数或小数，当前值: $value" >&2
+    exit 2
+  fi
+}
+
+validate_nonnegative_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "$name 必须是非负整数，当前值: $value" >&2
+    exit 2
+  fi
+}
+
+validate_positive_integer() {
+  local name="$1"
+  local value="$2"
+  validate_nonnegative_integer "$name" "$value"
+  if (( value < 1 )); then
+    echo "$name 必须是正整数，当前值: $value" >&2
+    exit 2
+  fi
+}
+
+validate_nonnegative_decimal OLLAMA_REVIEW_TEMPERATURE "$temperature"
+validate_nonnegative_decimal OLLAMA_REVIEW_TOP_P "$top_p"
+if ! awk -v value="$top_p" 'BEGIN { exit !(value <= 1) }'; then
+  echo "OLLAMA_REVIEW_TOP_P 必须不大于 1，当前值: $top_p" >&2
+  exit 2
+fi
+validate_nonnegative_integer OLLAMA_REVIEW_SEED "$seed"
+validate_positive_integer OLLAMA_REVIEW_TOP_K "$top_k"
+if (( top_k < 1 )); then
+  echo "OLLAMA_REVIEW_TOP_K 必须至少为 1，当前值: $top_k" >&2
+  exit 2
+fi
+validate_positive_integer OLLAMA_REVIEW_NUM_CTX "$num_ctx"
+if (( num_ctx < 256 )); then
+  echo "OLLAMA_REVIEW_NUM_CTX 必须至少为 256，当前值: $num_ctx" >&2
+  exit 2
+fi
+validate_positive_integer OLLAMA_REVIEW_NUM_PREDICT "$num_predict"
 
 if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds < 30 )); then
   echo "OLLAMA_REVIEW_TIMEOUT_SECONDS 必须是至少 30 秒的整数。" >&2
@@ -305,9 +384,15 @@ invoke_ollama() {
   local prompt="$1"
   local response_file="$2"
   local request_timeout="${3:-$timeout_seconds}"
-  local request_body
+  local request_body_file
+  local curl_status
 
-  request_body="$(jq -n \
+  if ! request_body_file="$(mktemp "${TMPDIR:-/tmp}/local-review-request.XXXXXX")"; then
+    echo "本地代码审查失败：无法创建 Ollama 请求临时文件。" >&2
+    return 11
+  fi
+
+  if ! jq -n \
     --arg model "$model" \
     --arg system "$review_system" \
     --arg prompt "$prompt" \
@@ -331,14 +416,25 @@ invoke_ollama() {
           top_p: ($top_p | tonumber),
           num_ctx: ($num_ctx | tonumber),
           num_predict: ($num_predict | tonumber)
-        }
-    }')"
+      }
+    }' >"$request_body_file"; then
+    rm -f "$request_body_file"
+    echo "本地代码审查失败：无法构造 Ollama 请求。" >&2
+    return 11
+  fi
 
-  curl --silent --show-error --fail \
-    --connect-timeout 10 --max-time "$request_timeout" \
-    http://127.0.0.1:11434/api/generate \
-    -H 'Content-Type: application/json' \
-    -d "$request_body" >"$response_file"
+  if curl --silent --show-error --fail \
+      --connect-timeout 10 --max-time "$request_timeout" \
+      "$ollama_api_url/api/generate" \
+      -H 'Content-Type: application/json' \
+      --data-binary "@$request_body_file" >"$response_file"; then
+    rm -f "$request_body_file"
+    return 0
+  else
+    curl_status=$?
+    rm -f "$request_body_file"
+    return "$curl_status"
+  fi
 }
 
 # Validate one Ollama response. The output and kind files are only written for

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Personal high-performance profile. Values remain overridable per invocation.
+# It still uses the same conservative tenant/security rules and private examples
+# as local-review; only runtime budgets and model residency are changed.
+export OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-32768}"
+export OLLAMA_REVIEW_NUM_PREDICT="${OLLAMA_REVIEW_NUM_PREDICT:-8192}"
+export OLLAMA_REVIEW_MAX_DIFF_BYTES="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-6000}"
+export OLLAMA_REVIEW_TIMEOUT_SECONDS="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-900}"
+export OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-300}"
+export OLLAMA_REVIEW_CHUNK_NUM_PREDICT="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-4096}"
+export OLLAMA_REVIEW_KEEP_ALIVE="${OLLAMA_REVIEW_KEEP_ALIVE:-5m}"
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$script_dir/local-review.sh" "$@"

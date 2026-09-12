@@ -40,6 +40,15 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
+个人高性能模式使用单独命令：
+
+```bash
+local-review-local
+local-review-local --repo /path/to/repo --base origin/main
+```
+
+它不会去掉多租户、权限或安全检查，只提高本机上下文/输出/超时预算，并在连续审查时保留模型。仍可用同一组 `OLLAMA_REVIEW_*` 环境变量临时覆盖。团队共享时使用默认的 `local-review`，该命令不依赖你的私有 few-shot 数据。
+
 可以通过环境变量做单次 A/B 测试：
 
 ```bash

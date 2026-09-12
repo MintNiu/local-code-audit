@@ -40,6 +40,19 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
+For your personal high-performance profile, install and run:
+
+```bash
+local-review-local
+local-review-local --repo /path/to/repo --base origin/main
+```
+
+`local-review-local` keeps the same evidence, tenant-isolation, security, and
+truncation gates. It only raises the local context/output/time budgets and keeps
+the model resident for consecutive reviews. Override any value with the same
+`OLLAMA_REVIEW_*` environment variables when needed. The team-safe `local-review`
+command remains the default and is the one to share with collaborators.
+
 For an A/B test, override settings for one invocation:
 
 ```bash

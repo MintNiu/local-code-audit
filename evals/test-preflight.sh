@@ -23,6 +23,8 @@ previous=""
 for argument in "$@"; do
   if [[ "$previous" == "-d" ]]; then
     printf '%s' "$argument" >"$LOCAL_REVIEW_CAPTURE"
+  elif [[ "$previous" == "--data-binary" && "$argument" == @* ]]; then
+    cp "${argument#@}" "$LOCAL_REVIEW_CAPTURE"
   fi
   previous="$argument"
 done
