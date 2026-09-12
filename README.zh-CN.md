@@ -49,6 +49,8 @@ local-review-local --repo /path/to/repo --base origin/main
 
 它不会去掉多租户、权限或安全检查，只提高本机上下文/输出/超时预算，并在连续审查时保留模型。仍可用同一组 `OLLAMA_REVIEW_*` 环境变量临时覆盖。团队共享时使用默认的 `local-review`，该命令不依赖你的私有 few-shot 数据。
 
+实测同一个 clean 样例：保留模型 5 分钟时连续两次约 23 秒、4 秒；每次卸载时约 20 秒、21 秒。因此本地高性能版默认保留模型用于连续审查；更关注电量时可设置 `OLLAMA_REVIEW_KEEP_ALIVE=0`。
+
 可以通过环境变量做单次 A/B 测试：
 
 ```bash
