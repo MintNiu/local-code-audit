@@ -115,6 +115,7 @@ run_review java-token-url 1
 run_review java-token-header 0
 run_review java-tenant-leak tenant
 run_review java-tenant-safe 0
+run_review java-maintenance-safe 0
 
 truncation_output="$output_root/truncation.txt"
 truncation_exit=0
@@ -129,4 +130,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: divide=$runs, security=$runs, tenant=$runs, clean=$((runs * 3)), truncation=explicit-failure"
+echo "synthetic evaluation passed: divide=$runs, security=$runs, tenant=$runs, clean=$((runs * 4)), truncation=explicit-failure"
