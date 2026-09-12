@@ -5,6 +5,7 @@ repo_dir=""
 manifest_file=""
 output_dir=""
 limit=""
+commit_filter=""
 
 usage() {
   cat <<'EOF'
@@ -19,6 +20,7 @@ usage() {
   --manifest <file>  私有 TSV 清单，第一行必须是表头
   --out-dir <dir>    私有结果目录，不要指向公开仓库
   --limit <n>        只运行前 n 个 pending-human-label 提交
+  --commit <sha>     只运行指定的 pending-human-label 提交
 EOF
 }
 
@@ -42,6 +44,11 @@ while [[ $# -gt 0 ]]; do
     --limit)
       [[ $# -ge 2 ]] || { echo "--limit 需要正整数" >&2; exit 2; }
       limit="$2"
+      shift 2
+      ;;
+    --commit)
+      [[ $# -ge 2 ]] || { echo "--commit 需要提交 SHA" >&2; exit 2; }
+      commit_filter="$2"
       shift 2
       ;;
     -h|--help)
@@ -80,6 +87,7 @@ count=0
 while IFS=$'\t' read -r commit parent date subject status _rest; do
   [[ "$commit" == "commit" || -z "$commit" ]] && continue
   [[ "$status" == "pending-human-label" ]] || continue
+  [[ -z "$commit_filter" || "$commit" == "$commit_filter" ]] || continue
   if [[ -n "$limit" && "$count" -ge "$limit" ]]; then
     break
   fi
