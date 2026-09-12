@@ -55,6 +55,7 @@ num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
 num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
 keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
 timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-600}"
+total_timeout_seconds="${OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS:-$timeout_seconds}"
 max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
 chunk_timeout_seconds="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-180}"
 chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
@@ -81,6 +82,7 @@ usage() {
 模型探测默认最多等待 10 秒，可用 OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS 覆盖；请求地址遵循 OLLAMA_HOST（默认 http://127.0.0.1:11434）。
 当差异超过 OLLAMA_REVIEW_MAX_DIFF_BYTES（默认 3000）时，会按文件再按 unified diff hunk 分片审查；任一分片失败，整次审查失败。
 分片默认使用 OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180 和 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048，避免单个分片长时间占用服务；可按项目需要覆盖。
+整次审查默认受 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 限制（未设置时沿用单次超时），防止多个分片串行等待过久。
 EOF
 }
 
@@ -203,6 +205,11 @@ validate_positive_integer OLLAMA_REVIEW_NUM_PREDICT "$num_predict"
 
 if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds < 30 )); then
   echo "OLLAMA_REVIEW_TIMEOUT_SECONDS 必须是至少 30 秒的整数。" >&2
+  exit 2
+fi
+
+if [[ ! "$total_timeout_seconds" =~ ^[0-9]+$ ]] || (( total_timeout_seconds < 30 )); then
+  echo "OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 必须是至少 30 秒的整数。" >&2
   exit 2
 fi
 
@@ -387,6 +394,18 @@ invoke_ollama() {
   local request_timeout="${3:-$timeout_seconds}"
   local request_body_file
   local curl_status
+  local effective_timeout remaining_seconds now_epoch
+
+  now_epoch="$(date +%s)"
+  remaining_seconds=$((review_deadline_epoch - now_epoch))
+  if (( remaining_seconds <= 0 )); then
+    echo "本地代码审查失败：已达到整次审查总超时 ${total_timeout_seconds} 秒。" >&2
+    return 124
+  fi
+  effective_timeout="$request_timeout"
+  if (( effective_timeout > remaining_seconds )); then
+    effective_timeout="$remaining_seconds"
+  fi
 
   if ! request_body_file="$(mktemp "${TMPDIR:-/tmp}/local-review-request.XXXXXX")"; then
     echo "本地代码审查失败：无法创建 Ollama 请求临时文件。" >&2
@@ -427,7 +446,7 @@ invoke_ollama() {
   fi
 
   if curl --silent --show-error --fail \
-      --connect-timeout 10 --max-time "$request_timeout" \
+      --connect-timeout 10 --max-time "$effective_timeout" \
       "$ollama_api_url/api/generate" \
       -H 'Content-Type: application/json' \
       --data-binary "@$request_body_file" >"$response_file"; then
@@ -874,6 +893,7 @@ collect_build_preflight "$changed_imports_file" "$build_preflight_file"
   fi
 } | awk '$1 == "D" { print $2 }' | LC_ALL=C sort -u >"$deleted_types_file"
 collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"
+review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   echo "本地代码审查失败：检测到 combined diff（diff --cc/diff --combined），当前分片器不会猜测合并冲突语义；请先展开为普通文件 diff 后重试。" >&2
   exit 1
