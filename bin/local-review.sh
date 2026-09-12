@@ -508,7 +508,7 @@ validate_response() {
   if grep -q '未发现阻塞问题' <<<"$response_text"; then
     # Some local models append the clean marker after a valid finding list.
     # Drop only standalone marker lines; never hide or rewrite findings.
-    cleaned_response="$(printf '%s\n' "$response_text" | awk '$0 != "未发现阻塞问题" && $0 !~ /^未发现其他阻塞问题[。.!！]?$/')"
+    cleaned_response="$(printf '%s\n' "$response_text" | awk '$0 !~ /^未发现阻塞问题[。.!！]?$/ && $0 !~ /^未发现其他阻塞问题[。.!！]?$/')"
     if [[ -n "$(printf '%s' "$cleaned_response" | tr -d '[:space:]')" ]]; then
       response_text="$cleaned_response"
     else
