@@ -64,6 +64,15 @@ public record DeletedDTO(String value) {}
 EOF
 git -C "$repo" add .
 git -C "$repo" commit -qm add-dto
+cat >"$repo/src/main/java/com/example/api/client/Consumer.java" <<'EOF'
+package com.example.api.client;
+
+import com.example.api.dto.DeletedDTO;
+
+final class Consumer {
+    DeletedDTO value;
+}
+EOF
 cat >"$context" <<'EOF'
 package com.example.downstream;
 
@@ -79,5 +88,6 @@ PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo" --context "$context" >/dev/null
 grep -F '当前提交删除类型 com.example.api.dto.DeletedDTO' "$capture" >/dev/null
+grep -F '仓库内文件 src/main/java/com/example/api/client/Consumer.java' "$capture" >/dev/null
 
 printf 'preflight regression passed\n'

@@ -665,7 +665,7 @@ collect_build_preflight() {
 collect_deleted_context_preflight() {
   local deleted_types_file="$1"
   local output_file="$2"
-  local context_file context_path deleted_path fqcn import_line
+  local context_file context_path deleted_path fqcn import_line match_path match_line
 
   while IFS= read -r deleted_path; do
     [[ -n "$deleted_path" ]] || continue
@@ -673,6 +673,13 @@ collect_deleted_context_preflight() {
     fqcn="${deleted_path#src/main/java/}"
     fqcn="${fqcn%.java}"
     fqcn="${fqcn//\//.}"
+    while IFS=: read -r match_path match_line _; do
+      [[ -n "$match_path" ]] || continue
+      match_path="${match_path#"$repo_root/"}"
+      [[ "$match_path" == "$deleted_path" ]] && continue
+      printf 'P1 %s:1 - 当前提交删除类型 %s，但仓库内文件 %s:%s 仍 import 该类型；构建会失败。\n' \
+        "$deleted_path" "$fqcn" "$match_path" "$match_line" >>"$output_file"
+    done < <(rg -n --glob '*.java' --fixed-strings "import $fqcn;" "$repo_root" || true)
     for context_file in "${context_files[@]}"; do
       context_path="$context_file"
       [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
