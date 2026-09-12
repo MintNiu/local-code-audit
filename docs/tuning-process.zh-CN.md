@@ -145,7 +145,9 @@ context_files[@]: unbound variable
 
 个人高性能 profile 的 `keep_alive=5m` 不是盲目增加参数：在同一台 Mac、同一个 clean fixture 上，连续两次耗时约为 23s/4s；每次设置 `keep_alive=0` 则约为 20s/21s。它只改善连续审查的第二次加载时间；用户更在意电量时可以覆盖为 `0`。
 
-最新个人 profile 的 precision 回归也重新验证了旧误报簇：`91bff253`、`2f6c3934` 和 `39955c85` 在当前私有示例与证据规则下均返回 clean；同时 `420ae70c` 的缺失类型预检和带 `platform-file` context 的 `f6fc2f89` 仍各自命中一个真实 P1 根因。旧的 20 提交 scorecard 没有被直接改写，避免把不同参数阶段的结果混在一起。
+最新个人 profile 的 precision 回归也重新验证了旧误报簇：`91bff253`、`2f6c3934` 和 `39955c85` 在当前私有示例与证据规则下均返回 clean；同时 `420ae70c` 的缺失类型预检和带 `platform-file` context 的 `f6fc2f89` 仍命中真实 P1 根因（同一删除类型根因可能展开为多个受影响引用）。旧的 20 提交 scorecard 没有被直接改写，避免把不同参数阶段的结果混在一起。
+
+针对 `a1284658` 暴露的误报，个人规则补充了 Java `instanceof` 模式匹配的 null 语义、Spring 拦截器异常透传契约，以及 POM/Gradle optional/provided 和 `@ConditionalOnClass` 的外部依赖边界；同时按问题首行合并模型在代码块周围插入的续行，仅用于格式校验，不改写最终输出。复测结果：`a1284658` 返回 clean，`420ae70c` 仍命中 5 个缺失 DTO 的 P1，带显式 context 的 `f6fc2f89` 仍命中跨仓库删除类型 P1；合成回归一轮全部通过。
 
 跨仓库兼容性仍是独立能力边界：在加入“删除类型 + 下游引用”确定性预检后，显式提供 `platform-file` 的控制器和 POM context 可以让 `f6fc2f89` 稳定识别 P1 构建阻断。删除公开契约的风险不能只依赖模型自由推理，跨仓库样本仍需单独计入召回率。
 

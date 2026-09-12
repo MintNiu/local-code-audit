@@ -299,6 +299,10 @@ Java 语义：整数除法截断和基本类型整数回绕是定义行为；没
 
 Java 依赖语义：`java.*` 和 `javax.*` 属于 JDK/标准库命名空间；仅凭差异没有显式依赖声明或 import 形式，不得报告“缺少标准库依赖/无法编译”。只有项目构建配置、目标 Java 版本或代码证据明确冲突时，才报告构建问题。
 
+Java 显式安全检查优先：报告 NPE、空值、空字符串或异常处理问题前，必须逐行核对当前差异和紧邻的可见方法体；已有 `x != null`、`!x.isBlank()`、`if (holder.get() instanceof Type t)` 等保护时，不得把同一风险重复报告。`x instanceof Type t` 在 x 为 null 时分支不会进入，分支内 t 非 null。Spring/HTTP 拦截器按接口契约将 `execution.execute(request, body)` 的异常传播给调用方是正常行为；仅因没有 try/catch、日志、`@NonNull` 或额外 body null 检查不得报告问题。只有代码直接展示了未处理异常会改变契约、泄漏敏感数据或造成可达错误时，才报告具体根因。
+
+构建依赖边界：import 目标不在当前仓库源码树中，不等于缺失依赖。若当前 POM/Gradle 声明了与该包/类型匹配的依赖（包括 optional/provided），或代码通过 `@ConditionalOnClass` 明确表示可选类，不得报告 P1 缺失类型；必须有构建配置明确缺依赖，或可复现的编译/启动失败证据。最终按文件、代码范围和根因去重；同一根因即使被想到多个严重级别，也只保留一条并使用最严重级别。
+
 输出前逐条自检：每条问题都必须能在当前差异或明确契约中指出具体反例、可达影响和修复依据；仅凭“没有某个注解/日志/校验/测试”不得报告。如果同一根因、同一文件和相同代码范围重复出现，只保留一条。若自检不能证明问题，删除该候选；宁可输出“未发现阻塞问题”，也不要用猜测填满输出预算。
 
 构建完整性优先：检查新增或修改的 import、类型引用和自动配置入口是否能在当前提交快照中解析。构建预检只对当前源码索引中可证明属于本仓库的类型给出证据；只有差异、预检证据和项目构建上下文共同证明类型无法解析并会导致编译或启动失败时，才报告具体文件和行号的 P1 构建阻断。不要假设后续提交会补齐；外部依赖、生成源码、通配符 import 或无法确认的候选不得直接升级为问题。
@@ -500,7 +504,7 @@ validate_response() {
   if grep -q '未发现阻塞问题' <<<"$response_text"; then
     # Some local models append the clean marker after a valid finding list.
     # Drop only standalone marker lines; never hide or rewrite findings.
-    cleaned_response="$(printf '%s\n' "$response_text" | awk '$0 != "未发现阻塞问题"')"
+    cleaned_response="$(printf '%s\n' "$response_text" | awk '$0 != "未发现阻塞问题" && $0 !~ /^未发现其他阻塞问题[。.!！]?$/')"
     if [[ -n "$(printf '%s' "$cleaned_response" | tr -d '[:space:]')" ]]; then
       response_text="$cleaned_response"
     else
@@ -509,6 +513,17 @@ validate_response() {
       return 12
     fi
   fi
+
+  # Models may insert blank lines around evidence or a small code block inside
+  # one finding. Validate logical finding blocks (each starts with a severity)
+  # without rewriting the response that the caller will see.
+  validation_text="$(printf '%s\n' "$response_text" | awk '
+    /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ {
+      if (started) print ""
+      started = 1
+    }
+    NF { print }
+  ')"
 
   if ! awk -v changed_file="$paths_file" -v repo_root="$repo_root" '
     BEGIN {
@@ -604,7 +619,7 @@ validate_response() {
       check_paragraph()
       exit invalid
     }
-  ' <<<"$response_text"; then
+  ' <<<"$validation_text"; then
     echo "本地代码审查失败：模型输出缺少可验证的严重级别或文件/行号，未将通用总结当作审查结果。原始输出如下：" >&2
     printf '%s\n' "$response_text" >&2
     return 12
