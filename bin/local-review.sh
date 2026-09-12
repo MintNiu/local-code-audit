@@ -58,6 +58,7 @@ timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-600}"
 max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
 chunk_timeout_seconds="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-180}"
 chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
+active_request_body_file=""
 
 usage() {
   cat <<'EOF'
@@ -225,7 +226,7 @@ staged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-staged.XXXXXX")"
 unstaged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-unstaged.XXXXXX")"
 untracked_file="$(mktemp "${TMPDIR:-/tmp}/local-review-untracked.XXXXXX")"
 base_file="$(mktemp "${TMPDIR:-/tmp}/local-review-base.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file"' EXIT
 
 print_file_if_exists() {
   local title="$1"
@@ -391,6 +392,7 @@ invoke_ollama() {
     echo "本地代码审查失败：无法创建 Ollama 请求临时文件。" >&2
     return 11
   fi
+  active_request_body_file="$request_body_file"
 
   if ! jq -n \
     --arg model "$model" \
@@ -417,8 +419,9 @@ invoke_ollama() {
           num_ctx: ($num_ctx | tonumber),
           num_predict: ($num_predict | tonumber)
       }
-    }' >"$request_body_file"; then
+  }' >"$request_body_file"; then
     rm -f "$request_body_file"
+    active_request_body_file=""
     echo "本地代码审查失败：无法构造 Ollama 请求。" >&2
     return 11
   fi
@@ -429,10 +432,12 @@ invoke_ollama() {
       -H 'Content-Type: application/json' \
       --data-binary "@$request_body_file" >"$response_file"; then
     rm -f "$request_body_file"
+    active_request_body_file=""
     return 0
   else
     curl_status=$?
     rm -f "$request_body_file"
+    active_request_body_file=""
     return "$curl_status"
   fi
 }
@@ -810,7 +815,7 @@ changed_imports_file="$(mktemp "${TMPDIR:-/tmp}/local-review-imports.XXXXXX")"
 deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX")"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -906,7 +911,7 @@ fi
 
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
