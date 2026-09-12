@@ -176,18 +176,18 @@ print_context_file() {
 
 git -C "$repo_root" status --short >"$status_file"
 
-git -C "$repo_root" diff --no-ext-diff --cached -- >"$staged_file"
-git -C "$repo_root" diff --no-ext-diff -- >"$unstaged_file"
+git -C "$repo_root" diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ --cached -- >"$staged_file"
+git -C "$repo_root" diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ -- >"$unstaged_file"
 
 if [[ -n "$base_ref" ]]; then
-  git -C "$repo_root" diff --no-ext-diff "$base_ref...HEAD" -- >"$base_file"
+  git -C "$repo_root" diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ "$base_ref...HEAD" -- >"$base_file"
 fi
 
 # Include untracked files so newly created source files are reviewed too.
 while IFS= read -r -d '' path; do
   (
     cd "$repo_root"
-    git diff --no-index -- /dev/null "$path" >>"$untracked_file" || true
+    git diff --no-index --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >>"$untracked_file" || true
   )
 done < <(git -C "$repo_root" ls-files --others --exclude-standard -z)
 
