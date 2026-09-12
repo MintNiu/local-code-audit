@@ -680,7 +680,8 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
     fi
   done <"$changed_paths_file"
   if [[ ! -s "$chunk_paths_file" ]]; then
-    cp "$changed_paths_file" "$chunk_paths_file"
+    echo "本地代码审查失败：无法从分片 $chunk_name 解析变更文件路径，拒绝使用全局路径列表放宽校验。" >&2
+    exit 1
   fi
   chunk_status=0
   original_num_predict="$num_predict"
