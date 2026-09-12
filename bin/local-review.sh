@@ -278,6 +278,12 @@ if [[ "$normalized_response" == "未发现阻塞问题" ]]; then
   exit 0
 fi
 
+if grep -q '未发现阻塞问题' <<<"$response_text"; then
+  echo "本地代码审查失败：模型同时输出了问题清单和“未发现阻塞问题”，结果自相矛盾。原始输出如下：" >&2
+  printf '%s\n' "$response_text" >&2
+  exit 1
+fi
+
 has_severity=false
 has_location=false
 if grep -Eq 'P[0-3]|信息' <<<"$response_text"; then
