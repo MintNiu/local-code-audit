@@ -28,7 +28,7 @@ for argument in "$@"; do
   fi
   previous="$argument"
 done
-printf '{"response":"未发现阻塞问题","done_reason":"stop"}\n'
+printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
@@ -91,5 +91,16 @@ PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" \
   "$repo_root/bin/local-review.sh" --repo "$repo" --context "$context" >/dev/null
 grep -F '当前提交删除类型 com.example.api.dto.DeletedDTO' "$capture" >/dev/null
 grep -F '仓库内文件 src/main/java/com/example/api/client/Consumer.java' "$capture" >/dev/null
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Client.java:5 - incomplete","done":false,"done_reason":"length"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'done=false response was incorrectly accepted' >&2
+  exit 1
+fi
 
 printf 'preflight regression passed\n'

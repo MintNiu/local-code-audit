@@ -532,6 +532,12 @@ validate_response() {
     return 11
   fi
 
+  if ! jq -e '.done == true' >/dev/null <"$response_file"; then
+    echo "本地代码审查失败：Ollama 响应未确认 done=true，拒绝使用可能不完整的审查结果。完整响应如下：" >&2
+    (jq . <"$response_file" 2>/dev/null || cat "$response_file") | redact_sensitive_text >&2
+    return 10
+  fi
+
   done_reason="$(jq -r '.done_reason // empty' <"$response_file")"
   if [[ "$done_reason" == "length" ]]; then
     echo "本地代码审查失败：模型输出因长度限制被截断，未返回不完整结果。" >&2
