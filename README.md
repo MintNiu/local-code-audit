@@ -27,7 +27,7 @@ ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 The installer only installs the local command. It never downloads a model automatically.
 The audit boundary is kept in `config/Modelfile` for direct Ollama use, and `local-review` sends the same boundary explicitly on every request; rebuild the tuned model after changing that policy.
 
-Prerequisites are a running Ollama service, the selected local model, Git, and `jq`. macOS already provides `curl`, `awk`, `tr`, and `sort`; check the required tools with `command -v ollama jq git curl awk tr sort`. On a Homebrew setup, install the missing JSON utility with `brew install jq`.
+Prerequisites are a running Ollama service, the selected local model, Git, `jq`, and `rg` (ripgrep). macOS already provides `curl`, `awk`, `tr`, and `sort`; check the required tools with `command -v ollama jq git curl awk tr sort rg`. On a Homebrew setup, install the missing utilities with `brew install jq ripgrep`.
 
 ## Usage
 

@@ -27,7 +27,7 @@ ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 安装脚本只安装本地命令，不会自动下载模型。
 `config/Modelfile` 为直接使用 Ollama 保留同一套审计边界，`local-review` 每次请求也会显式发送这套规则；修改规则后请重新创建 tuned 模型。
 
-前置条件是 Ollama 服务正在运行、本地已有选定模型、Git 和 `jq`。macOS 通常自带 `curl`、`awk`、`tr` 和 `sort`；可以用 `command -v ollama jq git curl awk tr sort` 检查。使用 Homebrew 时，缺少 JSON 工具可执行 `brew install jq`。
+前置条件是 Ollama 服务正在运行、本地已有选定模型、Git、`jq` 和 `rg`（ripgrep）。macOS 通常自带 `curl`、`awk`、`tr` 和 `sort`；可以用 `command -v ollama jq git curl awk tr sort rg` 检查。使用 Homebrew 时，缺少工具可执行 `brew install jq ripgrep`。
 
 ## 使用
 
