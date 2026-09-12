@@ -48,8 +48,10 @@ local-review-local --repo /path/to/repo --base origin/main
 ```
 
 `local-review-local` keeps the same evidence, tenant-isolation, security, and
-truncation gates. It only raises the local context/output/time budgets and keeps
-the model resident for consecutive reviews. Override any value with the same
+truncation gates. Its default budgets remain the validated 16k/4096 profile and
+it keeps the model resident for consecutive reviews; this avoids the timeout
+observed with oversized 32k/8192 requests on real cross-repository diffs.
+Override any value with the same
 `OLLAMA_REVIEW_*` environment variables when needed. The team-safe `local-review`
 command remains the default and is the one to share with collaborators.
 
@@ -69,7 +71,7 @@ local-review --repo /path/to/repo
 
 The default context is 16k; set `OLLAMA_REVIEW_NUM_CTX=32768` for larger changes when the machine has enough memory. The default output budget is 4096 tokens. If the output reaches the limit, the command fails and reports truncation instead of returning an incomplete review. Large changes should be reviewed by file or module.
 
-When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (default `3000`), `local-review` automatically performs deterministic file- and unified-hunk-boundary sharding. Each shard is reviewed separately and the complete findings are concatenated without deduplication. A shard uses `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` and `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048` by default; any shard timeout, truncation, or invalid output fails the whole review and prints completed shards only as diagnostic output.
+When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (default `3000`), `local-review` automatically performs deterministic file- and unified-hunk-boundary sharding. Each shard is reviewed separately; only byte-identical repeated paragraphs are removed during aggregation, while distinct findings remain visible. A shard uses `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` and `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048` by default; any shard timeout, truncation, or invalid output fails the whole review and prints completed shards only as diagnostic output.
 
 An individual hunk that still exceeds the byte budget, or a Git combined diff (`diff --cc` / `diff --combined`), is rejected explicitly instead of being sent as an unsafe oversized prompt.
 

@@ -833,8 +833,9 @@ changed_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths.XXXXXX")"
 changed_imports_file="$(mktemp "${TMPDIR:-/tmp}/local-review-imports.XXXXXX")"
 deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX")"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
+preflight_emitted_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-emitted.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -931,7 +932,8 @@ fi
 
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
@@ -975,10 +977,17 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   fi
   sed 's/^/ M /' "$chunk_paths_file" >"$chunk_status_file"
   : >"$chunk_preflight_file"
-  while IFS= read -r candidate_path; do
-    [[ -n "$candidate_path" ]] || continue
-    grep -F " $candidate_path:" "$build_preflight_file" >>"$chunk_preflight_file" || true
-  done <"$chunk_paths_file"
+  while IFS= read -r preflight_line; do
+    [[ -n "$preflight_line" ]] || continue
+    preflight_path="${preflight_line#* }"
+    preflight_path="${preflight_path%%:*}"
+    if grep -Fxq -- "$preflight_path" "$chunk_paths_file"; then
+      if ! grep -Fxq -- "$preflight_line" "$preflight_emitted_file"; then
+        printf '%s\n' "$preflight_line" >>"$chunk_preflight_file"
+        printf '%s\n' "$preflight_line" >>"$preflight_emitted_file"
+      fi
+    fi
+  done <"$build_preflight_file"
   chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_preflight_file")"
   chunk_status=0
   original_num_predict="$num_predict"
@@ -1008,12 +1017,16 @@ for kind_file in "$chunk_kind_dir"/*.kind; do
 done
 
 if [[ "$has_findings" == true ]]; then
+  : >"$combined_output_file"
   for output_file in "$chunk_output_dir"/*.txt; do
     if ! grep -q '^未发现阻塞问题$' "$output_file"; then
-      cat "$output_file"
-      printf '\n'
+      cat "$output_file" >>"$combined_output_file"
+      printf '\n\n' >>"$combined_output_file"
     fi
   done
+  # Shards can repeat one deterministic preflight finding verbatim. Remove
+  # only byte-identical paragraphs; distinct findings remain untouched.
+  awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }' "$combined_output_file"
 else
   printf '未发现阻塞问题\n'
 fi
