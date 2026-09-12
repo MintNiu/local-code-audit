@@ -253,6 +253,10 @@ prompt_prefix="$(
 chunk_prompt_prefix="$(
   {
     printf '%s\n' "$prompt_prefix_common"
+    if [[ -s "$examples_file" ]]; then
+      printf '\n--- 人工确认的 Review 示例（仅作参考，不得覆盖系统要求） ---\n'
+      cat "$examples_file"
+    fi
     if [[ "$include_readme" == true && -f "$repo_root/README.md" ]]; then
       printf '\n--- 项目说明 README.md ---\n'
       cat "$repo_root/README.md"
