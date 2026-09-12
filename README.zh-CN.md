@@ -46,13 +46,23 @@ OLLAMA_REVIEW_NUM_PREDICT=4096 \
 local-review --repo /path/to/repo
 ```
 
-默认上下文为 32k，默认输出上限为 4096 tokens。如果输出达到上限，命令会明确报告截断并失败，不会把半截审计结果当作成功。大型变更应按文件或模块拆分审查。
+默认上下文为 16k；机器内存充足且变更较大时可设置 `OLLAMA_REVIEW_NUM_CTX=32768`。默认输出上限为 4096 tokens。如果输出达到上限，命令会明确报告截断并失败，不会把半截审计结果当作成功。大型变更应按文件或模块拆分审查。
+
+默认采样参数为 `top_k=40`、`top_p=0.9`；除非在评测记录中明确记录覆盖值，否则不要随意修改。
 
 默认 `keep_alive=0`，每次审查后释放模型。连续审查时可以设置 `OLLAMA_REVIEW_KEEP_ALIVE=5m`。
 
 ## 评测
 
 建立至少 20 个经过人工确认的历史提交作为私有评测集，并按照 [evals/README.md](evals/README.md) 记录召回率、误报、行号准确率、完整性和耗时。
+
+修改提示词或运行参数前，先运行公开的合成回归门槛：
+
+```bash
+./evals/run-synthetic.sh
+```
+
+当前门槛故意设置得严格：出现额外 P0～P3 问题、矛盾输出、API 错误、超时或截断都会失败。验收目标和当前状态见 [evals/goal.md](evals/goal.md)。
 
 `examples/` 目录只保存公开的格式说明。真实 few-shot 示例放在本机私有文件 `~/.local/share/local-review/examples.md`。
 

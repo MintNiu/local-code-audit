@@ -40,9 +40,11 @@
 创建了 `devstral-small-2-review-tuned:latest`，基础模型仍然是本地已有的 `devstral-small-2-review:latest`。当前 Modelfile 参数为：
 
 ```text
-num_ctx 32768
+num_ctx 16384
 temperature 0.15
 seed 42
+top_k 40
+top_p 0.9
 num_predict 4096
 ```
 
@@ -91,7 +93,18 @@ context_files[@]: unbound variable
 - `int` 的 `Integer.MIN_VALUE / -1` 不应被描述为会抛出 `ArithmeticException`；
 - 不把同一根因的具体问题再次汇总成重复问题。
 
-最终合成测试中，模型只保留了两个有证据的问题：`Integer` 空值和除零。
+在固定临时路径的一轮合成测试中，模型曾只保留两个有证据的问题：`Integer` 空值和除零。但随后把同一夹具复制到不同临时仓库并重复调用时，模型又生成了整数除法截断、`final`、Javadoc 和重复汇总等误报，因此这次结果不能作为稳定性验收。
+
+### 3.7 发现采样和服务稳定性问题
+
+重复测试发现固定 `seed` 并不能保证这个本地模型在不同请求中完全一致：
+
+- `top_k=1` 会让完整审计请求长时间无响应；改回 `top_k=40`、`top_p=0.9` 后，短审计请求可在约 20 秒返回；
+- 同一差异有时返回 2 条 P1，有时返回 5 条（额外包含 P2/P3 误报）；
+- 只看退出码不足以验收，因此 `evals/run-synthetic.sh` 现在严格检查正例必须恰好 2 条、负例不能有任何 P0～P3，并单独检查截断故障；
+- 连续测试可临时使用 `OLLAMA_REVIEW_KEEP_ALIVE=5m`，但这只减少模型反复加载，不能替代稳定性验证。
+
+因此当前模型仍未达到阶段 0 回归门槛，不能宣称已经具备高可用审计质量。
 
 ## 4. 当前运行链路
 
@@ -130,7 +143,7 @@ devstral-small-2-review-tuned
 - 最小 Ollama 请求返回 `done=true`、`done_reason=stop`；
 - 空 `--context` 参数的端到端问题已修复；
 - 输出达到上限时会明确失败，不返回半截结果；
-- 合成 Java 审计样例最终稳定识别空值和除零问题，并消除已知误报；
+- 严格回归脚本能够捕获合成样例中的 P2/P3 误报、矛盾输出和截断故障；阶段 0 当前仍为未通过；
 - 本地项目已使用 SSH 推送到公开仓库 `MintNiu/local-code-audit`；
 - 公开仓库使用 Apache License 2.0。
 

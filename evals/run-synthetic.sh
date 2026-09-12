@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+runs="${SYNTHETIC_REVIEW_RUNS:-5}"
+timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-180}"
+model="${OLLAMA_REVIEW_MODEL:-devstral-small-2-review-tuned}"
+fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic.XXXXXX")"
+output_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic-results.XXXXXX")"
+trap 'rm -rf "$fixture_root" "$output_root"' EXIT
+
+if [[ ! "$runs" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SYNTHETIC_REVIEW_RUNS 必须是正整数。" >&2
+  exit 2
+fi
+
+if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds < 30 )); then
+  echo "OLLAMA_REVIEW_TIMEOUT_SECONDS 必须是至少 30 秒的整数。" >&2
+  exit 2
+fi
+
+prepare_fixture() {
+  local name="$1"
+  local source_dir="$repo_root/evals/fixtures/$name"
+  local target_dir="$fixture_root/$name"
+
+  mkdir -p "$target_dir"
+  cp -R "$source_dir/." "$target_dir/"
+  git -C "$target_dir" init -q
+}
+
+run_review() {
+  local name="$1"
+  local expected_findings="$2"
+  local output_dir="$output_root/$name"
+
+  mkdir -p "$output_dir"
+  prepare_fixture "$name"
+
+  for run in $(seq 1 "$runs"); do
+    local output_file="$output_dir/run-$run.txt"
+    local start
+    local end
+    local exit_code=0
+
+    start="$(date +%s)"
+    OLLAMA_REVIEW_MODEL="$model" \
+    OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
+      "$repo_root/bin/local-review.sh" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+    end="$(date +%s)"
+
+    if [[ "$exit_code" -ne 0 ]]; then
+      echo "$name run $run failed with exit $exit_code: $output_file" >&2
+      sed -n '1,160p' "$output_file" >&2
+      return 1
+    fi
+
+    if [[ "$expected_findings" == "2" ]]; then
+      grep -Eq 'Integer|null|空' "$output_file"
+      grep -Eq '除|ArithmeticException|除数' "$output_file"
+      finding_count="$(grep -Ec '^[-*] \[(P0|P1|P2|P3|信息)\]' "$output_file" || true)"
+      if [[ "$finding_count" -ne 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run returned $finding_count findings instead of exactly 2: $output_file" >&2
+        return 1
+      fi
+    else
+      grep -q '未发现阻塞问题' "$output_file"
+      if grep -Eq '^[-*] \[(P0|P1|P2|P3|信息)\]' "$output_file"; then
+        echo "$name run $run reported a finding for the clean fixture: $output_file" >&2
+        return 1
+      fi
+    fi
+
+    printf '%s run=%s exit=%s elapsed=%ss sha256=%s\n' \
+      "$name" "$run" "$exit_code" "$((end - start))" "$(shasum -a 256 "$output_file" | awk '{print $1}')"
+  done
+}
+
+run_review java-divide 2
+run_review java-safe 0
+
+truncation_output="$output_root/truncation.txt"
+truncation_exit=0
+OLLAMA_REVIEW_MODEL="$model" \
+OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
+OLLAMA_REVIEW_NUM_PREDICT=1 \
+  "$repo_root/bin/local-review.sh" --repo "$fixture_root/java-divide" >"$truncation_output" 2>&1 || truncation_exit=$?
+
+if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; then
+  echo "截断故障路径未按预期失败：$truncation_output" >&2
+  sed -n '1,160p' "$truncation_output" >&2
+  exit 1
+fi
+
+echo "synthetic evaluation passed: positive=$runs, clean=$runs, truncation=explicit-failure"

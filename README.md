@@ -46,13 +46,23 @@ OLLAMA_REVIEW_NUM_PREDICT=4096 \
 local-review --repo /path/to/repo
 ```
 
-The default context is 32k and the default output budget is 4096 tokens. If the output reaches the limit, the command fails and reports truncation instead of returning an incomplete review. Large changes should be reviewed by file or module.
+The default context is 16k; set `OLLAMA_REVIEW_NUM_CTX=32768` for larger changes when the machine has enough memory. The default output budget is 4096 tokens. If the output reaches the limit, the command fails and reports truncation instead of returning an incomplete review. Large changes should be reviewed by file or module.
+
+Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during comparisons unless the evaluation record includes the override.
 
 The default `keep_alive=0` unloads the model after each review. Set `OLLAMA_REVIEW_KEEP_ALIVE=5m` when running several reviews consecutively.
 
 ## Evaluation
 
 Create a private set of at least 20 human-verified historical commits and follow [evals/README.md](evals/README.md) to track recall, false positives, line accuracy, completeness, and elapsed time.
+
+Run the public synthetic regression gate before changing prompts or runtime options:
+
+```bash
+./evals/run-synthetic.sh
+```
+
+The current gate is intentionally strict: it fails on extra P0–P3 findings, contradictory output, API errors, timeouts, or truncation. See [evals/goal.md](evals/goal.md) for the acceptance target and current status.
 
 The `examples/` directory contains only the public format specification. Real few-shot examples belong in the local private file `~/.local/share/local-review/examples.md`.
 
