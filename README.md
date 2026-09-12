@@ -12,7 +12,7 @@ The default model is `devstral-small-2-review-tuned`. It is an Ollama-derived co
 
 - Maximize recall of P0/P1 findings.
 - Require a file, line, and code-level evidence for every finding.
-- Never silently filter, merge, deduplicate, or truncate model output.
+- Never silently drop or truncate findings; a repeated root cause may be represented once only when every affected file/line range remains visible.
 - Fail explicitly on API errors, empty responses, or length truncation.
 - Keep business source code, real diffs, and private review examples outside this public repository.
 - Use one global command across multiple Git repositories.
@@ -25,6 +25,9 @@ ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 ```
 
 The installer only installs the local command. It never downloads a model automatically.
+The audit boundary is kept in `config/Modelfile` for direct Ollama use, and `local-review` sends the same boundary explicitly on every request; rebuild the tuned model after changing that policy.
+
+Prerequisites are a running Ollama service, the selected local model, Git, and `jq`. macOS already provides `curl`, `awk`, `tr`, and `sort`; check the required tools with `command -v ollama jq git curl awk tr sort`. On a Homebrew setup, install the missing JSON utility with `brew install jq`.
 
 ## Usage
 
@@ -48,7 +51,13 @@ local-review --repo /path/to/repo
 
 The default context is 16k; set `OLLAMA_REVIEW_NUM_CTX=32768` for larger changes when the machine has enough memory. The default output budget is 4096 tokens. If the output reaches the limit, the command fails and reports truncation instead of returning an incomplete review. Large changes should be reviewed by file or module.
 
-When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (default `6000`) and contains multiple files, `local-review` automatically performs deterministic file-boundary sharding. Each shard is reviewed separately and the complete findings are concatenated without deduplication. A shard uses `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` and `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048` by default; any shard timeout, truncation, or invalid output fails the whole review and prints completed shards only as diagnostic output.
+When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (default `3000`), `local-review` automatically performs deterministic file- and unified-hunk-boundary sharding. Each shard is reviewed separately and the complete findings are concatenated without deduplication. A shard uses `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` and `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048` by default; any shard timeout, truncation, or invalid output fails the whole review and prints completed shards only as diagnostic output.
+
+An individual hunk that still exceeds the byte budget, or a Git combined diff (`diff --cc` / `diff --combined`), is rejected explicitly instead of being sent as an unsafe oversized prompt.
+
+The byte budget applies to collected Git diff material only. Project rules, explicit context files, README content, and the system prompt are additional context; raise `OLLAMA_REVIEW_NUM_CTX` or split the review further when those inputs are large.
+
+The output gate rejects generic summaries: every finding paragraph must include a severity and a file/line location that matches a changed file or an explicitly supplied context file. A basename is accepted only when it is unambiguous in the review set.
 
 Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during comparisons unless the evaluation record includes the override.
 

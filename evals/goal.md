@@ -47,7 +47,8 @@
 
 - 阶段 0：已通过。默认门禁完成 5/5 正例、5/5 负例；正例每次恰好发现 2 个 P0/P1 真实问题，负例没有 P0～P3，输出哈希分别保持一致，截断故障路径显式失败。
 - 阶段 1：未完成。已从本地 `platform-api` 历史建立 20 个候选提交清单，保存在 `~/.local/share/local-review/evals/platform-api-20.tsv`；20 条目前都处于 `pending-human-label`，真实问题和误报仍需人工确认。
-- 当前模型参数：`temperature=0`、`seed=42`、`top_k=40`、`top_p=0.9`、`num_ctx=16384`、`num_predict=4096`。大变更默认在超过 6000 字节且包含多个文件时按文件分片；分片参数为 `chunk_timeout=180s`、`chunk_num_predict=2048`。大变更也可显式提高 `num_ctx`，但必须重新评测耗时和超时率。
+- 最新私有试跑：`91bff253` 在当前链路中完整返回，耗时 68 秒；重建 tuned 模型后，`2f6c3934` 在文件/hunk 分片和格式门禁下完整返回，耗时 146 秒，但输出仍包含尚未人工确认的泛化问题，不能计入召回率或误报率。
+- 当前模型参数：`temperature=0`、`seed=42`、`top_k=40`、`top_p=0.9`、`num_ctx=16384`、`num_predict=4096`。大变更默认在超过 3000 字节时按文件、再按 hunk 分片；分片参数为 `chunk_timeout=180s`、`chunk_num_predict=2048`。大变更也可显式提高 `num_ctx`，但必须重新评测耗时和超时率。
 
 ## 失败处理原则
 

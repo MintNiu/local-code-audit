@@ -12,7 +12,7 @@
 
 - 优先提高 P0/P1 问题召回率；
 - 每条问题都必须有文件、行号和代码证据；
-- 不静默过滤、合并、去重或截断模型输出；
+- 不静默丢弃或截断问题；同一根因只有在完整保留所有受影响文件/行号范围时才可以合并表示；
 - API 错误、空响应或输出长度超限时明确失败；
 - 业务源码、真实 diff 和私有 Review 示例不进入公开仓库；
 - 同一套全局命令可用于多个 Git 仓库。
@@ -25,6 +25,9 @@ ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 ```
 
 安装脚本只安装本地命令，不会自动下载模型。
+`config/Modelfile` 为直接使用 Ollama 保留同一套审计边界，`local-review` 每次请求也会显式发送这套规则；修改规则后请重新创建 tuned 模型。
+
+前置条件是 Ollama 服务正在运行、本地已有选定模型、Git 和 `jq`。macOS 通常自带 `curl`、`awk`、`tr` 和 `sort`；可以用 `command -v ollama jq git curl awk tr sort` 检查。使用 Homebrew 时，缺少 JSON 工具可执行 `brew install jq`。
 
 ## 使用
 
@@ -48,7 +51,13 @@ local-review --repo /path/to/repo
 
 默认上下文为 16k；机器内存充足且变更较大时可设置 `OLLAMA_REVIEW_NUM_CTX=32768`。默认输出上限为 4096 tokens。如果输出达到上限，命令会明确报告截断并失败，不会把半截审计结果当作成功。大型变更应按文件或模块拆分审查。
 
-当收集到的 diff 超过 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（默认 `6000`）且包含多个文件时，`local-review` 会按文件边界自动进行确定性分片。每个分片独立审查，最后完整拼接结果，不会去重。分片默认使用 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` 和 `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048`；任何分片超时、截断或输出格式不合格都会使整次审查失败，已完成分片只作为诊断输出。
+当收集到的 diff 超过 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（默认 `3000`）时，`local-review` 会按文件边界、再按 unified diff hunk 边界自动进行确定性分片。每个分片独立审查，最后完整拼接结果，不会去重。分片默认使用 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` 和 `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048`；任何分片超时、截断或输出格式不合格都会使整次审查失败，已完成分片只作为诊断输出。
+
+如果单个 hunk 仍然超过字节预算，或检测到 Git combined diff（`diff --cc` / `diff --combined`），命令会明确拒绝，不会把超预算内容作为不安全的完整提示词发送给模型。
+
+字节预算只约束收集到的 Git diff；项目规则、显式上下文文件、README 和系统提示词还会额外占用上下文。它们较大时，应提高 `OLLAMA_REVIEW_NUM_CTX` 或进一步拆分审查。
+
+输出门禁会拒绝泛化总结：每个问题段都必须包含严重级别，以及能匹配变更文件或显式上下文文件的文件/行号；只有在当前审查集合中唯一时才接受单独的文件名。
 
 默认采样参数为 `top_k=40`、`top_p=0.9`；除非在评测记录中明确记录覆盖值，否则不要随意修改。
 
