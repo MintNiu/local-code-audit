@@ -662,15 +662,48 @@ collect_build_preflight() {
   LC_ALL=C sort -u -o "$output_file" "$output_file"
 }
 
+collect_deleted_context_preflight() {
+  local deleted_types_file="$1"
+  local output_file="$2"
+  local context_file context_path deleted_path fqcn import_line
+
+  while IFS= read -r deleted_path; do
+    [[ -n "$deleted_path" ]] || continue
+    [[ "$deleted_path" == src/main/java/*.java ]] || continue
+    fqcn="${deleted_path#src/main/java/}"
+    fqcn="${fqcn%.java}"
+    fqcn="${fqcn//\//.}"
+    for context_file in "${context_files[@]}"; do
+      context_path="$context_file"
+      [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
+      [[ -f "$context_path" ]] || continue
+      import_line="$(awk -v wanted="$fqcn" '
+        $1 == "import" {
+          name = $2
+          if (name == "static") name = $3
+          gsub(/[;\r]/, "", name)
+          if (name == wanted) { print NR; exit }
+        }
+      ' "$context_path")"
+      if [[ -n "$import_line" ]]; then
+        printf 'P1 %s:1 - 当前提交删除类型 %s，但显式 context 文件 %s:%s 仍 import 该类型；下游编译或启动可能失败。\n' \
+          "$deleted_path" "$fqcn" "$context_file" "$import_line" >>"$output_file"
+      fi
+    done
+  done <"$deleted_types_file"
+  LC_ALL=C sort -u -o "$output_file" "$output_file"
+}
+
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
 chunk_input_file="$(mktemp "${TMPDIR:-/tmp}/local-review-diff.XXXXXX")"
 changed_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths.XXXXXX")"
 changed_imports_file="$(mktemp "${TMPDIR:-/tmp}/local-review-imports.XXXXXX")"
+deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX")"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$build_preflight_file"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -698,6 +731,9 @@ if (( ${#context_files[@]} > 0 )); then
         printf '%s\n' "${context_path#"$repo_root/"}" >>"$changed_paths_file"
       else
         printf '%s\n' "$context_file" >>"$changed_paths_file"
+        if [[ "$context_path" == */src/main/java/* ]]; then
+          printf '%s\n' "src/main/java/${context_path##*/src/main/java/}" >>"$changed_paths_file"
+        fi
       fi
     fi
   done
@@ -718,6 +754,14 @@ awk '
   }
 ' "$chunk_input_file" | LC_ALL=C sort -u >"$changed_imports_file"
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
+{
+  git -C "$repo_root" diff --name-status --no-renames --cached
+  git -C "$repo_root" diff --name-status --no-renames
+  if [[ -n "$base_ref" ]]; then
+    git -C "$repo_root" diff --name-status --no-renames "$base_ref...HEAD"
+  fi
+} | awk '$1 == "D" { print $2 }' | LC_ALL=C sort -u >"$deleted_types_file"
+collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"
 if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   echo "本地代码审查失败：检测到 combined diff（diff --cc/diff --combined），当前分片器不会猜测合并冲突语义；请先展开为普通文件 diff 后重试。" >&2
   exit 1
@@ -755,7 +799,7 @@ fi
 
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$build_preflight_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
