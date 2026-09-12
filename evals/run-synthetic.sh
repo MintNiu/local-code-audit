@@ -27,6 +27,18 @@ prepare_fixture() {
   mkdir -p "$target_dir"
   cp -R "$source_dir/." "$target_dir/"
   git -C "$target_dir" init -q
+  if [[ "$name" == "java-migration-delete" ]]; then
+    git -C "$target_dir" add .
+    git -C "$target_dir" commit -qm base
+    rm -f "$target_dir/sql/migration/V20260725__upload.sql"
+  elif [[ "$name" == "java-secret-config" ]]; then
+    git -C "$target_dir" add .
+    git -C "$target_dir" commit -qm base
+    sed -i '' \
+      -e 's#${OSS_ACCESS_KEY_ID}#AKID_EXAMPLE#' \
+      -e 's#${OSS_ACCESS_KEY_SECRET}#SECRET_EXAMPLE#' \
+      "$target_dir/application.yml"
+  fi
 }
 
 run_review() {
@@ -91,6 +103,24 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "migration" ]]; then
+      if ! grep -Eiq 'migration|迁移|已有库|升级路径|数据库' "$output_file"; then
+        echo "$name run $run missed the expected migration-upgrade risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "secret" ]]; then
+      if ! grep -Eiq 'secret|credential|凭据|密钥|AccessKey|Access Key|硬编码|字面量' "$output_file"; then
+        echo "$name run $run missed the expected literal-credential risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a credential finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     else
       if ! grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run did not return the clean marker: $output_file" >&2
@@ -116,6 +146,8 @@ run_review java-token-header 0
 run_review java-tenant-leak tenant
 run_review java-tenant-safe 0
 run_review java-maintenance-safe 0
+run_review java-migration-delete migration
+run_review java-secret-config secret
 
 truncation_output="$output_root/truncation.txt"
 truncation_exit=0
@@ -130,4 +162,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: divide=$runs, security=$runs, tenant=$runs, clean=$((runs * 4)), truncation=explicit-failure"
+echo "synthetic evaluation passed: divide=$runs, security=$runs, tenant=$runs, clean=$((runs * 4)), migration=$runs, secret=$runs, truncation=explicit-failure"

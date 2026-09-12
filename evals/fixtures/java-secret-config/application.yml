@@ -1,0 +1,4 @@
+storage:
+  endpoint: https://oss.example.com
+  access-key-id: ${OSS_ACCESS_KEY_ID}
+  access-key-secret: ${OSS_ACCESS_KEY_SECRET}
