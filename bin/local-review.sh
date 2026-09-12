@@ -804,23 +804,25 @@ collect_deleted_context_preflight() {
       printf 'P1 %s:1 - 当前提交删除类型 %s，但仓库内文件 %s:%s 仍 import 该类型；构建会失败。\n' \
         "$deleted_path" "$fqcn" "$match_path" "$match_line" >>"$output_file"
     done < <(rg -n --glob '*.java' --fixed-strings "import $fqcn;" "$repo_root" || true)
-    for context_file in "${context_files[@]}"; do
-      context_path="$context_file"
-      [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
-      [[ -f "$context_path" ]] || continue
-      import_line="$(awk -v wanted="$fqcn" '
-        $1 == "import" {
-          name = $2
-          if (name == "static") name = $3
-          gsub(/[;\r]/, "", name)
-          if (name == wanted) { print NR; exit }
-        }
-      ' "$context_path")"
-      if [[ -n "$import_line" ]]; then
-        printf 'P1 %s:1 - 当前提交删除类型 %s，但显式 context 文件 %s:%s 仍 import 该类型；下游编译或启动可能失败。\n' \
-          "$deleted_path" "$fqcn" "$context_file" "$import_line" >>"$output_file"
-      fi
-    done
+    if (( ${#context_files[@]} > 0 )); then
+      for context_file in "${context_files[@]}"; do
+        context_path="$context_file"
+        [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
+        [[ -f "$context_path" ]] || continue
+        import_line="$(awk -v wanted="$fqcn" '
+          $1 == "import" {
+            name = $2
+            if (name == "static") name = $3
+            gsub(/[;\r]/, "", name)
+            if (name == wanted) { print NR; exit }
+          }
+        ' "$context_path")"
+        if [[ -n "$import_line" ]]; then
+          printf 'P1 %s:1 - 当前提交删除类型 %s，但显式 context 文件 %s:%s 仍 import 该类型；下游编译或启动可能失败。\n' \
+            "$deleted_path" "$fqcn" "$context_file" "$import_line" >>"$output_file"
+        fi
+      done
+    fi
   done <"$deleted_types_file"
   LC_ALL=C sort -u -o "$output_file" "$output_file"
 }
@@ -957,19 +959,21 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   # Explicit context is available to every shard. This keeps deterministic
   # build-preflight evidence (especially cross-repository deleted-type checks)
   # from disappearing merely because the context file is not in the shard diff.
-  for context_file in "${context_files[@]}"; do
-    context_path="$context_file"
-    [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
-    [[ -f "$context_path" ]] || continue
-    if [[ "$context_path" == "$repo_root/"* ]]; then
-      printf '%s\n' "${context_path#"$repo_root/"}" >>"$chunk_paths_file"
-    else
-      printf '%s\n' "$context_file" >>"$chunk_paths_file"
-      if [[ "$context_path" == */src/main/java/* ]]; then
-        printf '%s\n' "src/main/java/${context_path##*/src/main/java/}" >>"$chunk_paths_file"
+  if (( ${#context_files[@]} > 0 )); then
+    for context_file in "${context_files[@]}"; do
+      context_path="$context_file"
+      [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
+      [[ -f "$context_path" ]] || continue
+      if [[ "$context_path" == "$repo_root/"* ]]; then
+        printf '%s\n' "${context_path#"$repo_root/"}" >>"$chunk_paths_file"
+      else
+        printf '%s\n' "$context_file" >>"$chunk_paths_file"
+        if [[ "$context_path" == */src/main/java/* ]]; then
+          printf '%s\n' "src/main/java/${context_path##*/src/main/java/}" >>"$chunk_paths_file"
+        fi
       fi
-    fi
-  done
+    done
+  fi
   LC_ALL=C sort -u -o "$chunk_paths_file" "$chunk_paths_file"
   if [[ ! -s "$chunk_paths_file" ]]; then
     echo "本地代码审查失败：无法从分片 $chunk_name 解析变更文件路径，拒绝使用全局路径列表放宽校验。" >&2
