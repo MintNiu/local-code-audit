@@ -67,6 +67,18 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "1" ]]; then
+      if ! grep -Eiq 'x-token|token|URL|URI|查询参数|泄漏|暴露' "$output_file"; then
+        echo "$name run $run missed the expected credential-in-URL risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -Eo 'P[0-3]' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     else
       if ! grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run did not return the clean marker: $output_file" >&2
@@ -87,6 +99,8 @@ run_review() {
 
 run_review java-divide 2
 run_review java-safe 0
+run_review java-token-url 1
+run_review java-token-header 0
 
 truncation_output="$output_root/truncation.txt"
 truncation_exit=0
@@ -101,4 +115,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: positive=$runs, clean=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: divide=$runs, token-url=$runs, clean=$((runs * 2)), truncation=explicit-failure"
