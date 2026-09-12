@@ -327,6 +327,7 @@ validate_response() {
   local response_file="$1"
   local output_file="$2"
   local kind_file="$3"
+  local paths_file="${4:-$changed_paths_file}"
   local response_text normalized_response done_reason
 
   if ! jq -e '(.response? | type) == "string" and (.response | length) > 0' >/dev/null <"$response_file"; then
@@ -361,7 +362,7 @@ validate_response() {
     return 12
   fi
 
-  if ! awk -v changed_file="$changed_paths_file" -v repo_root="$repo_root" '
+  if ! awk -v changed_file="$paths_file" -v repo_root="$repo_root" '
     BEGIN {
       while ((getline path < changed_file) > 0) {
         changed_paths[path] = 1
@@ -572,13 +573,14 @@ run_one_prompt() {
   local response_file="$2"
   local output_file="$3"
   local kind_file="$4"
-  local request_timeout="${5:-$timeout_seconds}"
+  local paths_file="${5:-$changed_paths_file}"
+  local request_timeout="${6:-$timeout_seconds}"
 
   if ! invoke_ollama "$prompt" "$response_file" "$request_timeout"; then
     echo "本地代码审查失败：Ollama 请求未完成。请检查 Ollama 服务、模型内存和上下文长度。" >&2
     return 11
   fi
-  validate_response "$response_file" "$output_file" "$kind_file"
+  validate_response "$response_file" "$output_file" "$kind_file" "$paths_file"
 }
 
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
@@ -632,7 +634,7 @@ fi
 
 if [[ "$needs_split" != true ]]; then
   initial_status=0
-  run_one_prompt "$(build_prompt "$diff_material")" "$response_file" "$response_output_file" "$response_kind_file" || initial_status=$?
+  run_one_prompt "$(build_prompt "$diff_material")" "$response_file" "$response_output_file" "$response_kind_file" "$changed_paths_file" "$timeout_seconds" || initial_status=$?
   if [[ "$initial_status" -eq 0 ]]; then
     cat "$response_output_file"
     exit 0
@@ -669,10 +671,21 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_response="$chunk_output_dir/$chunk_name.response.json"
   chunk_output="$chunk_output_dir/$chunk_name.txt"
   chunk_kind="$chunk_kind_dir/$chunk_name.kind"
+  chunk_paths_file="$chunk_output_dir/$chunk_name.paths"
+  : >"$chunk_paths_file"
+  while IFS= read -r candidate_path; do
+    [[ -n "$candidate_path" ]] || continue
+    if grep -Fq -- "$candidate_path" "$chunk_file"; then
+      printf '%s\n' "$candidate_path" >>"$chunk_paths_file"
+    fi
+  done <"$changed_paths_file"
+  if [[ ! -s "$chunk_paths_file" ]]; then
+    cp "$changed_paths_file" "$chunk_paths_file"
+  fi
   chunk_status=0
   original_num_predict="$num_predict"
   num_predict="$chunk_num_predict"
-  run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_timeout_seconds" || chunk_status=$?
+  run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" || chunk_status=$?
   num_predict="$original_num_predict"
   if [[ "$chunk_status" -ne 0 ]]; then
     echo "本地代码审查失败：以下是已完成分片的原始结果（仅供定位，整次审查不完整，不能视为通过）：" >&2

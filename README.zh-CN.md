@@ -79,6 +79,8 @@ local-review --repo /path/to/repo
 
 真实历史提交评测请按照 [evals/README.md](evals/README.md) 使用，并将清单、原始输出和人工标签保存在公开仓库之外。
 
+可以用 `evals/prepare-history-labels.sh` 生成不会覆盖已有标签的私有 TSV 标注模板，再人工确认召回率和误报率。
+
 `examples/` 目录只保存公开的格式说明。真实 few-shot 示例放在本机私有文件 `~/.local/share/local-review/examples.md`。
 
 完整调优过程和期间遇到的问题记录在 [docs/tuning-process.zh-CN.md](docs/tuning-process.zh-CN.md)。

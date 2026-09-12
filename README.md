@@ -79,6 +79,8 @@ The current gate is intentionally strict: it fails on extra P0–P3 findings, co
 
 For private historical-commit evaluation, use [evals/README.md](evals/README.md) and keep the manifest, raw outputs, and labels outside this public repository.
 
+Use `evals/prepare-history-labels.sh` to create non-overwriting private TSV label templates before calculating recall and false-positive rates.
+
 The `examples/` directory contains only the public format specification. Real few-shot examples belong in the local private file `~/.local/share/local-review/examples.md`.
 
 The tuning history and known failure modes are documented in [docs/tuning-process.zh-CN.md](docs/tuning-process.zh-CN.md).

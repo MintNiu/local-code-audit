@@ -18,7 +18,19 @@
 
 运行结果仍需人工确认真实问题、误报、行号和无问题提交，不能把模型输出直接当作标注。
 
+可以先生成不覆盖已有标签的人工标注模板：
+
+```bash
+./evals/prepare-history-labels.sh \
+  --manifest ~/.local/share/local-review/evals/platform-api-20.tsv \
+  --results ~/.local/share/local-review/evals/platform-api-results \
+  --labels-dir ~/.local/share/local-review/evals/platform-api-labels
+```
+
+模板是私有 TSV。逐条阅读 `source_result` 后填写 `finding_id`、严重级别、仓库相对路径、行号、`confirmed`/`false-positive`/`uncertain` 和备注；脚本不会覆盖已有人工标签。
+
 1. 固定至少 20 个真实历史提交作为评测集，并按提交切分训练示例和留出评测集。
+   不要随机打散相邻提交；优先按功能簇（例如同一接口迁移、同一安全修复链）整体分配到 train/dev/holdout，避免相邻提交泄漏。
 2. P0/P1 真实问题召回率目标不低于 90%；如果样本不足，记录实际样本数，不得用主观印象替代指标。
 3. 误报必须单独统计；每条输出都能定位到文件、行号和代码证据。
 4. 审查输出不能静默截断。API 错误、空响应或 `done_reason=length` 必须以非零状态退出并明确提示。
