@@ -51,6 +51,9 @@ local-review-local --repo /path/to/repo --base origin/main
 truncation gates. Its default budgets remain the validated 16k/4096 profile and
 it keeps the model resident for consecutive reviews; this avoids the timeout
 observed with oversized 32k/8192 requests on real cross-repository diffs.
+For higher recall stability on high-impact findings, it also defaults to greedy
+decoding (`OLLAMA_REVIEW_TOP_K=1`, `OLLAMA_REVIEW_TOP_P=1`); override either
+variable when you explicitly want a different sampling trade-off.
 Override any value with the same
 `OLLAMA_REVIEW_*` environment variables when needed. The team-safe `local-review`
 command remains the default and is the one to share with collaborators.
