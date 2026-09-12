@@ -272,6 +272,26 @@ redact_sensitive_text() {
   '
 }
 
+dedup_exact_findings() {
+  # Remove only byte-identical logical finding blocks. Distinct wording,
+  # paths, line ranges, and independently repairable findings remain visible.
+  awk '
+    function flush(    key) {
+      if (block == "") return
+      key = block
+      if (!seen[key]++) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    { block = block $0 "\n" }
+    END { flush() }
+  '
+}
+
 git -C "$repo_root" status --short >"$status_file"
 
 git -C "$repo_root" diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ --cached -- >"$staged_file"
@@ -523,7 +543,7 @@ validate_response() {
     return 10
   fi
 
-  response_text="$(jq -r '.response' <"$response_file" | redact_sensitive_text)"
+  response_text="$(jq -r '.response' <"$response_file" | redact_sensitive_text | dedup_exact_findings)"
   normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
 
   if [[ "$normalized_response" == "未发现阻塞问题" ]]; then
