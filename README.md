@@ -60,6 +60,10 @@ Override any value with the same
 `OLLAMA_REVIEW_*` environment variables when needed. The team-safe `local-review`
 command remains the default and is the one to share with collaborators.
 
+The launcher polls model availability at 100 ms intervals and reuses the successful
+automatic model probe, avoiding an extra startup delay without changing the timeout
+or fail-closed behavior.
+
 On this Mac, the same clean fixture took about 23s then 4s with `keep_alive=5m`,
 versus about 20s and 21s when unloading after every request. The five-minute
 residency is therefore intentional for consecutive local reviews; use

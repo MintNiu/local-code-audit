@@ -16,27 +16,30 @@ ollama_api_url="${ollama_api_url%/}"
 ollama_show_with_timeout() {
   local show_model="$1"
   local show_pid
-  local elapsed=0
+  local elapsed_tenths=0
 
   ollama show "$show_model" >/dev/null 2>&1 &
   show_pid=$!
   while kill -0 "$show_pid" 2>/dev/null; do
-    if (( elapsed >= ollama_probe_timeout_seconds )); then
+    if (( elapsed_tenths >= ollama_probe_timeout_seconds * 10 )); then
       kill "$show_pid" 2>/dev/null || true
       wait "$show_pid" 2>/dev/null || true
       return 124
     fi
-    sleep 1
-    elapsed=$((elapsed + 1))
+    sleep 0.1
+    elapsed_tenths=$((elapsed_tenths + 1))
   done
   wait "$show_pid"
 }
 
 default_model="devstral-small-2"
+default_model_available=false
 if ollama_show_with_timeout devstral-small-2-review-tuned; then
   default_model="devstral-small-2-review-tuned"
+  default_model_available=true
 elif ollama_show_with_timeout devstral-small-2-review; then
   default_model="devstral-small-2-review"
+  default_model_available=true
 fi
 
 model="${OLLAMA_REVIEW_MODEL:-$default_model}"
@@ -150,7 +153,7 @@ if [[ -z "$repo_root" ]]; then
   exit 2
 fi
 
-if ! ollama_show_with_timeout "$model"; then
+if [[ "$model" != "$default_model" || "$default_model_available" != true ]] && ! ollama_show_with_timeout "$model"; then
   echo "本地未找到模型: $model" >&2
   echo "请先执行: ollama pull $model" >&2
   exit 2
@@ -863,13 +866,10 @@ collect_build_preflight() {
       while [[ "$type_name" == *.* ]]; do
         import_rel="${type_name//./\/}.java"
         found=false
-        if (
-          cd "$repo_root"
-          rg --files -g '*.java' | awk -v suffix="$import_rel" '
+        if awk -v suffix="$import_rel" '
             { if (length($0) >= length(suffix) && substr($0, length($0) - length(suffix) + 1) == suffix) found = 1 }
             END { exit found ? 0 : 1 }
-          '
-        ); then
+          ' "$java_source_index"; then
           found=true
           break
         fi
@@ -934,8 +934,9 @@ changed_imports_file="$(mktemp "${TMPDIR:-/tmp}/local-review-imports.XXXXXX")"
 deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX")"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
 preflight_emitted_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-emitted.XXXXXX")"
+java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -985,6 +986,14 @@ awk '
     if (path != "" && name != "") print path "\t" name
   }
 ' "$chunk_input_file" | LC_ALL=C sort -u >"$changed_imports_file"
+if [[ -s "$changed_imports_file" ]]; then
+  (
+    cd "$repo_root"
+    rg --files -g '*.java' || true
+  ) >"$java_source_index"
+else
+  : >"$java_source_index"
+fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 {
   git -C "$repo_root" diff --name-status --no-renames --cached
@@ -1033,7 +1042,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
