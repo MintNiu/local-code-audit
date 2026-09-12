@@ -191,6 +191,8 @@ context_files[@]: unbound variable
 
 又加入脱敏的 `java-presigned-replay` 夹具，固定展示 15 分钟预签名 PUT、取消后旧票据仍可写入同一对象键、以及清理任务只扫描活动会话。个人 wrapper 的贪心采样在该夹具上返回 P1，普通采样曾出现漏报，因此该样例专门用于个人高性能 profile 的召回回归，不把单个样例外推成生产召回率。
 
+为避免直接通过 Ollama/Codex 使用 tuned 模型时规则落后于 wrapper，`config/Modelfile` 已同步加入凭据脱敏、构建完整性、迁移删除、预签名票据竞态和分片边界规则。重建 `devstral-small-2-review-tuned` 仅复用已有基础层；随后完整合成门禁 5 轮通过：`divide=5`、`security=5`、`tenant=5`、`clean=20`、`migration=5`、`secret=5`，预签名样例 5/5 命中，截断故障仍显式失败且各样例哈希稳定。
+
 ## 4. 当前运行链路
 
 ```text
