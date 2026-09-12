@@ -266,4 +266,31 @@ if [[ "$done_reason" == "length" ]]; then
   exit 1
 fi
 
-jq -r '.response' <<<"$response_json"
+response_text="$(jq -r '.response' <<<"$response_json")"
+normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
+
+# Do not treat a generic summary as a successful audit. A clean result must be
+# exactly the explicit no-finding marker; findings must carry both severity and
+# a concrete file/line reference. On validation failure, show the raw model
+# response so no finding is silently hidden from the user.
+if [[ "$normalized_response" == "未发现阻塞问题" ]]; then
+  printf '%s\n' "$response_text"
+  exit 0
+fi
+
+has_severity=false
+has_location=false
+if grep -Eq 'P[0-3]|信息' <<<"$response_text"; then
+  has_severity=true
+fi
+if grep -Eq '([[:alnum:]_.+/\\-]+\.[[:alnum:]_.+\\-]+[,:：][[:space:]]*(line[[:space:]]*)?[0-9]+|文件路径|文件：)' <<<"$response_text"; then
+  has_location=true
+fi
+
+if [[ "$has_severity" != true || "$has_location" != true ]]; then
+  echo "本地代码审查失败：模型输出缺少可验证的严重级别或文件/行号，未将通用总结当作审查结果。原始输出如下：" >&2
+  printf '%s\n' "$response_text" >&2
+  exit 1
+fi
+
+printf '%s\n' "$response_text"

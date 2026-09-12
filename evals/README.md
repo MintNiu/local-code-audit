@@ -6,6 +6,18 @@
 
 公开的合成回归入口是 `./evals/run-synthetic.sh`，目标、夹具和当前状态记录在 [goal.md](goal.md)。它用于每次调参后的快速回归，但不能替代真实历史提交评测。
 
+真实历史提交使用 `./evals/run-history.sh`。它只读取本地仓库，在临时目录展开父提交并应用目标 diff，把原始结果和元数据写入你指定的私有目录；不要把该目录指向本公开仓库。
+
+```bash
+./evals/run-history.sh \
+  --repo /path/to/local/repo \
+  --manifest ~/.local/share/local-review/evals/platform-api-20.tsv \
+  --out-dir ~/.local/share/local-review/evals/platform-api-results \
+  --limit 1
+```
+
+运行结果仍需人工确认真实问题、误报、行号和无问题提交，不能把模型输出直接当作标注。
+
 1. 固定至少 20 个真实历史提交作为评测集，并按提交切分训练示例和留出评测集。
 2. P0/P1 真实问题召回率目标不低于 90%；如果样本不足，记录实际样本数，不得用主观印象替代指标。
 3. 误报必须单独统计；每条输出都能定位到文件、行号和代码证据。
