@@ -952,6 +952,23 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
       printf '%s\n' "$candidate_path" >>"$chunk_paths_file"
     fi
   done <"$changed_paths_file"
+  # Explicit context is available to every shard. This keeps deterministic
+  # build-preflight evidence (especially cross-repository deleted-type checks)
+  # from disappearing merely because the context file is not in the shard diff.
+  for context_file in "${context_files[@]}"; do
+    context_path="$context_file"
+    [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
+    [[ -f "$context_path" ]] || continue
+    if [[ "$context_path" == "$repo_root/"* ]]; then
+      printf '%s\n' "${context_path#"$repo_root/"}" >>"$chunk_paths_file"
+    else
+      printf '%s\n' "$context_file" >>"$chunk_paths_file"
+      if [[ "$context_path" == */src/main/java/* ]]; then
+        printf '%s\n' "src/main/java/${context_path##*/src/main/java/}" >>"$chunk_paths_file"
+      fi
+    fi
+  done
+  LC_ALL=C sort -u -o "$chunk_paths_file" "$chunk_paths_file"
   if [[ ! -s "$chunk_paths_file" ]]; then
     echo "本地代码审查失败：无法从分片 $chunk_name 解析变更文件路径，拒绝使用全局路径列表放宽校验。" >&2
     exit 1
