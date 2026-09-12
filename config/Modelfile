@@ -1,7 +1,7 @@
 FROM devstral-small-2-review:latest
 
 PARAMETER num_ctx 16384
-PARAMETER temperature 0.15
+PARAMETER temperature 0
 PARAMETER seed 42
 PARAMETER top_k 40
 PARAMETER top_p 0.9

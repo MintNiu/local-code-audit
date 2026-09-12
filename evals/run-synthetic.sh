@@ -58,14 +58,14 @@ run_review() {
     if [[ "$expected_findings" == "2" ]]; then
       grep -Eq 'Integer|null|空' "$output_file"
       grep -Eq '除|ArithmeticException|除数' "$output_file"
-      finding_count="$(grep -Ec '^[-*] \[(P0|P1|P2|P3|信息)\]' "$output_file" || true)"
+      finding_count="$(grep -Eo 'P[0-3]' "$output_file" | wc -l | tr -d ' ')"
       if [[ "$finding_count" -ne 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 2: $output_file" >&2
         return 1
       fi
     else
       grep -q '未发现阻塞问题' "$output_file"
-      if grep -Eq '^[-*] \[(P0|P1|P2|P3|信息)\]' "$output_file"; then
+      if grep -Eq 'P[0-3]' "$output_file"; then
         echo "$name run $run reported a finding for the clean fixture: $output_file" >&2
         return 1
       fi

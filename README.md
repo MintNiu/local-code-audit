@@ -50,6 +50,8 @@ The default context is 16k; set `OLLAMA_REVIEW_NUM_CTX=32768` for larger changes
 
 Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during comparisons unless the evaluation record includes the override.
 
+The default temperature is `0` for repeatable local audits. This is a stability setting, not a substitute for human verification.
+
 The default `keep_alive=0` unloads the model after each review. Set `OLLAMA_REVIEW_KEEP_ALIVE=5m` when running several reviews consecutively.
 
 ## Evaluation

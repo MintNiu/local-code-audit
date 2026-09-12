@@ -50,6 +50,8 @@ local-review --repo /path/to/repo
 
 默认采样参数为 `top_k=40`、`top_p=0.9`；除非在评测记录中明确记录覆盖值，否则不要随意修改。
 
+默认温度为 `0`，用于提高本地审查的可重复性；它不能替代人工复核。
+
 默认 `keep_alive=0`，每次审查后释放模型。连续审查时可以设置 `OLLAMA_REVIEW_KEEP_ALIVE=5m`。
 
 ## 评测
