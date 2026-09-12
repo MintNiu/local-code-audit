@@ -61,7 +61,7 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
-      finding_count="$(grep -Eo 'P[0-3]' "$output_file" | wc -l | tr -d ' ')"
+      finding_count="$(grep -E '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
       if [[ "$finding_count" -ne 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 2: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
@@ -73,7 +73,7 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
-      finding_count="$(grep -Eo 'P[0-3]' "$output_file" | wc -l | tr -d ' ')"
+      finding_count="$(grep -E '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
       if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
@@ -85,7 +85,7 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
-      finding_count="$(grep -Eo 'P[0-3]' "$output_file" | wc -l | tr -d ' ')"
+      finding_count="$(grep -E '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
       if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
@@ -97,7 +97,7 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
-      if grep -Eq 'P[0-3]' "$output_file"; then
+      if grep -Eq '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file"; then
         echo "$name run $run reported a finding for the clean fixture: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
