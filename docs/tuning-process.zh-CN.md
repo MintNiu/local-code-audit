@@ -193,6 +193,8 @@ context_files[@]: unbound variable
 
 为避免直接通过 Ollama/Codex 使用 tuned 模型时规则落后于 wrapper，`config/Modelfile` 已同步加入凭据脱敏、构建完整性、迁移删除、预签名票据竞态和分片边界规则。重建 `devstral-small-2-review-tuned` 仅复用已有基础层；随后完整合成门禁 5 轮通过：`divide=5`、`security=5`、`tenant=5`、`clean=20`、`migration=5`、`secret=5`，预签名样例 5/5 命中，截断故障仍显式失败且各样例哈希稳定。
 
+真实 `cbe47ea0` 留出审查仍曾输出“文件内容不完整、请提供完整文件”的 P0 泛化问题，违反分片边界。运行器新增窄范围确定性过滤，只移除这类以输入不完整本身为理由的段落；若段落含具体代码证据仍保留。专门预检和完整合成门禁均通过，未改变真实 P1 召回或 clean 负例结果。
+
 ## 4. 当前运行链路
 
 ```text

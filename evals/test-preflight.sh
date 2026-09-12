@@ -101,6 +101,22 @@ grep -F '仓库内文件 src/main/java/com/example/api/client/Consumer.java' "$c
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P0 src/main/java/com/example/api/client/Client.java:1-93 - 文件内容不完整，缺少类声明和字段定义，导致无法验证代码逻辑是否正确。\\n\\n影响：无法确定代码是否符合项目规则。\\n\\n修复建议：提供完整的文件内容。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if ! shard_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" 2>/dev/null)"; then
+  echo 'unsupported shard-boundary finding caused review failure' >&2
+  exit 1
+fi
+[[ "$shard_output" == '未发现阻塞问题' ]] || {
+  echo 'unsupported shard-boundary finding was not filtered' >&2
+  printf '%s\n' "$shard_output" >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 printf '{"response":"P1 src/main/java/com/example/api/client/Client.java:5 - incomplete","done":false,"done_reason":"length"}\n'
 EOF
 chmod +x "$fake_bin/curl"

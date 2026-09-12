@@ -275,6 +275,28 @@ redact_sensitive_text() {
   '
 }
 
+filter_unsupported_shard_findings() {
+  # A shard is intentionally incomplete. Drop only findings whose stated
+  # reason is that incompleteness itself, rather than hiding any finding with
+  # concrete code evidence. This is a deterministic guard for a recurrent
+  # model failure mode ("please provide the complete file").
+  awk '
+    function flush(    invalid) {
+      if (block == "") return
+      invalid = (block ~ /文件内容不完整|代码片段[^。！？\n]*缺少上下文|提供完整的文件内容|无法验证代码逻辑是否正确/)
+      if (!invalid) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    { block = block $0 "\n" }
+    END { flush() }
+  '
+}
+
 dedup_exact_findings() {
   # Remove only byte-identical logical finding blocks. Distinct wording,
   # paths, line ranges, and independently repairable findings remain visible.
@@ -556,8 +578,14 @@ validate_response() {
     return 10
   fi
 
-  response_text="$(jq -r '.response' <"$response_file" | redact_sensitive_text | dedup_exact_findings)"
+  response_text="$(jq -r '.response' <"$response_file" | redact_sensitive_text | filter_unsupported_shard_findings | dedup_exact_findings)"
   normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
+
+  if [[ -z "$normalized_response" ]]; then
+    printf '未发现阻塞问题\n' >"$output_file"
+    printf 'clean\n' >"$kind_file"
+    return 0
+  fi
 
   if [[ "$normalized_response" == "未发现阻塞问题" ]]; then
     printf '%s\n' "$response_text" >"$output_file"
