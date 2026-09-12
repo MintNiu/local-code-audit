@@ -255,8 +255,6 @@ chunk_prompt_prefix="$(
       printf '\n--- 项目说明 README.md ---\n'
       cat "$repo_root/README.md"
     fi
-    printf '\n--- Git status --short ---\n'
-    cat "$status_file"
   }
 )"
 
@@ -272,10 +270,15 @@ diff_material="$(
 build_prompt() {
   local diff_text="$1"
   local prefix="$prompt_prefix"
+  local chunk_status_file="${3:-}"
   if [[ "${2:-with-examples}" == "without-examples" ]]; then
     prefix="$chunk_prompt_prefix"
   fi
   printf '%s\n' "$prefix"
+  if [[ "${2:-with-examples}" == "without-examples" && -n "$chunk_status_file" ]]; then
+    printf '\n--- 当前审查分片文件列表 ---\n'
+    cat "$chunk_status_file"
+  fi
   printf '%s\n' "$diff_text"
   printf '\n--- 以上材料结束；审查规则已作为系统指令发送 ---\n'
 }
@@ -667,11 +670,11 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
     printf '%s\n' "--- 当前审查分片：$chunk_name ---"
     cat "$chunk_file"
   )"
-  chunk_prompt="$(build_prompt "$chunk_text" without-examples)"
   chunk_response="$chunk_output_dir/$chunk_name.response.json"
   chunk_output="$chunk_output_dir/$chunk_name.txt"
   chunk_kind="$chunk_kind_dir/$chunk_name.kind"
   chunk_paths_file="$chunk_output_dir/$chunk_name.paths"
+  chunk_status_file="$chunk_output_dir/$chunk_name.status"
   : >"$chunk_paths_file"
   while IFS= read -r candidate_path; do
     [[ -n "$candidate_path" ]] || continue
@@ -683,6 +686,8 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
     echo "本地代码审查失败：无法从分片 $chunk_name 解析变更文件路径，拒绝使用全局路径列表放宽校验。" >&2
     exit 1
   fi
+  sed 's/^/ M /' "$chunk_paths_file" >"$chunk_status_file"
+  chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file")"
   chunk_status=0
   original_num_predict="$num_predict"
   num_predict="$chunk_num_predict"
