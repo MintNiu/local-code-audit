@@ -126,6 +126,28 @@ final class TokenProxy {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/QueryTokenProxy.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+
+final class QueryTokenProxy {
+    String read(HttpServletRequest request) {
+        return request.getParameter("x-token");
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/Divide.java" <<'EOF'
+package com.example.api.client;
+
+final class Divide {
+    int divide(Integer a, Integer b) {
+        return a / b;
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/Client.java" <<'EOF'
 package com.example.api.client;
 
@@ -153,6 +175,64 @@ PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" LOCAL_R
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissing' "$capture" >/dev/null
 grep -F '凭据值被拼接到 URL 查询参数或路径中' "$capture" >/dev/null
+grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "--data-binary" && "$argument" == @* ]]; then
+    cp "${argument#@}" "$LOCAL_REVIEW_CAPTURE"
+  fi
+  previous="$argument"
+done
+printf '{"response":"P1 src/main/java/com/example/api/client/QueryTokenProxy.java:7 - 认证令牌从 URL 查询参数读取，可能进入日志。影响：凭据泄露。修复建议：只用请求头。验证方式：检查日志。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+duplicate_security_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+duplicate_security_count="$(printf '%s\n' "$duplicate_security_output" | grep -F '认证令牌从 URL 查询参数读取' | wc -l | tr -d ' ')"
+[[ "$duplicate_security_count" == "1" ]] || {
+  echo 'security preflight and model duplicate were not collapsed' >&2
+  printf '%s\n' "$duplicate_security_output" >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "-d" ]]; then
+    printf '%s' "$argument" >"$LOCAL_REVIEW_CAPTURE"
+  elif [[ "$previous" == "--data-binary" && "$argument" == @* ]]; then
+    cp "${argument#@}" "$LOCAL_REVIEW_CAPTURE"
+  fi
+  previous="$argument"
+done
+printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+
+java_division_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+for java_division_header in 'Integer 包装类型参与除法时未见非空保护' '除法分母未见非零保护'; do
+  java_division_line="$(printf '%s\n' "$java_division_output" | grep -n "Divide.java:.* - $java_division_header" | head -1 | cut -d: -f1)"
+  [[ -n "$java_division_line" ]] || {
+    echo "missing Java division preflight header: $java_division_header" >&2
+    printf '%s\n' "$java_division_output" >&2
+    exit 1
+  }
+  java_division_block="$(printf '%s\n' "$java_division_output" | sed -n "${java_division_line},$((java_division_line + 3))p")"
+  if ! grep -Fq '影响：' <<<"$java_division_block" || \
+     ! grep -Fq '修复建议：' <<<"$java_division_block" || \
+     ! grep -Fq '验证方式：' <<<"$java_division_block"; then
+    echo "Java division preflight finding fields were not kept in one block: $java_division_header" >&2
+    printf '%s\n' "$java_division_output" >&2
+    exit 1
+  fi
+done
+
 grep -Fx 'devstral-small-2-review-tuned' "$resolved_model_capture" >/dev/null
 [[ ! -e "$fixture_root/textconv.marker" ]] || {
   echo 'git diff executed a configured textconv filter' >&2

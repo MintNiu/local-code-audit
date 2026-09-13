@@ -558,9 +558,17 @@ filter_security_preflight_duplicates() {
   filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-security-filter.XXXXXX")"
   awk '
     FILENAME == ARGV[1] {
-      if ($0 ~ /凭据值被拼接到 URL/) {
+      if ($0 ~ /凭据值被拼接到 URL|认证令牌从 URL 查询参数读取/) {
         key = $2
         security[key] = 1
+      }
+      if ($0 ~ /Integer 包装类型参与除法时未见非空保护/) {
+        key = $2
+        java_null[key] = 1
+      }
+      if ($0 ~ /除法分母未见非零保护/) {
+        key = $2
+        java_zero[key] = 1
       }
       next
     }
@@ -571,7 +579,10 @@ filter_security_preflight_duplicates() {
       sub(/[[:space:]]+-.*$/, "", header)
       sub(/-[0-9]+$/, "", header)
       key = header
-      if (!(key in security) || block !~ /凭据|token|secret|URL|URI|查询参数|路径/) {
+      duplicate_security = (key in security && block ~ /凭据|token|secret|URL|URI|查询参数|路径/)
+      duplicate_java_null = (key in java_null && block ~ /null|NullPointerException|拆箱|包装类型/)
+      duplicate_java_zero = (key in java_zero && block ~ /除零|除数|ArithmeticException|分母/)
+      if (!duplicate_security && !duplicate_java_null && !duplicate_java_zero) {
         if (printed) printf "\n"
         printf "%s", block
         printed = 1
@@ -583,6 +594,16 @@ filter_security_preflight_duplicates() {
     END { if (ARGC > 2) flush() }
   ' "$preflight_file" "$findings_file" >"$filtered_file"
   mv "$filtered_file" "$findings_file"
+}
+
+dedup_preflight_blocks() {
+  local preflight_file="$1"
+  local deduped_file
+
+  [[ -s "$preflight_file" ]] || return 0
+  deduped_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-dedup.XXXXXX")"
+  awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }' "$preflight_file" >"$deduped_file"
+  mv "$deduped_file" "$preflight_file"
 }
 
 sort_findings_by_severity() {
@@ -718,7 +739,7 @@ Spring 客户端负例：`@Bean` 方法接收由容器注入的 `Platform*Proper
 
 分片边界：当前请求可能只包含一个文件或 unified-diff hunk 的片段；未在本分片展示的方法、字段、调用链和构建文件均视为未知。不得仅因其他代码不在当前分片就报告“代码被截断/实现不完整/缺少方法、校验、日志或异常处理”；每条问题必须由当前分片中可见的具体证据支持。跨分片的结论只能依赖系统预检或明确附带的上下文文件。
 
-安全判定硬规则：仅凭 `header("X-Token", token)`、`Authorization` 或其他 HTTP header 传递 token，且目标是明确的内部 URI、差异中没有日志记录、外部跳转、URL query/path 拼接或禁止该 header 的契约时，必须视为安全负例并输出“未发现阻塞问题”。不要声称 header 会“必然”进入日志；header 泄漏只有在差异直接展示日志、持久化、外部边界或契约冲突时才可报告。`token` 拼进 URL query/path 则必须单独报告凭证泄漏。
+安全判定硬规则：仅凭 `header("X-Token", token)`、`Authorization` 或其他 HTTP header 传递 token，且目标是明确的内部 URI、差异中没有日志记录、外部跳转、URL query/path 拼接或禁止该 header 的契约时，必须视为安全负例并输出“未发现阻塞问题”。不要声称 header 会“必然”进入日志；header 泄漏只有在差异直接展示日志、持久化、外部边界或契约冲突时才可报告。`token` 拼进 URL query/path，或从 `request.getParameter("x-token")`、`getParameter(TOKEN_HEADER)` 等 URL 查询参数读取认证令牌，则必须单独报告凭证可能进入访问日志、代理历史或 Referer 的 P1 泄漏风险。
 
 最终硬门槛：逐条删除依赖“可能/如果未来/未证明/建议确认”的候选；这些措辞本身表明当前差异没有可验证反例。不要把防御性偏好、未来兼容性、测试参数化、日志审计或代码注释问题升级为缺陷。若删完没有证据充分的问题，只输出“未发现阻塞问题”。
 
@@ -1333,7 +1354,7 @@ collect_build_preflight() {
         "$changed_path" "$import_line" "$import_name" >>"$output_file"
     fi
   done <"$imports_file"
-  LC_ALL=C sort -u -o "$output_file" "$output_file"
+  dedup_preflight_blocks "$output_file"
 }
 
 collect_deleted_context_preflight() {
@@ -1385,16 +1406,17 @@ collect_deleted_context_preflight() {
       done
     fi
   done <"$deleted_types_file"
-  LC_ALL=C sort -u -o "$output_file" "$output_file"
+  dedup_preflight_blocks "$output_file"
 }
 
 collect_security_preflight() {
   local diff_file="$1"
   local output_file="$2"
 
-  # Catch the unambiguous credential-in-URL pattern before model inference.
-  # This is intentionally narrow: only added lines that visibly concatenate a
-  # token/secret-like value into a query or path are reported.
+  # Catch unambiguous credential-in-URL patterns before model inference. This
+  # is intentionally narrow: only added lines that visibly concatenate a
+  # token/secret-like value into a query/path, or read an authentication token
+  # from a URL query parameter, are reported.
   awk '
     function flush_hunk() {
       if (hunk_start == "") return
@@ -1426,13 +1448,95 @@ collect_security_preflight() {
             added ~ /\+[[:space:]]*(token|secret|password|passwd|apiKey|accessKey)([^[:alnum:]_]|$)/) {
           printf "P1 %s:%d - 凭据值被拼接到 URL 查询参数或路径中，可能通过请求目标泄漏。\n影响：token/secret 等敏感值会进入 URL，可能被代理、网关或访问日志持久化。\n修复建议：改用受保护的请求头或安全的内部认证通道，避免把秘密放入 URL。\n验证方式：检查最终请求 URI 和网关/代理日志，确认 URL 不再包含敏感值。\n\n", path, line_no
         }
+        if (added ~ /getParameter[[:space:]]*\([^[:alnum:]_]*(x-token|token|authorization|TOKEN_HEADER)/) {
+          printf "P1 %s:%d - 认证令牌从 URL 查询参数读取，可能进入访问日志、代理历史或 Referer。\n影响：请求参数中的 token 可能在到达下游前被日志或外部引用链持久化，造成会话凭据泄漏。\n修复建议：仅接受受保护的请求头或明确的安全认证通道，不要从 URL 查询参数读取认证令牌。\n验证方式：用带有 x-token 查询参数的请求检查访问日志、代理记录和下游请求，确认令牌不会进入 URL 相关记录。\n\n", path, line_no
+        }
         line_no++
       } else if (substr($0, 1, 1) == " ") {
         line_no++
       }
     }
   ' "$diff_file" >>"$output_file"
-  LC_ALL=C sort -u -o "$output_file" "$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_java_division_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # This deliberately recognizes only a complete visible diff hunk that adds
+  # a method with boxed Integer parameters and an unguarded division. It does
+  # not infer contracts for ordinary int arithmetic, and it does not report a
+  # risk when a null/zero guard is visible in the same hunk.
+  awk '
+    function emit_hunk(    null_risk, zero_risk) {
+      if (path == "" || hunk_start == "") return
+      null_risk = has_integer_parameter && has_division && !has_null_guard
+      zero_risk = has_integer_parameter && has_division && !has_zero_guard
+      if (null_risk) {
+        printf "P1 %s:%d - Integer 包装类型参与除法时未见非空保护，自动拆箱可能抛出 NullPointerException。\n影响：调用方传入 null 时方法会在进入业务处理前失败，导致请求或任务异常。\n修复建议：在除法前显式拒绝 null，或改用基本类型并由边界层完成输入校验。\n验证方式：分别以 null 参数调用方法，确认返回受控错误而不是 NullPointerException。\n\n", path, integer_line
+      }
+      if (zero_risk) {
+        printf "P1 %s:%d - 除法分母未见非零保护，运行时可能抛出 ArithmeticException。\n影响：分母为 0 时请求或任务会异常终止，可能造成接口失败或批处理任务中断。\n修复建议：在执行除法前拒绝 0，或定义并验证分母为 0 时的业务结果。\n验证方式：分别以分母为 0 和非 0 的输入执行单元测试，确认错误路径和正常路径均符合契约。\n\n", path, division_line
+      }
+    }
+    function reset_hunk() {
+      has_integer_parameter = 0
+      has_division = 0
+      has_null_guard = 0
+      has_zero_guard = 0
+      integer_line = 0
+      division_line = 0
+    }
+    /^diff --git / {
+      emit_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      hunk_start = ""
+      reset_hunk()
+      next
+    }
+    /^\+\+\+ b\// {
+      emit_hunk()
+      path = substr($0, 7)
+      hunk_start = ""
+      reset_hunk()
+      next
+    }
+    /^@@ / {
+      emit_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      hunk_start = hunk + 0
+      reset_hunk()
+      line_no = hunk_start
+      next
+    }
+    {
+      if (hunk_start == "") next
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        if (text ~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/ && text ~ /\([^\n]*(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/) {
+          has_integer_parameter = 1
+          if (integer_line == 0) integer_line = line_no
+        }
+        if (text ~ /return[[:space:]]+[^;]*\/[^;]+;/ || text ~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)[^;=]*=[^;]*\/[^;]+;/) {
+          has_division = 1
+          if (division_line == 0) division_line = line_no
+        }
+        if (text ~ /(==|!=|instanceof|requireNonNull|isNull|Objects\.requireNonNull|Objects\.nonNull)/ && text ~ /null/) has_null_guard = 1
+        if (text ~ /(^|[^[:alnum:]_])[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(==|!=|<=|>=|<|>)[[:space:]]*0([^[:alnum:]_]|$)/ || text ~ /(^|[^[:alnum:]_])0[[:space:]]*(==|!=|<=|>=|<|>)[[:space:]]*[A-Za-z_]/) has_zero_guard = 1
+        if (prefix == "+") line_no++
+      } else if (prefix == "-") {
+        next
+      }
+      if (prefix == " ") line_no++
+    }
+    END { emit_hunk() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
 }
 
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
@@ -1506,6 +1610,7 @@ else
 fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file"
+collect_java_division_preflight "$chunk_input_file" "$build_preflight_file"
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames
