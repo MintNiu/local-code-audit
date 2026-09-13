@@ -1482,6 +1482,7 @@ collect_security_preflight() {
       ssrf_emitted = 0
       path_candidate = 0
       path_line = 0
+      path_changed = 0
       path_access = 0
       path_guard = 0
       path_emitted = 0
@@ -1490,7 +1491,7 @@ collect_security_preflight() {
       if (hunk_start == "") return
       line_no = hunk_start
       hunk_start = ""
-      if (path_candidate && path_access && !path_guard) emit_path_traversal()
+      if (path_changed && path_candidate && path_access && !path_guard) emit_path_traversal()
       reset_hunk()
     }
     /^diff --git / {
@@ -1516,7 +1517,33 @@ collect_security_preflight() {
     }
     {
       if (hunk_start == "") next
-      if (substr($0, 1, 1) == "+") {
+      prefix = substr($0, 1, 1)
+      code = (prefix == "+" ? substr($0, 2) : $0)
+      trimmed_code = code
+      sub(/^[[:space:]]+/, "", trimmed_code)
+      if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/) {
+        if (code ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect)[^)]*\)/) {
+          input_assignment = code
+          sub(/[[:space:]]*=.*/, "", input_assignment)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", input_assignment)
+          split(input_assignment, assignment_fields, /[[:space:]]+/)
+          input_name = assignment_fields[length(assignment_fields)]
+          if (input_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) url_input_vars[input_name] = 1
+        }
+        if (code ~ /ALLOWED_HOST|allowlist|allowedHosts|getHost[[:space:]]*\(|getScheme[[:space:]]*\(|startsWith[[:space:]]*\([[:space:]]*https/) url_guard = 1
+        if (code ~ /\.resolve[[:space:]]*\([[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/ ||
+            code ~ /new[[:space:]]+File[[:space:]]*\([^,]+,[[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/) {
+          path_candidate = 1
+          if (path_line == 0) path_line = line_no
+          if (prefix == "+") path_changed = 1
+        }
+        if (code ~ /Files[[:space:]]*\.|FileInputStream|FileOutputStream|FileSystemResource|Resource[[:space:]]*\(/) {
+          path_access = 1
+          if (prefix == "+") path_changed = 1
+        }
+        if (code ~ /\.normalize[[:space:]]*\(|\.toRealPath[[:space:]]*\(|\.getCanonicalPath[[:space:]]*\(|\.startsWith[[:space:]]*\(/) path_guard = 1
+      }
+      if (prefix == "+") {
         added = substr($0, 2)
         trimmed = added
         sub(/^[[:space:]]+/, "", trimmed)
@@ -1545,9 +1572,13 @@ collect_security_preflight() {
         if (added ~ /\.resolve[[:space:]]*\([[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/ ||
             added ~ /new[[:space:]]+File[[:space:]]*\([^,]+,[[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/) {
           path_candidate = 1
+          path_changed = 1
           if (path_line == 0) path_line = line_no
         }
-        if (added ~ /Files[[:space:]]*\.|File(Input|Output)Stream|FileSystemResource|Resource[[:space:]]*\()/) path_access = 1
+        if (added ~ /Files[[:space:]]*\.|FileInputStream|FileOutputStream|FileSystemResource|Resource[[:space:]]*\(/) {
+          path_access = 1
+          path_changed = 1
+        }
         if (added ~ /\.normalize[[:space:]]*\(|\.toRealPath[[:space:]]*\(|\.getCanonicalPath[[:space:]]*\(|\.startsWith[[:space:]]*\(/) path_guard = 1
         url_risk = 0
         if (added ~ /(^|[?&]|\/)([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key|auth|sig|signature|credential|session[_-]?key)[A-Za-z0-9_.-]*)[=\/]/ &&
@@ -1568,7 +1599,7 @@ collect_security_preflight() {
           printf "P1 %s:%d - 认证令牌从 URL 查询参数读取，可能进入访问日志、代理历史或 Referer。\n影响：请求参数中的 token 可能在到达下游前被日志或外部引用链持久化，造成会话凭据泄漏。\n修复建议：仅接受受保护的请求头或明确的安全认证通道，不要从 URL 查询参数读取认证令牌。\n验证方式：用带有 x-token 查询参数的请求检查访问日志、代理记录和下游请求，确认令牌不会进入 URL 相关记录。\n\n", path, line_no
         }
         line_no++
-      } else if (substr($0, 1, 1) == " ") {
+      } else if (prefix == " ") {
         line_no++
       }
     }

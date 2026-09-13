@@ -250,6 +250,23 @@ final class PathTraversalSafe {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/SsrfContext.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.web.client.RestTemplate;
+
+final class SsrfContext {
+    String fetch(HttpServletRequest request) {
+        String target = request.getParameter("url");
+        return target;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/SsrfContext.java
+git -C "$repo" commit -qm ssrf-context-base
+perl -0pi -e 's/return target;/return new RestTemplate().getForObject(target, String.class);/' "$repo/src/main/java/com/example/api/client/SsrfContext.java"
+
 cat >"$repo/src/main/java/com/example/api/client/LongMethodDivide.java" <<'EOF'
 package com.example.api.client;
 
@@ -336,6 +353,7 @@ grep -F 'P1 src/main/java/com/example/api/client/QueryTokenAlias.java' "$capture
 grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/SsrfPreflight.java' "$capture" >/dev/null
 grep -F '服务端请求伪造' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/SsrfContext.java' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/PathTraversalPreflight.java' "$capture" >/dev/null || {
   echo 'missing path traversal preflight' >&2
   cat "$capture" >&2
