@@ -102,6 +102,8 @@ An individual hunk that still exceeds the byte budget, or a Git combined diff (`
 
 The byte budget applies to collected Git diff material only. Project rules, explicit context files, README content, and the system prompt are additional context; raise `OLLAMA_REVIEW_NUM_CTX` or split the review further when those inputs are large.
 
+Transient Ollama transport failures are retried up to two times within the total review timeout by default. Set `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` to disable retries or tune it for local stability.
+
 The output gate rejects generic or incomplete summaries: every finding paragraph must include a severity, a file/line location that matches a changed file or an explicitly supplied context file, and explicit `影响：`, `修复建议：`, and `验证方式：` fields. A basename is accepted only when it is unambiguous in the review set.
 
 Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during comparisons unless the evaluation record includes the override.

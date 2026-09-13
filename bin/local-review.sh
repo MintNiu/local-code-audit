@@ -52,6 +52,7 @@ total_timeout_seconds="${OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS:-$timeout_seconds}"
 max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
 chunk_timeout_seconds="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-180}"
 chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
+retry_attempts="${OLLAMA_REVIEW_RETRY_ATTEMPTS:-2}"
 active_request_body_file=""
 current_evidence_file=""
 
@@ -77,6 +78,7 @@ usage() {
 当差异超过 OLLAMA_REVIEW_MAX_DIFF_BYTES（默认 3000）时，会按文件再按 unified diff hunk 分片审查；任一分片失败，整次审查失败。
 分片默认使用 OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180 和 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048，避免单个分片长时间占用服务；可按项目需要覆盖。
 整次审查默认受 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 限制（未设置时沿用单次超时），防止多个分片串行等待过久。
+Ollama 瞬时传输失败默认最多重试 2 次；可用 OLLAMA_REVIEW_RETRY_ATTEMPTS 覆盖，重试仍受整次审查总超时约束。
 EOF
 }
 
@@ -197,6 +199,7 @@ if (( num_ctx < 256 )); then
   exit 2
 fi
 validate_positive_integer OLLAMA_REVIEW_NUM_PREDICT "$num_predict"
+validate_nonnegative_integer OLLAMA_REVIEW_RETRY_ATTEMPTS "$retry_attempts"
 
 if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds < 30 )); then
   echo "OLLAMA_REVIEW_TIMEOUT_SECONDS 必须是至少 30 秒的整数。" >&2
@@ -679,18 +682,7 @@ invoke_ollama() {
   local request_timeout="${3:-$timeout_seconds}"
   local request_body_file
   local curl_status
-  local effective_timeout remaining_seconds now_epoch
-
-  now_epoch="$(date +%s)"
-  remaining_seconds=$((review_deadline_epoch - now_epoch))
-  if (( remaining_seconds <= 0 )); then
-    echo "本地代码审查失败：已达到整次审查总超时 ${total_timeout_seconds} 秒。" >&2
-    return 124
-  fi
-  effective_timeout="$request_timeout"
-  if (( effective_timeout > remaining_seconds )); then
-    effective_timeout="$remaining_seconds"
-  fi
+  local effective_timeout remaining_seconds now_epoch attempt max_attempts sleep_seconds
 
   if ! request_body_file="$(mktemp "${TMPDIR:-/tmp}/local-review-request.XXXXXX")"; then
     echo "本地代码审查失败：无法创建 Ollama 请求临时文件。" >&2
@@ -730,20 +722,43 @@ invoke_ollama() {
     return 11
   fi
 
-  if curl --silent --show-error --fail \
-      --connect-timeout 10 --max-time "$effective_timeout" \
-      "$ollama_api_url/api/generate" \
-      -H 'Content-Type: application/json' \
-      --data-binary "@$request_body_file" >"$response_file"; then
-    rm -f "$request_body_file"
-    active_request_body_file=""
-    return 0
-  else
+  max_attempts=$((retry_attempts + 1))
+  attempt=1
+  while (( attempt <= max_attempts )); do
+    now_epoch="$(date +%s)"
+    remaining_seconds=$((review_deadline_epoch - now_epoch))
+    if (( remaining_seconds <= 0 )); then
+      echo "本地代码审查失败：已达到整次审查总超时 ${total_timeout_seconds} 秒。" >&2
+      rm -f "$request_body_file"
+      active_request_body_file=""
+      return 124
+    fi
+    effective_timeout="$request_timeout"
+    if (( effective_timeout > remaining_seconds )); then
+      effective_timeout="$remaining_seconds"
+    fi
+
+    if curl --silent --show-error --fail \
+        --connect-timeout 10 --max-time "$effective_timeout" \
+        "$ollama_api_url/api/generate" \
+        -H 'Content-Type: application/json' \
+        --data-binary "@$request_body_file" >"$response_file"; then
+      rm -f "$request_body_file"
+      active_request_body_file=""
+      return 0
+    fi
     curl_status=$?
-    rm -f "$request_body_file"
-    active_request_body_file=""
-    return "$curl_status"
-  fi
+    if (( attempt >= max_attempts )); then
+      break
+    fi
+    sleep_seconds="$attempt"
+    if (( sleep_seconds > 2 )); then sleep_seconds=2; fi
+    sleep "$sleep_seconds"
+    attempt=$((attempt + 1))
+  done
+  rm -f "$request_body_file"
+  active_request_body_file=""
+  return "$curl_status"
 }
 
 # Validate one Ollama response. The output and kind files are only written for

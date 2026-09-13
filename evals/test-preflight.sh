@@ -440,4 +440,29 @@ if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   exit 1
 fi
 
+retry_count_file="$fixture_root/retry-count"
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [[ -f "${RETRY_COUNT_FILE:?}" ]]; then
+  count="$(<"$RETRY_COUNT_FILE")"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$RETRY_COUNT_FILE"
+if (( count < 3 )); then
+  exit 56
+fi
+printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" RETRY_COUNT_FILE="$retry_count_file" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned OLLAMA_REVIEW_RETRY_ATTEMPTS=2 \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
+[[ "$(<"$retry_count_file")" == "3" ]] || {
+  echo 'transient Ollama failures were not retried within the configured limit' >&2
+  cat "$retry_count_file" >&2
+  exit 1
+}
+
 printf 'preflight regression passed\n'
