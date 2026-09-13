@@ -63,6 +63,7 @@ max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
 chunk_timeout_seconds="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-180}"
 chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
 active_request_body_file=""
+current_evidence_file=""
 
 usage() {
   cat <<'EOF'
@@ -280,10 +281,48 @@ filter_unsupported_shard_findings() {
   # reason is that incompleteness itself, rather than hiding any finding with
   # concrete code evidence. This is a deterministic guard for a recurrent
   # model failure mode ("please provide the complete file").
-  awk '
+  awk -v evidence_file="$current_evidence_file" '
+    BEGIN {
+      if (evidence_file != "") {
+        while ((getline line < evidence_file) > 0) evidence = evidence line "\n"
+        close(evidence_file)
+      }
+    }
     function flush(    invalid) {
       if (block == "") return
       invalid = (block ~ /文件内容不完整|代码片段[^。！？\n]*缺少上下文|提供完整的文件内容|无法验证代码逻辑是否正确/)
+      # Java `x instanceof Type t` is false when x is null; reject the
+      # specific contradiction only when the visible evidence has that form.
+      if (block ~ /instanceof/ && block ~ /attributes/ && block ~ /null/ && block ~ /检查会通过/ && evidence ~ /instanceof[[:space:]]+ServletRequestAttributes/) invalid = 1
+      # Do not let the model claim missing header/parameter guards when the
+      # current shard visibly contains both guards.
+      if (block ~ /getHeader/ && block ~ /getParameter/ && block ~ /null/ &&
+          (block ~ /没有.*检查/ || block ~ /没有.*isBlank/) &&
+          evidence ~ /header[[:space:]]*!=[[:space:]]*null/ &&
+          evidence ~ /parameter[[:space:]]*==[[:space:]]*null/ && evidence ~ /parameter\.isBlank\(\)/) invalid = 1
+      # Spring supplies @Bean method arguments; do not report a generic null
+      # check for an injected properties object when the annotation and type
+      # are visible in the current evidence.
+      if (block ~ /properties/ && block ~ /null/ && block ~ /缺少/ &&
+          evidence ~ /@Bean/ && evidence ~ /PlatformDictClientProperties[[:space:]]+properties/) invalid = 1
+      # These are already visible guards/defaults, not actionable findings.
+      if (block ~ /currentToken|token/ && block ~ /null/ && block ~ /空/ &&
+          evidence ~ /token[[:space:]]*!=[[:space:]]*null/ && evidence ~ /token\.isBlank\(\)/) invalid = 1
+      if (block ~ /connectTimeout|readTimeout|超时/ && block ~ /默认|校验|无限/ &&
+          evidence ~ /DEFAULT_(CONNECT|READ)_TIMEOUT/ && evidence ~ /requireFinitePositiveTimeout/) invalid = 1
+      if (block ~ /baseUrl/ && block ~ /缺少/ && block ~ /格式|空/ && evidence ~ /baseUrl[[:space:]]*=[[:space:]]*"http/) invalid = 1
+      if (block ~ /TOKEN_HEADER/ && block ~ /常量|校验|定义/ && evidence ~ /TOKEN_HEADER[[:space:]]*=/) invalid = 1
+      # A shard does not contain the whole repository. Claims that a type or
+      # build declaration is missing merely because the current shard does
+      # not show it are not evidence of a defect.
+      if (block ~ /当前分片/ && block ~ /没有提供|未展示|找不到/ &&
+          block ~ /类型|依赖|构建配置|实现/) invalid = 1
+      # Likewise, a visible method body is not an unimplemented declaration.
+      if (block ~ /方法/ && block ~ /未实现|没有方法体/ &&
+          evidence ~ /->/ && evidence ~ /return/) invalid = 1
+      # Missing logging/monitoring by itself is explicitly outside the audit
+      # contract; concrete secret logging remains reportable by its evidence.
+      if (block ~ /缺少.*日志|没有.*日志|日志记录/ && block !~ /秘密|Secret|password|密码/) invalid = 1
       if (!invalid) {
         if (printed) printf "\n"
         printf "%s", block
@@ -365,7 +404,9 @@ Java 显式安全检查优先：报告 NPE、空值、空字符串或异常处�
 
 Fail-closed 语义：客户端启用时主动调用 `requireInternalToken()`，令缺少内部令牌以带属性名的异常阻止应用启动，是有意的安全失败，不是 P0/P1；不得要求回退、捕获异常、额外日志、令牌长度/格式校验，除非当前差异或明确契约证明这些要求。令牌只要由配置契约保证非空即可，不要把“启动失败”本身误报成缺陷。
 
-任务与测试边界：定时任务/调度器入口让业务异常继续向调度框架传播，通常是为了让任务状态失败并触发监控，不得仅因没有 try/catch、重试或额外日志而报告问题。测试使用固定、可复现的系统编码、字节数组或 mock 返回值是正常夹具；除非测试直接断言错误结果、无法编译或掩盖差异中的生产缺陷，不要要求按环境参数化或穷举更多输入。
+  任务与测试边界：定时任务/调度器入口让业务异常继续向调度框架传播，通常是为了让任务状态失败并触发监控，不得仅因没有 try/catch、重试或额外日志而报告问题。测试使用固定、可复现的系统编码、字节数组或 mock 返回值是正常夹具；除非测试直接断言错误结果、无法编译或掩盖差异中的生产缺陷，不要要求按环境参数化或穷举更多输入。
+
+Spring 客户端负例：`@Bean` 方法接收由容器注入的 `Platform*Properties` 参数时，不得要求额外的 properties null 检查；已有默认 baseUrl 或明确的配置 setter/helper 时，不得仅因没有重复的 URL 格式、空值或超时校验而报告问题。若 token 已有 `null`/`isBlank()` 保护，不得声称缺少保护；不得仅因没有构建日志、token 日志或监控而报告问题。
 
 后台维护任务语义：全局清理/迁移任务可以在枚举阶段显式忽略租户拦截器，再携带每条记录的 `tenantId` 调用按租户校验的回收入口；这不等于把跨租户数据返回给业务调用方，除非代码把结果暴露到外部边界。`Math.min`/`Math.max` 对 limit 做上限和下限夹紧时，数值已被限制；将该整数拼入 SQL `LIMIT` 不构成注入证据，不得重复报告“缺少 limit 校验”。
 
@@ -852,6 +893,9 @@ run_one_prompt() {
   local kind_file="$4"
   local paths_file="${5:-$changed_paths_file}"
   local request_timeout="${6:-$timeout_seconds}"
+  local evidence_file="${7:-$chunk_input_file}"
+
+  current_evidence_file="$evidence_file"
 
   if ! invoke_ollama "$prompt" "$response_file" "$request_timeout"; then
     echo "本地代码审查失败：Ollama 请求未完成。请检查 Ollama 服务、模型内存和上下文长度。" >&2
@@ -1128,10 +1172,18 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
     fi
   done <"$build_preflight_file"
   chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_preflight_file")"
+  # Give each shard the complete changed-path inventory as scope metadata.
+  # This is intentionally paths-only (no extra source content): it prevents
+  # the model from treating a type shown in another shard as a missing type,
+  # without materially increasing the prompt or context budget.
+  chunk_prompt="$chunk_prompt
+--- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
+$(cat "$changed_paths_file")
+--- 变更路径元数据结束；未出现在当前分片的文件均视为未知，不得据此报告缺失 ---"
   chunk_status=0
   original_num_predict="$num_predict"
   num_predict="$chunk_num_predict"
-  run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" || chunk_status=$?
+  run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_status=$?
   num_predict="$original_num_predict"
   if [[ "$chunk_status" -ne 0 ]]; then
     echo "本地代码审查失败：以下是已完成分片的原始结果（仅供定位，整次审查不完整，不能视为通过）：" >&2

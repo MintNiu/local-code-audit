@@ -64,6 +64,8 @@ local-review --repo /path/to/repo
 
 当收集到的 diff 超过 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（默认 `3000`）时，`local-review` 会按文件边界、再按 unified diff hunk 边界自动进行确定性分片。每个分片独立审查，最后完整拼接结果；只删除字节完全相同的重复段落，不同问题都会保留。分片默认使用 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` 和 `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048`；任何分片超时、截断或输出格式不合格都会使整次审查失败，已完成分片只作为诊断输出。
 
+每个分片还会收到本次提交全部变更文件的路径清单。清单只作为范围元数据，不附加其他文件源码；它帮助模型区分“实现在另一个分片”与“确实缺失”，但当前分片未展示的内容仍不能作为问题证据。
+
 如果单个 hunk 仍然超过字节预算，或检测到 Git combined diff（`diff --cc` / `diff --combined`），命令会明确拒绝，不会把超预算内容作为不安全的完整提示词发送给模型。
 
 字节预算只约束收集到的 Git diff；项目规则、显式上下文文件、README 和系统提示词还会额外占用上下文。它们较大时，应提高 `OLLAMA_REVIEW_NUM_CTX` 或进一步拆分审查。
