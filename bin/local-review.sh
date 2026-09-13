@@ -1008,7 +1008,7 @@ build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXX
 preflight_emitted_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-emitted.XXXXXX")"
 java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -1114,7 +1114,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"

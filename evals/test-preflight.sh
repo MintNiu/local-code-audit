@@ -8,9 +8,10 @@ repo="$fixture_root/repo"
 context="$fixture_root/downstream/Downstream.java"
 capture="$fixture_root/request.json"
 show_log="$fixture_root/ollama-show.log"
+tmp_dir="$fixture_root/tmp"
 trap 'rm -rf "$fixture_root"' EXIT
 
-mkdir -p "$fake_bin" "$repo/src/main/java/com/example/api/client" "$repo/src/main/java/com/example/api/dto" "$(dirname "$context")"
+mkdir -p "$fake_bin" "$tmp_dir" "$repo/src/main/java/com/example/api/client" "$repo/src/main/java/com/example/api/dto" "$(dirname "$context")"
 
 cat >"$fake_bin/ollama" <<'EOF'
 #!/usr/bin/env bash
@@ -56,7 +57,7 @@ public interface Client {
 }
 EOF
 
-PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_SHOW_LOG="$show_log" \
+PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_SHOW_LOG="$show_log" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null
@@ -65,6 +66,10 @@ grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO'
   cat "$show_log" >&2
   exit 1
 }
+if find "$tmp_dir" -maxdepth 1 -name 'local-review-untracked.*' -print -quit | grep -q .; then
+  echo 'untracked diff temporary file was not cleaned up' >&2
+  exit 1
+fi
 
 cat >"$repo/src/main/java/com/example/api/dto/DeletedDTO.java" <<'EOF'
 package com.example.api.dto;
