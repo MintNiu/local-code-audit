@@ -186,6 +186,70 @@ package com.example.api.client;
 final class CommentOnly {}
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/SsrfPreflight.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.web.client.RestTemplate;
+
+final class SsrfPreflight {
+    String fetch(HttpServletRequest request) {
+        String target = request.getParameter("url");
+        return new RestTemplate().getForObject(target, String.class);
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/SsrfSafe.java" <<'EOF'
+package com.example.api.client;
+
+import java.net.URI;
+import java.util.Set;
+import org.springframework.web.client.RestTemplate;
+
+final class SsrfSafe {
+    private static final Set<String> ALLOWED_HOSTS = Set.of("api.internal.example");
+
+    String fetch(String target) {
+        URI uri = URI.create(target);
+        if (!"https".equalsIgnoreCase(uri.getScheme()) || !ALLOWED_HOSTS.contains(uri.getHost())) {
+            throw new IllegalArgumentException("unsupported target");
+        }
+        return new RestTemplate().getForObject(uri, String.class);
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/PathTraversalPreflight.java" <<'EOF'
+package com.example.api.client;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+final class PathTraversalPreflight {
+    String read(Path root, String filename) throws Exception {
+        Path target = root.resolve(filename);
+        return Files.readString(target);
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/PathTraversalSafe.java" <<'EOF'
+package com.example.api.client;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+final class PathTraversalSafe {
+    String read(Path root, String filename) throws Exception {
+        Path canonicalRoot = root.toAbsolutePath().normalize();
+        Path target = canonicalRoot.resolve(filename).normalize();
+        if (!target.startsWith(canonicalRoot)) throw new IllegalArgumentException("path escapes root");
+        return Files.readString(target);
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/LongMethodDivide.java" <<'EOF'
 package com.example.api.client;
 
@@ -270,6 +334,14 @@ grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissi
 grep -F '凭据值被拼接到 URL 查询参数或路径中' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/QueryTokenAlias.java' "$capture" >/dev/null
 grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/SsrfPreflight.java' "$capture" >/dev/null
+grep -F '服务端请求伪造' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/PathTraversalPreflight.java' "$capture" >/dev/null || {
+  echo 'missing path traversal preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F '路径遍历' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/SingleDivide.java' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/LongMethodDivide.java' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/LongDivide.java' "$capture" >/dev/null
@@ -279,6 +351,11 @@ if grep -F 'P1 src/main/java/com/example/api/client/UnrelatedDivide.java' "$capt
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/CommentOnly.java' "$capture" >/dev/null; then
   echo 'security preflight reported a comment-only token reference' >&2
+  exit 1
+fi
+if grep -F 'P1 src/main/java/com/example/api/client/SsrfSafe.java' "$capture" >/dev/null || \
+   grep -F 'P1 src/main/java/com/example/api/client/PathTraversalSafe.java' "$capture" >/dev/null; then
+  echo 'security preflight reported a guarded SSRF/path traversal negative fixture' >&2
   exit 1
 fi
 

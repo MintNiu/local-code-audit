@@ -233,6 +233,8 @@ context_files[@]: unbound variable
 
 URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKey`、`signature` 和 `credential` 等常见别名，并覆盖同一行 URL 字面量拼接到查询参数或路径的场景；普通 ID、固定 URL 和仅出现在注释中的示例不触发。模型输出的降噪过滤改为按当前 finding 的文件路径隔离证据，避免 A 文件的安全写法把 B 文件的真实问题误删。
 
+随后把两类高价值边界继续下沉到确定性预检：不可信 URL 参数直接进入常见 HTTP 出站调用时报告 SSRF，不可信文件名/对象 key 直接进入 `resolve`/`new File` 后再读写时报告路径遍历；同一 diff hunk 中出现明确 host allowlist、scheme 校验或 `normalize` + 根目录 `startsWith` 边界时保持 clean。规则只处理可见的窄证据链，不把所有 HTTP 或文件 API 泛化成漏洞。
+
 - 预检结果按完整问题段去重，不能再用逐行 `sort -u` 破坏“影响/修复建议/验证方式”的归属；模型重复同一位置和同一风险族时只保留一条，但不同根因继续全部保留。
 
 这套边界把模型从“必须记住两个固定答案”改成“负责开放式审计，确定性代码负责不可漏的已知高价值模式”。`evals/test-preflight.sh` 同时覆盖正例、负例、模型重复和字段连续性；每次修改 SYSTEM 规则或重建 tuned 模型后，必须先通过它和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh`。

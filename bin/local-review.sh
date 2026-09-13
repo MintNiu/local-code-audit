@@ -1464,12 +1464,37 @@ collect_security_preflight() {
   # names such as authToken/signature/credential without treating ordinary IDs
   # as secrets.
   awk '
+    function emit_ssrf() {
+      if (!ssrf_emitted) {
+        printf "P1 %s:%d - 不可信 URL 直接进入出站 HTTP 调用，存在服务端请求伪造（SSRF）风险。\n影响：攻击者可借助服务端访问内网服务、云 metadata 或任意外部地址，绕过客户端网络边界。\n修复建议：仅允许明确的 https scheme 和 host allowlist，在发起请求前解析并校验目标，拒绝内网和 metadata 地址。\n验证方式：使用外部地址、内网地址和云 metadata 地址测试，确认未允许的目标均在出站调用前被拒绝。\n\n", path, line_no
+        ssrf_emitted = 1
+      }
+    }
+    function emit_path_traversal() {
+      if (!path_emitted) {
+        printf "P1 %s:%d - 不可信文件名或对象 key 未经根目录边界校验就用于本地文件访问，存在路径遍历风险。\n影响：攻击者可通过 ../、绝对路径或等价路径逃逸读取或写入允许目录之外的文件。\n修复建议：先 normalize/canonicalize 目标路径，再确认其仍以允许根目录为前缀，拒绝越界目标。\n验证方式：使用 ../、绝对路径和符号链接样例测试，确认越界目标不会被读取或写入。\n\n", path, path_line
+        path_emitted = 1
+      }
+    }
+    function reset_hunk(    name) {
+      for (name in url_input_vars) delete url_input_vars[name]
+      url_guard = 0
+      ssrf_emitted = 0
+      path_candidate = 0
+      path_line = 0
+      path_access = 0
+      path_guard = 0
+      path_emitted = 0
+    }
     function flush_hunk() {
       if (hunk_start == "") return
       line_no = hunk_start
       hunk_start = ""
+      if (path_candidate && path_access && !path_guard) emit_path_traversal()
+      reset_hunk()
     }
     /^diff --git / {
+      flush_hunk()
       path = $4
       sub(/^b\//, "", path)
       next
@@ -1480,11 +1505,13 @@ collect_security_preflight() {
       next
     }
     /^@@ / {
+      flush_hunk()
       hunk = $0
       sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
       sub(/ .*/, "", hunk)
       hunk_start = hunk + 0
       line_no = hunk_start
+      reset_hunk()
       next
     }
     {
@@ -1497,6 +1524,31 @@ collect_security_preflight() {
           line_no++
           next
         }
+        if (added ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect)[^)]*\)/) {
+          input_assignment = added
+          sub(/[[:space:]]*=.*/, "", input_assignment)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", input_assignment)
+          split(input_assignment, assignment_fields, /[[:space:]]+/)
+          input_name = assignment_fields[length(assignment_fields)]
+          if (input_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) url_input_vars[input_name] = 1
+        }
+        if (added ~ /ALLOWED_HOST|allowlist|allowedHosts|getHost[[:space:]]*\(|getScheme[[:space:]]*\(|startsWith[[:space:]]*\([[:space:]]*https/) url_guard = 1
+        outbound = added ~ /getForObject|getForEntity|getForStream|\.exchange[[:space:]]*\(|\.execute[[:space:]]*\(|\.sendAsync?[[:space:]]*\(|\.newCall[[:space:]]*\(|\.retrieve[[:space:]]*\(/ || added ~ /HttpClient/ && added ~ /\.send[[:space:]]*\(/
+        if (outbound) {
+          for (input_name in url_input_vars) {
+            if (added ~ ("(^|[^[:alnum:]_])" input_name "([^[:alnum:]_]|$)")) {
+              if (!url_guard) emit_ssrf()
+              break
+            }
+          }
+        }
+        if (added ~ /\.resolve[[:space:]]*\([[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/ ||
+            added ~ /new[[:space:]]+File[[:space:]]*\([^,]+,[[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/) {
+          path_candidate = 1
+          if (path_line == 0) path_line = line_no
+        }
+        if (added ~ /Files[[:space:]]*\.|File(Input|Output)Stream|FileSystemResource|Resource[[:space:]]*\()/) path_access = 1
+        if (added ~ /\.normalize[[:space:]]*\(|\.toRealPath[[:space:]]*\(|\.getCanonicalPath[[:space:]]*\(|\.startsWith[[:space:]]*\(/) path_guard = 1
         url_risk = 0
         if (added ~ /(^|[?&]|\/)([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key|auth|sig|signature|credential|session[_-]?key)[A-Za-z0-9_.-]*)[=\/]/ &&
             added ~ /\+[[:space:]]*(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential)([^[:alnum:]_]|$)/) {
@@ -1520,6 +1572,7 @@ collect_security_preflight() {
         line_no++
       }
     }
+    END { flush_hunk() }
   ' "$diff_file" >>"$output_file"
   dedup_preflight_blocks "$output_file"
 }
