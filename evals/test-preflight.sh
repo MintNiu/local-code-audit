@@ -8,6 +8,7 @@ repo="$fixture_root/repo"
 context="$fixture_root/downstream/Downstream.java"
 module_context="$fixture_root/downstream/ModuleDownstream.java"
 capture="$fixture_root/request.json"
+resolved_model_capture="$fixture_root/resolved-model.txt"
 show_log="$fixture_root/ollama-show.log"
 tmp_dir="$fixture_root/tmp"
 trap 'rm -rf "$fixture_root"' EXIT
@@ -132,12 +133,13 @@ chmod +x "$fake_bin/fsmonitor"
 git -C "$repo" config core.fsmonitor "$fake_bin/fsmonitor"
 rm -f "$fixture_root/fsmonitor.marker"
 
-PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_SHOW_LOG="$show_log" \
+PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_capture" OLLAMA_SHOW_LOG="$show_log" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   TEXTCONV_MARKER="$fixture_root/textconv.marker" FSMONITOR_MARKER="$fixture_root/fsmonitor.marker" \
   "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissing' "$capture" >/dev/null
+grep -Fx 'devstral-small-2-review-tuned' "$resolved_model_capture" >/dev/null
 [[ ! -e "$fixture_root/textconv.marker" ]] || {
   echo 'git diff executed a configured textconv filter' >&2
   exit 1

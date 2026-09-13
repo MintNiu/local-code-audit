@@ -191,6 +191,8 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
 
   start="$(date +%s)"
   exit_code=0
+  resolved_model_file="$temp_root/$commit.resolved-model"
+  resolved_model="unresolved"
   context_hashes_before=()
   context_hashes_after=()
   context_changed=false
@@ -205,8 +207,15 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
       review_args+=(--context "$context_file")
     done
   fi
-  "$review_script" "${review_args[@]}" >"$result_file" 2>&1 || exit_code=$?
+  LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_file" \
+    "$review_script" "${review_args[@]}" >"$result_file" 2>&1 || exit_code=$?
   end="$(date +%s)"
+  if [[ -s "$resolved_model_file" ]]; then
+    resolved_model="$(head -n 1 "$resolved_model_file")"
+  elif [[ "$exit_code" -eq 0 ]]; then
+    echo "本次历史评测无效：审查成功但未记录实际模型名。" >&2
+    exit_code=12
+  fi
   if (( ${#context_files[@]} > 0 )); then
     for context_index in "${!context_files[@]}"; do
       if [[ -f "${context_files[$context_index]}" ]]; then
@@ -231,6 +240,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'subject\t%s\n' "$subject"
     printf 'profile\t%s\n' "$profile"
     printf 'model\t%s\n' "$review_model"
+    printf 'resolved_model\t%s\n' "$resolved_model"
     printf 'temperature\t%s\n' "$review_temperature"
     printf 'seed\t%s\n' "$review_seed"
     printf 'top_k\t%s\n' "$review_top_k"

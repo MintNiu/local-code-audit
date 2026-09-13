@@ -8,7 +8,7 @@
 
 真实历史提交使用 `./evals/run-history.sh`。它默认调用个人高性能 `local-review-local`，只读取本地仓库，在临时目录展开父提交并应用目标 diff，把原始结果和元数据写入你指定的私有目录；不要把该目录指向本公开仓库。需要对比保守基线时，追加 `--profile baseline`。
 准备历史 diff 时同样会禁用仓库配置的 `textconv` 和 fsmonitor，确保评测过程不会执行目标仓库的可配置 Git 命令。
-每个提交的 `.meta.tsv` 会记录 profile、模型选择、temperature、seed、top-k/top-p、上下文/输出预算、diff 字节预算和 `keep_alive`，避免个人版与基线结果混用。
+每个提交的 `.meta.tsv` 会记录 profile、配置的模型选择、实际解析到的 `resolved_model`、temperature、seed、top-k/top-p、上下文/输出预算、diff 字节预算和 `keep_alive`，避免个人版与基线结果混用并支持严格复现。
 切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
 如果评测的是删除或修改公共契约的提交，可重复传入 `--context <file>`，把下游仓库的调用方、POM 或测试作为只读证据；这些路径会记录在私有 `.meta.tsv` 中。未提供下游 context 时，结果只能按单仓库范围解释。
 历史评测运行器不会替下游仓库切换 Git ref，也不会替外部文件推断目标版本；请先在下游仓库检出匹配快照，或用 `scripts/extract-context-snapshot.sh` / `git show <ref>:<path>` 提取私有快照后再传入。为避免把主仓库当前工作树误当成历史证据，`run-history.sh` 会拒绝指向主仓库的 context，并在审查前后比较外部 context 的 SHA-256；发生变化时该样本标记为失败。哈希和路径都会写入私有 `.meta.tsv`，便于复核版本是否被意外替换。
