@@ -60,6 +60,7 @@
 - 运行入口一致性：`scripts/install-global.sh` 将 `local-review`、`local-review-local` 及带 `.sh` 后缀入口链接到当前工作流；`scripts/verify-runtime.sh` 会校验全局脚本哈希、Modelfile SYSTEM 和 Ollama 运行态。确定性预检只存在于这两个 wrapper，直接 `codex`/`ollama run` 不包含该层保证。
 - 最新真实回归：`platform-file:7b62671` 在当前 wrapper 下连续两次均命中三份配置中的 6 个硬编码凭据行；两次结果 SHA-256 相同，且分片聚合没有残缺 finding。该样本用于验证凭据预检与分片完整性，不替代阶段 1 的多提交人工标注。
 - 2026-09-14 完成一次完整 5 轮合成门禁：`java-divide`、`java-token-url`、租户隔离、迁移删除、硬编码凭据和预签名票据正例均 5/5 命中且哈希稳定；20 次 clean 负例全部通过；`num_predict=1` 截断路径按预期失败。真实 `platform-file:2e33eaf` 还验证了非法 UTF-8 响应归一化和自然语言凭据脱敏，结果以 0 退出并保留完整问题字段。
+- 同日复测真实 `platform-file:5a9a19b`：新增 Nacos 配置中的可预测 `${NACOS_PASSWORD:nacos}` 默认凭据被确定性预检完整定位为 6 条 P1（3 个配置文件各 2 处），模型输出未回显凭据值。该结果已写入私有评测目录，仍待人工确认后才能进入阶段 1 真值统计。
 
 ## 失败处理原则
 
