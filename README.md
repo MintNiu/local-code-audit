@@ -43,7 +43,7 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
-When a change deletes, renames, or changes a public API, DTO, or declarative client, the main repository review does not automatically read consumers from other repositories. Pass downstream interfaces, configuration, call sites, or tests explicitly with repeatable `--context`; otherwise the result is limited to the current repository:
+When a change deletes, renames, or changes a public API, DTO, or declarative client, the main repository review does not automatically read consumers from other repositories. First extract downstream interfaces, configuration, call sites, or tests from the Git ref matching the target change, then pass them explicitly with repeatable `--context`; otherwise the result is limited to the current repository. For historical evaluations, use `scripts/extract-context-snapshot.sh` to create a private snapshot:
 
 ```bash
 local-review --repo /path/to/platform-api \
