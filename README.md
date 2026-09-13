@@ -43,6 +43,16 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
+When a change deletes, renames, or changes a public API, DTO, or declarative client, the main repository review does not automatically read consumers from other repositories. Pass downstream interfaces, configuration, call sites, or tests explicitly with repeatable `--context`; otherwise the result is limited to the current repository:
+
+```bash
+local-review --repo /path/to/platform-api \
+  --context /path/to/platform-file/src/main/java/.../InternalFileController.java \
+  --context /path/to/platform-file/pom.xml
+```
+
+This is required for cross-repository compatibility coverage in the personal high-performance workflow. Context files are evidence-only inputs and are never modified.
+
 For your personal high-performance profile, install and run:
 
 ```bash

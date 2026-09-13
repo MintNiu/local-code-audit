@@ -42,6 +42,16 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
+如果当前提交删除、重命名或修改了对外 API、DTO 或声明式客户端，审查主仓库不会自动读取其他仓库。请把下游消费者的接口、配置、调用方或测试文件逐个用 `--context` 传入（该参数可重复），否则只能得到当前仓库范围内的结论：
+
+```bash
+local-review --repo /path/to/platform-api \
+  --context /path/to/platform-file/src/main/java/.../InternalFileController.java \
+  --context /path/to/platform-file/pom.xml
+```
+
+这是个人高性能审查中检查跨仓库兼容性的必要步骤；上下文文件只作为证据输入，不会被修改。
+
 个人高性能模式使用单独命令：
 
 ```bash
