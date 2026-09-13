@@ -156,6 +156,12 @@ nacos:
   password: ${NACOS_PASSWORD:nacos}
   safe-password: ${NACOS_SAFE_PASSWORD:}
 EOF
+cat >"$repo/application-credential-long-default.yml" <<'EOF'
+operation-log:
+  endpoint: http://localhost:8093/log/v1/logs
+  internal-token: ${GATEWAY_INTERNAL_TOKEN:platform-dev-shared-internal-token}
+  safe-token: ${SAFE_TOKEN:short-example}
+EOF
 
 cat >"$repo/src/main/java/com/example/api/client/TokenProxy.java" <<'EOF'
 package com.example.api.client;
@@ -616,6 +622,11 @@ grep -F 'P1 application-credential-inline.json' "$capture" >/dev/null || {
 }
 grep -F 'P1 application-credential-weak-default.yml' "$capture" >/dev/null || {
   echo 'missing weak default credential preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'P1 application-credential-long-default.yml' "$capture" >/dev/null || {
+  echo 'missing long default credential preflight' >&2
   cat "$capture" >&2
   exit 1
 }

@@ -1642,13 +1642,14 @@ collect_security_preflight() {
         credential_placeholder = added ~ /\$\{[A-Za-z_][A-Za-z0-9_]*:[^}]+\}/ && added !~ /\$\{[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*\}/
         credential_literal = added ~ /(:|=)[[:space:]]*"?[A-Za-z0-9][A-Za-z0-9_.\/+={}-]{15,}"?/
         credential_weak_default = added ~ /\$\{[A-Za-z_][A-Za-z0-9_]*:(nacos|admin|password|root|123456|changeme)\}/
+        credential_long_default = added ~ /\$\{[A-Za-z_][A-Za-z0-9_]*:[A-Za-z0-9][A-Za-z0-9_.\/+=-]{15,}\}/
         if (path ~ /\.(ya?ml|properties|conf|ini|env|json|toml)$/ && credential_key &&
             ((credential_placeholder && tolower(added) !~ /change[_-]?me|redacted|example|placeholder|<[^>]+>/) ||
              (credential_literal && tolower(added) !~ /change[_-]?me|redacted|dummy|placeholder|replace|your-|<[^>]+>/) ||
-             credential_weak_default)) {
+             credential_weak_default || credential_long_default)) {
           credential_count++
           credential_lines[credential_count] = line_no
-          credential_high_lines[credential_count] = credential_high || credential_weak_default
+          credential_high_lines[credential_count] = credential_high || credential_weak_default || credential_long_default
         }
         if (added ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/) {
           input_assignment = added
