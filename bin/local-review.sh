@@ -2,10 +2,6 @@
 set -euo pipefail
 
 ollama_probe_timeout_seconds="${OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS:-10}"
-if [[ ! "$ollama_probe_timeout_seconds" =~ ^[0-9]+$ ]] || (( ollama_probe_timeout_seconds < 1 )); then
-  echo "OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS 必须是正整数。" >&2
-  exit 2
-fi
 
 ollama_api_url="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 if [[ "$ollama_api_url" != *://* ]]; then
@@ -34,15 +30,9 @@ ollama_show_with_timeout() {
 
 default_model="devstral-small-2"
 default_model_available=false
-if ollama_show_with_timeout devstral-small-2-review-tuned; then
-  default_model="devstral-small-2-review-tuned"
-  default_model_available=true
-elif ollama_show_with_timeout devstral-small-2-review; then
-  default_model="devstral-small-2-review"
-  default_model_available=true
-fi
 
 model="${OLLAMA_REVIEW_MODEL:-$default_model}"
+model_overridden=false
 repo_dir=""
 base_ref=""
 include_readme=false
@@ -105,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --model)
       [[ $# -ge 2 ]] || { echo "--model 需要一个模型名" >&2; exit 2; }
       model="$2"
+      model_overridden=true
       shift 2
       ;;
     --examples)
@@ -154,9 +145,8 @@ if [[ -z "$repo_root" ]]; then
   exit 2
 fi
 
-if [[ "$model" != "$default_model" || "$default_model_available" != true ]] && ! ollama_show_with_timeout "$model"; then
-  echo "本地未找到模型: $model" >&2
-  echo "请先执行: ollama pull $model" >&2
+if [[ ! "$ollama_probe_timeout_seconds" =~ ^[0-9]+$ ]] || (( ollama_probe_timeout_seconds < 1 )); then
+  echo "OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS 必须是正整数。" >&2
   exit 2
 fi
 
@@ -271,6 +261,7 @@ redact_sensitive_text() {
   # The diff itself is sent only to the local model; this protects every
   # user-visible response and truncation diagnostic.
   perl -pe '
+    s~((?:authorization|proxy-authorization)[[:space:]]*"?[[:space:]]*[:=：][[:space:]]*"?[[:space:]]*(?:Bearer|Basic)[[:space:]]+)[^[:space:],，;；)}`"]+~$1<REDACTED>~ig;
     s~((?:access[-_ ]?key(?:[-_ ]?(?:id|secret))?|secret|password|passwd|token|api[-_ ]?key)[[:space:]]*[:=：][[:space:]]*)[^[:space:],，;；)}`]+~$1<REDACTED>~ig;
     s~\b(?:AKIA|ASIA|LTAI)[A-Za-z0-9_-]{8,}\b~<REDACTED>~g;
   '
@@ -381,6 +372,27 @@ fi
 if [[ -z "$base_ref" && ! -s "$staged_file" && ! -s "$unstaged_file" && ! -s "$untracked_file" ]]; then
   echo "没有发现待审查的 Git 变更。"
   exit 0
+fi
+
+# Probe models only after confirming there is work to review. This keeps
+# --help, invalid invocations, non-Git directories, and clean repositories
+# instant. An explicit model skips the automatic tuned/review probes and is
+# checked directly below.
+if [[ -z "${OLLAMA_REVIEW_MODEL:-}" && "$model_overridden" != true ]]; then
+  if ollama_show_with_timeout devstral-small-2-review-tuned; then
+    default_model="devstral-small-2-review-tuned"
+    default_model_available=true
+  elif ollama_show_with_timeout devstral-small-2-review; then
+    default_model="devstral-small-2-review"
+    default_model_available=true
+  fi
+  model="$default_model"
+fi
+
+if [[ "$model_overridden" == true || -n "${OLLAMA_REVIEW_MODEL:-}" || "$default_model_available" != true ]] && ! ollama_show_with_timeout "$model"; then
+  echo "本地未找到模型: $model" >&2
+  echo "请先执行: ollama pull $model" >&2
+  exit 2
 fi
 
 review_system="$(cat <<'EOF'
@@ -619,7 +631,10 @@ validate_response() {
     return 10
   fi
 
-  response_text="$(jq -r '.response' <"$response_file" | redact_sensitive_text | filter_unsupported_shard_findings | dedup_exact_findings)"
+  # Keep the raw response local while applying evidence filters; redact only
+  # after filtering/deduplication so guards such as `token: null` remain
+  # visible to the deterministic shard-boundary checks.
+  response_text="$(jq -r '.response' <"$response_file" | filter_unsupported_shard_findings | dedup_exact_findings | redact_sensitive_text)"
   normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
 
   if [[ -z "$normalized_response" ]]; then
@@ -628,11 +643,13 @@ validate_response() {
     return 0
   fi
 
-  if [[ "$normalized_response" == "未发现阻塞问题" ]]; then
-    printf '%s\n' "$response_text" >"$output_file"
+  case "$normalized_response" in
+    "未发现阻塞问题"|"未发现阻塞问题。"|"未发现阻塞问题."|"未发现阻塞问题！"|"未发现阻塞问题!")
+    printf '未发现阻塞问题\n' >"$output_file"
     printf 'clean\n' >"$kind_file"
     return 0
-  fi
+    ;;
+  esac
 
   if grep -q '未发现阻塞问题' <<<"$response_text"; then
     # Some local models append the clean marker after a valid finding list.
@@ -907,7 +924,7 @@ run_one_prompt() {
 collect_build_preflight() {
   local imports_file="$1"
   local output_file="$2"
-  local changed_path source_file package_name local_prefix import_line import_name type_name import_rel found
+  local changed_path source_file package_name local_prefix import_line import_name type_name import_rel found source_index
 
   : >"$output_file"
   while IFS=$'\t' read -r changed_path import_name; do
@@ -915,6 +932,10 @@ collect_build_preflight() {
     found=false
     source_file="$repo_root/$changed_path"
     [[ -f "$source_file" ]] || continue
+    source_index="$java_main_source_index"
+    if [[ "$changed_path" == src/test/java/* ]]; then
+      source_index="$java_source_index"
+    fi
     package_name="$(awk '$1 == "package" { gsub(/[;\r]/, "", $2); print $2; exit }' "$source_file")"
     [[ -n "$package_name" ]] || continue
     local_prefix="$(awk -F. '{ if (NF >= 3) print $1 "." $2 "." $3; else print $0 }' <<<"$package_name")"
@@ -941,7 +962,7 @@ collect_build_preflight() {
         if awk -v suffix="$import_rel" '
             { if (length($0) >= length(suffix) && substr($0, length($0) - length(suffix) + 1) == suffix) found = 1 }
             END { exit found ? 0 : 1 }
-          ' "$java_source_index"; then
+          ' "$source_index"; then
           found=true
           break
         fi
@@ -1007,8 +1028,9 @@ deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
 preflight_emitted_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-emitted.XXXXXX")"
 java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
+java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$java_main_source_index"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -1063,8 +1085,10 @@ if [[ -s "$changed_imports_file" ]]; then
     cd "$repo_root"
     rg --files -g '*.java' || true
   ) >"$java_source_index"
+  awk '$0 ~ /(^|\/)src\/main\/java\// { print }' "$java_source_index" >"$java_main_source_index"
 else
   : >"$java_source_index"
+  : >"$java_main_source_index"
 fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 {
@@ -1114,7 +1138,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$java_main_source_index" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"

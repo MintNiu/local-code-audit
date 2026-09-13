@@ -11,7 +11,7 @@ show_log="$fixture_root/ollama-show.log"
 tmp_dir="$fixture_root/tmp"
 trap 'rm -rf "$fixture_root"' EXIT
 
-mkdir -p "$fake_bin" "$tmp_dir" "$repo/src/main/java/com/example/api/client" "$repo/src/main/java/com/example/api/dto" "$(dirname "$context")"
+mkdir -p "$fake_bin" "$tmp_dir" "$repo/src/main/java/com/example/api/client" "$repo/src/main/java/com/example/api/dto" "$repo/src/test/java/com/example/api/dto" "$(dirname "$context")"
 
 cat >"$fake_bin/ollama" <<'EOF'
 #!/usr/bin/env bash
@@ -35,6 +35,15 @@ printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
+PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_SHOW_LOG="$show_log" \
+  OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS=invalid \
+  "$repo_root/bin/local-review.sh" --help >/dev/null
+[[ ! -s "$show_log" ]] || {
+  echo '--help unexpectedly contacted Ollama' >&2
+  cat "$show_log" >&2
+  exit 1
+}
+
 git -C "$repo" init -q
 git -C "$repo" config user.email test@example.invalid
 git -C "$repo" config user.name preflight-test
@@ -44,8 +53,22 @@ package com.example.api.client;
 
 public interface Client {}
 EOF
+cat >"$repo/src/test/java/com/example/api/dto/MissingDTO.java" <<'EOF'
+package com.example.api.dto;
+
+final class MissingDTO {}
+EOF
 git -C "$repo" add .
 git -C "$repo" commit -qm base
+
+PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_SHOW_LOG="$show_log" \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
+[[ ! -s "$show_log" ]] || {
+  echo 'clean repository unexpectedly contacted Ollama' >&2
+  cat "$show_log" >&2
+  exit 1
+}
+: >"$show_log"
 
 cat >"$repo/src/main/java/com/example/api/client/Client.java" <<'EOF'
 package com.example.api.client;
@@ -70,6 +93,15 @@ if find "$tmp_dir" -maxdepth 1 -name 'local-review-untracked.*' -print -quit | g
   echo 'untracked diff temporary file was not cleaned up' >&2
   exit 1
 fi
+
+PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" --model custom-review-model >/dev/null
+grep -F 'custom-review-model' "$capture" >/dev/null || {
+  echo '--model override was replaced by automatic model selection' >&2
+  exit 1
+}
+: >"$show_log"
 
 cat >"$repo/src/main/java/com/example/api/dto/DeletedDTO.java" <<'EOF'
 package com.example.api.dto;
@@ -114,11 +146,50 @@ if ! shard_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2
   echo 'unsupported shard-boundary finding caused review failure' >&2
   exit 1
 fi
-[[ "$shard_output" == '未发现阻塞问题' ]] || {
+if ! printf '%s\n' "$shard_output" | grep -Fx '未发现阻塞问题' >/dev/null; then
   echo 'unsupported shard-boundary finding was not filtered' >&2
   printf '%s\n' "$shard_output" >&2
   exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - Authorization: Bearer super-secret-token-value; \\\"Authorization\\\": \\\"Basic basic-secret-value\\\"\\n影响：凭据可能进入审查输出。\\n修复建议：轮换并移除凭据。\\n验证方式：确认输出不包含原始凭据。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+redacted_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+[[ "$redacted_output" == *'Authorization: Bearer <REDACTED>'* ]] || {
+  echo 'Authorization bearer value was not redacted' >&2
+  printf '%s\n' "$redacted_output" >&2
+  exit 1
 }
+[[ "$redacted_output" == *'"Authorization": "Basic <REDACTED>"'* ]] || {
+  echo 'JSON Basic authorization value was not redacted' >&2
+  printf '%s\n' "$redacted_output" >&2
+  exit 1
+}
+[[ "$redacted_output" != *'super-secret-token-value'* ]] || {
+  echo 'raw Authorization bearer value leaked in review output' >&2
+  exit 1
+}
+[[ "$redacted_output" != *'basic-secret-value'* ]] || {
+  echo 'raw Basic authorization value leaked in review output' >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"未发现阻塞问题。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+marker_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" 2>/dev/null)"
+if ! printf '%s\n' "$marker_output" | grep -Fx '未发现阻塞问题' >/dev/null; then
+  echo 'clean marker with punctuation was not normalized' >&2
+  printf '%s\n' "$marker_output" >&2
+  exit 1
+fi
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
