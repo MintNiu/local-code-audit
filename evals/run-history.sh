@@ -231,6 +231,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     -c user.email='local-review-evaluation@localhost' \
     commit -qm 'evaluation parent snapshot'
   git -c core.fsmonitor=false -C "$repo_root" diff --binary --no-ext-diff --no-textconv "$parent" "$commit" >"$patch_file"
+  diff_sha256="$(shasum -a 256 "$patch_file" | awk '{print $1}')"
 
   if ! git -C "$worktree" apply --whitespace=nowarn "$patch_file"; then
     printf 'commit\t%s\nstatus\tapply-failed\nsubject\t%s\n' "$commit" "$subject" >"$metadata_file"
@@ -292,11 +293,16 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     echo "本次历史评测无效：审查成功但未记录实际模型名。" >&2
     exit_code=12
   fi
+  result_sha256="unavailable"
+  if [[ -f "$result_file" ]]; then
+    result_sha256="$(shasum -a 256 "$result_file" | awk '{print $1}')"
+  fi
   {
     printf 'commit\t%s\n' "$commit"
     printf 'parent\t%s\n' "$parent"
     printf 'date\t%s\n' "$date"
     printf 'subject\t%s\n' "$subject"
+    printf 'diff_sha256\t%s\n' "$diff_sha256"
     printf 'profile\t%s\n' "$profile"
     printf 'workflow_git_revision\t%s\n' "$workflow_git_revision"
     printf 'workflow_dirty_state_sha256\t%s\n' "$workflow_dirty"
@@ -328,6 +334,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     fi
     printf 'exit_code\t%s\n' "$exit_code"
     printf 'elapsed_seconds\t%s\n' "$((end - start))"
+    printf 'result_sha256\t%s\n' "$result_sha256"
     printf 'result_file\t%s\n' "$result_file"
   } >"$metadata_file"
 
