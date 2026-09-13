@@ -67,7 +67,11 @@ while [[ $# -gt 0 ]]; do
     --context)
       [[ $# -ge 2 ]] || { echo "--context 需要文件" >&2; exit 2; }
       [[ -f "$2" ]] || { echo "--context 文件不存在: $2" >&2; exit 2; }
-      context_files+=("$2")
+      context_path="$2"
+      if [[ "$context_path" != /* ]]; then
+        context_path="$(cd "$(dirname "$context_path")" && pwd)/$(basename "$context_path")"
+      fi
+      context_files+=("$context_path")
       shift 2
       ;;
     -h|--help)
@@ -85,6 +89,10 @@ done
 [[ -n "$repo_dir" && -n "$manifest_file" && -n "$output_dir" ]] || { usage >&2; exit 2; }
 [[ -d "$repo_dir" ]] || { echo "仓库目录不存在: $repo_dir" >&2; exit 2; }
 [[ -f "$manifest_file" ]] || { echo "清单文件不存在: $manifest_file" >&2; exit 2; }
+if (( ${#context_files[@]} > 0 )) && ! command -v shasum >/dev/null 2>&1; then
+  echo "使用 --context 时需要 shasum 以记录上下文版本哈希。" >&2
+  exit 2
+fi
 git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel >/dev/null 2>&1 || {
   echo "--repo 不是 Git 仓库: $repo_dir" >&2
   exit 2
@@ -183,7 +191,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'keep_alive\t%s\n' "$profile_keep_alive"
     if (( ${#context_files[@]} > 0 )); then
       for context_file in "${context_files[@]}"; do
-        printf 'context\t%s\n' "$context_file"
+        printf 'context\t%s\t%s\n' "$context_file" "$(shasum -a 256 "$context_file" | awk '{print $1}')"
       done
     fi
     if [[ "$exit_code" -eq 0 ]]; then

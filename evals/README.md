@@ -11,6 +11,7 @@
 每个提交的 `.meta.tsv` 会记录 profile、模型选择、temperature、seed、top-k/top-p、上下文/输出预算、diff 字节预算和 `keep_alive`，避免个人版与基线结果混用。
 切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
 如果评测的是删除或修改公共契约的提交，可重复传入 `--context <file>`，把下游仓库的调用方、POM 或测试作为只读证据；这些路径会记录在私有 `.meta.tsv` 中。未提供下游 context 时，结果只能按单仓库范围解释。
+历史评测运行器不会替下游仓库切换 Git ref，也不会验证 context 是否来自目标提交对应的版本；请先在下游仓库检出匹配快照，或用 `git show <ref>:<path>` 提取私有快照后再传入。元数据同时记录 context 的 SHA-256，便于复核版本是否被意外替换。
 
 ```bash
 ./evals/run-history.sh \
