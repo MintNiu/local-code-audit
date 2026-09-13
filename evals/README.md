@@ -11,6 +11,8 @@
 每个提交的 `.meta.tsv` 会记录 profile、配置的模型选择、实际解析到的 `resolved_model`、temperature、seed、top-k/top-p、上下文/输出预算、diff 字节预算和 `keep_alive`，避免个人版与基线结果混用并支持严格复现。确定性构建预检命中时，结果会直接合并到最终问题清单，不依赖模型是否复述；该来源仍只覆盖脚本能证明的同仓库/显式 context 类型引用。
 切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
 如果评测的是删除或修改公共契约的提交，可重复传入 `--context <file>`，把下游仓库的调用方、POM 或测试作为只读证据；这些路径会记录在私有 `.meta.tsv` 中。未提供下游 context 时，结果只能按单仓库范围解释。
+
+更新规则或参数后，可用 `./scripts/verify-runtime.sh` 只读检查 Ollama 中的 tuned 模型是否仍与当前 `config/Modelfile` 一致。校验失败时按脚本提示同步并执行 `ollama create`；脚本不会自动重建模型。
 历史评测运行器不会替下游仓库切换 Git ref，也不会替外部文件推断目标版本；请先在下游仓库检出匹配快照，或用 `scripts/extract-context-snapshot.sh` / `git show <ref>:<path>` 提取私有快照后再传入。为避免把主仓库当前工作树误当成历史证据，`run-history.sh` 会拒绝指向主仓库的 context，并在每个提交开始前把外部 context 冻结到临时快照，模型只读取该快照。私有 `.meta.tsv` 会记录原始路径和快照 SHA-256，便于复核版本是否被意外替换。
 
 ```bash

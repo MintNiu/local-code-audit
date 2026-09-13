@@ -90,6 +90,7 @@ local-review --repo /path/to/repo
 默认温度为 `0`，用于提高本地审查的可重复性；它不能替代人工复核。
 
 保守基线命令 `local-review` 默认 `keep_alive=0`，每次审查后释放模型；个人高性能命令 `local-review-local` 默认保留 5 分钟。更关注电量时可设置 `OLLAMA_REVIEW_KEEP_ALIVE=0`。
+更新规则或参数后，可运行 `./scripts/verify-runtime.sh` 只读检查 Ollama 中的 tuned 模型是否与当前 `config/Modelfile` 一致；失败时按脚本提示手动重建模型。
 
 ## 评测
 
