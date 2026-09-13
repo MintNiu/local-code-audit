@@ -292,6 +292,21 @@ if ! printf '%s\n' "$marker_output" | grep -Fx '未发现阻塞问题' >/dev/nul
   exit 1
 fi
 
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P2 src/main/java/com/example/api/client/Consumer.java:5 - 低严重度示例问题。\\n\\nP0 src/main/java/com/example/api/client/Consumer.java:6 - 高严重度示例问题。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+single_sorted_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 "$repo_root/bin/local-review.sh" --repo "$repo")"
+single_p0_line="$(printf '%s\n' "$single_sorted_output" | grep -n '^P0 ' | head -n1 | cut -d: -f1)"
+single_p2_line="$(printf '%s\n' "$single_sorted_output" | grep -n '^P2 ' | head -n1 | cut -d: -f1)"
+if [[ -z "$single_p0_line" || -z "$single_p2_line" || "$single_p0_line" -ge "$single_p2_line" ]]; then
+  echo 'single-request findings were not globally sorted by severity' >&2
+  printf '%s\n' "$single_sorted_output" >&2
+  exit 1
+fi
+
 sort_repo="$fixture_root/sort-repo"
 mkdir -p "$sort_repo/src"
 git -C "$sort_repo" init -q
