@@ -66,7 +66,7 @@ done
 [[ -n "$repo_dir" && -n "$manifest_file" && -n "$output_dir" ]] || { usage >&2; exit 2; }
 [[ -d "$repo_dir" ]] || { echo "仓库目录不存在: $repo_dir" >&2; exit 2; }
 [[ -f "$manifest_file" ]] || { echo "清单文件不存在: $manifest_file" >&2; exit 2; }
-git -C "$repo_dir" rev-parse --show-toplevel >/dev/null 2>&1 || {
+git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel >/dev/null 2>&1 || {
   echo "--repo 不是 Git 仓库: $repo_dir" >&2
   exit 2
 }
@@ -80,7 +80,7 @@ mkdir -p "$output_dir"
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-history.XXXXXX")"
 trap 'rm -rf "$temp_root"' EXIT
 
-repo_root="$(git -C "$repo_dir" rev-parse --show-toplevel)"
+repo_root="$(git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel)"
 workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 count=0
 
@@ -98,7 +98,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   metadata_file="$output_dir/$commit.meta.tsv"
   mkdir -p "$worktree"
 
-  if ! git -C "$repo_root" archive "$parent" | tar -xf - -C "$worktree"; then
+  if ! git -c core.fsmonitor=false -C "$repo_root" archive "$parent" | tar -xf - -C "$worktree"; then
     printf 'commit\t%s\nstatus\tarchive-failed\nsubject\t%s\n' "$commit" "$subject" >"$metadata_file"
     count=$((count + 1))
     continue
@@ -110,7 +110,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     -c user.name='local-review evaluation' \
     -c user.email='local-review-evaluation@localhost' \
     commit -qm 'evaluation parent snapshot'
-  git -C "$repo_root" diff --binary "$parent" "$commit" >"$patch_file"
+  git -c core.fsmonitor=false -C "$repo_root" diff --binary --no-ext-diff --no-textconv "$parent" "$commit" >"$patch_file"
 
   if ! git -C "$worktree" apply --whitespace=nowarn "$patch_file"; then
     printf 'commit\t%s\nstatus\tapply-failed\nsubject\t%s\n' "$commit" "$subject" >"$metadata_file"
