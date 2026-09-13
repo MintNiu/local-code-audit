@@ -210,4 +210,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: divide=$runs, security=$runs, tenant=$runs, clean=$((runs * 4)), migration=$runs, secret=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: divide=$runs, security=$runs, tenant=$runs, clean=$((runs * 4)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
