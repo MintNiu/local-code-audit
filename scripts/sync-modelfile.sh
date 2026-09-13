@@ -9,7 +9,7 @@ modelfile="$project_root/config/Modelfile"
 [[ -r "$modelfile" ]] || { echo "找不到 Modelfile: $modelfile" >&2; exit 2; }
 
 prompt_file="$(mktemp "${TMPDIR:-/tmp}/local-review-system-prompt.XXXXXX")"
-output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-modelfile.XXXXXX")"
+output_file="$(mktemp "$project_root/config/.Modelfile.XXXXXX")"
 trap 'rm -f "$prompt_file" "$output_file"' EXIT
 
 awk '/^review_system="\$\(cat <<'\''EOF'\''$/{found=1; next} found && /^EOF$/{exit} found{print}' "$review_script" >"$prompt_file"
