@@ -95,9 +95,22 @@ repo_root="$(git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-topleve
 workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$profile" == "personal" ]]; then
   review_script="$workflow_root/bin/local-review-local.sh"
+  profile_num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
+  profile_num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
+  profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-6000}"
+  profile_keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-5m}"
 else
   review_script="$workflow_root/bin/local-review.sh"
+  profile_num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
+  profile_num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
+  profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
+  profile_keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
 fi
+review_model="${OLLAMA_REVIEW_MODEL:-auto:tuned→review→base}"
+review_temperature="${OLLAMA_REVIEW_TEMPERATURE:-0}"
+review_seed="${OLLAMA_REVIEW_SEED:-42}"
+review_top_k="${OLLAMA_REVIEW_TOP_K:-40}"
+review_top_p="${OLLAMA_REVIEW_TOP_P:-0.9}"
 count=0
 
 while IFS=$'\t' read -r commit parent date subject status _rest; do
@@ -145,6 +158,15 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'date\t%s\n' "$date"
     printf 'subject\t%s\n' "$subject"
     printf 'profile\t%s\n' "$profile"
+    printf 'model\t%s\n' "$review_model"
+    printf 'temperature\t%s\n' "$review_temperature"
+    printf 'seed\t%s\n' "$review_seed"
+    printf 'top_k\t%s\n' "$review_top_k"
+    printf 'top_p\t%s\n' "$review_top_p"
+    printf 'num_ctx\t%s\n' "$profile_num_ctx"
+    printf 'num_predict\t%s\n' "$profile_num_predict"
+    printf 'max_diff_bytes\t%s\n' "$profile_max_diff_bytes"
+    printf 'keep_alive\t%s\n' "$profile_keep_alive"
     if [[ "$exit_code" -eq 0 ]]; then
       printf 'status\tcompleted\n'
     else
