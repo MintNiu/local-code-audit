@@ -25,6 +25,9 @@ ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 ```
 
 The installer only installs the local command. It never downloads a model automatically.
+If your shell cannot find the command after installation, add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.zprofile` (or your shell's startup
+file) and open a new terminal.
 The audit boundary is kept in `config/Modelfile` for direct Ollama use, while `local-review` is the authoritative path: it sends the current boundary explicitly and applies deterministic output gates. Rebuild the tuned model after changing rules that should also affect direct Ollama use.
 
 Prerequisites are a running Ollama service, the selected local model, Git, `jq`, `rg` (ripgrep), and Perl for output redaction. macOS already provides `curl`, `awk`, `tr`, `sort`, and `/usr/bin/perl`; check the required tools with `command -v ollama jq git curl awk tr sort rg perl`. On a Homebrew setup, install the missing utilities with `brew install jq ripgrep`.
