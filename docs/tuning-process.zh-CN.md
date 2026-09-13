@@ -235,6 +235,8 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 针对 `platform-file` 历史中反复出现的 OSS 凭据回退，又增加了配置预检：新增 YAML/Properties/INI/ENV/JSON/TOML 行中的 AccessKey、Secret、API key、密码和 Token 字面量会在本地先报告 P1；同文件可见的非本机 endpoint 会让普通密码/Token 键也纳入检查。空环境变量、示例占位符和 `#` 注释不触发，finding 只保留文件与行号，绝不回显凭据值。该规则仍是窄模式，不能替代密钥扫描器或运行时配置审计。
 
+对真实 `platform-file:7b62671` 的两次复测还验证了分片聚合修复：三份配置中的 6 个凭据行均被完整保留，结果文件 SHA-256 两次相同，且没有只有首行的残缺段落。该证据只证明这一个历史样本的确定性路径，不代表所有配置格式或模型发现都已达到 100% 召回。
+
 随后把两类高价值边界继续下沉到确定性预检：不可信 URL 参数直接进入常见 HTTP 出站调用时报告 SSRF，不可信文件名/对象 key 直接进入 `resolve`/`new File` 后再读写时报告路径遍历；同一 diff hunk 中出现明确 host allowlist、scheme 校验或 `normalize` + 根目录 `startsWith` 边界时保持 clean。规则只处理可见的窄证据链，不把所有 HTTP 或文件 API 泛化成漏洞。
 
 - 预检结果按完整问题段去重，不能再用逐行 `sort -u` 破坏“影响/修复建议/验证方式”的归属；模型重复同一位置和同一风险族时只保留一条，但不同根因继续全部保留。
