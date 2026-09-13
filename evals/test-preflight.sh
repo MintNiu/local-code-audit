@@ -662,6 +662,20 @@ duplicate_security_count="$(printf '%s\n' "$duplicate_security_output" | grep -F
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P1 application-credential.yml:3 - 明文 AccessKey 已提交。影响：凭据泄露。修复建议：改用无默认值的环境变量。验证方式：检查配置与历史。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+duplicate_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+duplicate_credential_count="$(printf '%s\n' "$duplicate_credential_output" | grep -F 'application-credential.yml:3' | wc -l | tr -d ' ')"
+[[ "$duplicate_credential_count" == "1" ]] || {
+  echo 'credential preflight and model duplicate were not collapsed' >&2
+  printf '%s\n' "$duplicate_credential_output" >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 set -euo pipefail
 previous=""
 for argument in "$@"; do
@@ -1003,6 +1017,11 @@ for i in {1..12}; do
   printf 'class A { int value = 2; } // changed line %02d\n' "$i" >>"$sort_repo/src/A.java"
   printf 'class B { int value = 2; } // changed line %02d\n' "$i" >>"$sort_repo/src/B.java"
 done
+cat >"$sort_repo/application.yml" <<'EOF'
+storage:
+  endpoint: https://oss.example.invalid
+  access-key-id: CHUNK_AKID_9f8e7d6c5b4a3210
+EOF
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1030,6 +1049,19 @@ p0_line="$(printf '%s\n' "$sorted_output" | grep -n '^P0 ' | head -n1 | cut -d: 
 p2_line="$(printf '%s\n' "$sorted_output" | grep -n '^P2 ' | head -n1 | cut -d: -f1)"
 if [[ -z "$p0_line" || -z "$p2_line" || "$p0_line" -ge "$p2_line" ]]; then
   echo 'aggregated findings were not globally sorted by severity' >&2
+  printf '%s\n' "$sorted_output" >&2
+  exit 1
+fi
+chunk_credential_count="$(printf '%s\n' "$sorted_output" | grep -c '^P1 application.yml:3 - 配置文件新增了疑似硬编码凭据。' | tr -d ' ')"
+[[ "$chunk_credential_count" -ge 1 ]] || {
+  echo 'chunked security preflight finding disappeared' >&2
+  printf '%s\n' "$sorted_output" >&2
+  exit 1
+}
+if printf '%s\n' "$sorted_output" | awk 'BEGIN { RS="" } /^P1 application\.yml:3 / { if ($0 !~ /影响：/ || $0 !~ /修复建议：/ || $0 !~ /验证方式：/) exit 1 }'; then
+  :
+else
+  echo 'chunked preflight finding lost required fields' >&2
   printf '%s\n' "$sorted_output" >&2
   exit 1
 fi

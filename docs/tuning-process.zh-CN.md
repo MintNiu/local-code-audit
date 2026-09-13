@@ -238,6 +238,7 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 随后把两类高价值边界继续下沉到确定性预检：不可信 URL 参数直接进入常见 HTTP 出站调用时报告 SSRF，不可信文件名/对象 key 直接进入 `resolve`/`new File` 后再读写时报告路径遍历；同一 diff hunk 中出现明确 host allowlist、scheme 校验或 `normalize` + 根目录 `startsWith` 边界时保持 clean。规则只处理可见的窄证据链，不把所有 HTTP 或文件 API 泛化成漏洞。
 
 - 预检结果按完整问题段去重，不能再用逐行 `sort -u` 破坏“影响/修复建议/验证方式”的归属；模型重复同一位置和同一风险族时只保留一条，但不同根因继续全部保留。
+- 分片聚合也按完整问题段路由预检证据；如果模型已经报告同一配置凭据、URL 凭据或除法根因，只保留一条完整 finding，不会留下只有首行的摘要。
 
 这套边界把模型从“必须记住两个固定答案”改成“负责开放式审计，确定性代码负责不可漏的已知高价值模式”。`evals/test-preflight.sh` 同时覆盖正例、负例、模型重复和字段连续性；每次修改 SYSTEM 规则或重建 tuned 模型后，必须先通过它和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh`。
 

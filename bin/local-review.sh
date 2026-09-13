@@ -617,6 +617,9 @@ filter_security_preflight_duplicates() {
       if ($0 ~ /除法分母未见非零保护/) {
         java_zero[key] = 1
       }
+      if ($0 ~ /配置文件新增了疑似硬编码凭据/) {
+        hardcoded_credential[key] = 1
+      }
       next
     }
     function flush(    header, key) {
@@ -625,7 +628,8 @@ filter_security_preflight_duplicates() {
       duplicate_security = (key in security && block ~ /凭据|token|secret|URL|URI|查询参数|路径/)
       duplicate_java_null = (key in java_null && block ~ /null|NullPointerException|拆箱|包装类型/)
       duplicate_java_zero = (key in java_zero && block ~ /除零|除数|ArithmeticException|分母/)
-      if (!duplicate_security && !duplicate_java_null && !duplicate_java_zero) {
+      duplicate_hardcoded_credential = (key in hardcoded_credential && block ~ /硬编码凭据|AccessKey|access-key|secret-key|api-key/)
+      if (!duplicate_security && !duplicate_java_null && !duplicate_java_zero && !duplicate_hardcoded_credential) {
         if (printed) printf "\n"
         printf "%s", block
         printed = 1
@@ -2051,17 +2055,30 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   fi
   sed 's/^/ M /' "$chunk_paths_file" >"$chunk_status_file"
   : >"$chunk_preflight_file"
-  while IFS= read -r preflight_line; do
-    [[ -n "$preflight_line" ]] || continue
-    preflight_path="${preflight_line#* }"
-    preflight_path="${preflight_path%%:*}"
-    if grep -Fxq -- "$preflight_path" "$chunk_paths_file"; then
-      if ! grep -Fxq -- "$preflight_line" "$preflight_emitted_file"; then
-        printf '%s\n' "$preflight_line" >>"$chunk_preflight_file"
-        printf '%s\n' "$preflight_line" >>"$preflight_emitted_file"
-      fi
-    fi
-  done <"$build_preflight_file"
+  # Preserve complete finding paragraphs when routing deterministic evidence
+  # to a shard. Line-by-line routing used to keep only the header, producing
+  # malformed findings and allowing the model's duplicate to survive.
+  awk -v paths_file="$chunk_paths_file" -v emitted_file="$preflight_emitted_file" '
+    BEGIN {
+      RS = "\n"
+      while ((getline path < paths_file) > 0) if (path != "") allowed[path] = 1
+      close(paths_file)
+      RS = ""
+      ORS = "\n\n"
+    }
+    FILENAME == ARGV[1] { emitted[$0] = 1; next }
+    {
+      header = $0
+      sub(/[\r\n].*$/, "", header)
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
+      sub(/:[0-9]+(-[0-9]+)?[[:space:]]+-.*$/, "", header)
+      if (header in allowed && !emitted[$0]++) {
+        print $0
+        print $0 >> emitted_file
+        close(emitted_file)
+      }
+    }
+  ' "$preflight_emitted_file" "$build_preflight_file" >"$chunk_preflight_file"
   chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_preflight_file")"
   # Give each shard the complete changed-path inventory as scope metadata.
   # This is intentionally paths-only (no extra source content): it prevents
