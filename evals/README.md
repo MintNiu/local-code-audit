@@ -39,7 +39,7 @@
 
 运行结果仍需人工确认真实问题、误报、行号和无问题提交，不能把模型输出直接当作标注。
 
-完成人工标注后，建议把每个提交去重为一行，并明确填写 `gold_p0_p1`（人工确认的 P0/P1 根因数）和 `p0_p1_found`（模型实际命中的 P0/P1 根因数）。使用以下命令汇总，脚本会拒绝重复提交或缺少严格指标列：
+完成人工标注后，建议把每个提交去重为一行，并明确填写 `gold_p0_p1`（人工确认的 P0/P1 根因数）和 `p0_p1_found`（模型实际命中的 P0/P1 根因数）。可复制 [scorecard.template.tsv](scorecard.template.tsv) 开始填写。使用以下命令汇总，脚本会拒绝重复提交、缺列、非法数字、`p0_p1_found` 超过人工真值或未完成的输出：
 
 ```bash
 ./evals/summarize-scorecard.sh ~/.local/share/local-review/evals/platform-api-labels/stage1-consolidated-scorecard.tsv
@@ -80,6 +80,12 @@
 ```
 
 该测试覆盖当前差异新增但仓库缺失的类型、显式 `--context` 仍引用当前提交删除类型的跨仓库候选、URL 查询令牌、Java 包装类型除法、跨 hunk SSRF、URL builder、路径 API 别名和配置硬编码凭据；它使用假的 Ollama/Curl，验证预检证据注入、确定性结果合并、问题段字段完整性和输出门禁，不消耗模型推理。
+
+scorecard 汇总器也有独立的输入校验回归：
+
+```bash
+./evals/test-scorecard.sh
+```
 
 运行态规则校验也有独立回归测试：
 
