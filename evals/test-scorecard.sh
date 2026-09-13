@@ -20,6 +20,22 @@ actual="$($repo_root/evals/summarize-scorecard.sh "$valid")"
   exit 1
 }
 
+# Existing private scorecards may carry an additional evaluation_scope column
+# and the earlier false_positives spelling; preserve those rows while still
+# validating the same numeric invariants.
+legacy="$fixture_root/legacy.tsv"
+cat >"$legacy" <<'EOF'
+commit	model	temperature	seed	num_ctx	gold_p0_p1	p0_p1_found	predicted_candidates	false_positives	output_complete	elapsed_seconds	evaluation_scope	notes
+abcdef5	devstral-small-2-review-tuned	0	42	16384	1	1	2	1	true	9	single-repo	legacy
+EOF
+legacy_expected=$'commits=1\ngold_p0_p1=1\np0_p1_found=1\np0_p1_recall=100.0%\nrecall_measurable=true\npredicted_candidates=2\nfalse_positives=1\nincomplete_runs=0'
+legacy_actual="$($repo_root/evals/summarize-scorecard.sh "$legacy")"
+[[ "$legacy_actual" == "$legacy_expected" ]] || {
+  echo 'legacy scorecard compatibility changed unexpectedly' >&2
+  printf '%s\n' "$legacy_actual" >&2
+  exit 1
+}
+
 assert_rejected() {
   local name="$1"
   local content="$2"

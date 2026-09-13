@@ -243,7 +243,7 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 合成回归现在默认比较同一夹具第一次运行与后续运行的完整输出 SHA-256；任何内容漂移都会让门禁失败，而不是只打印哈希供人工查看。仅在排查模型波动时可临时设置 `SYNTHETIC_REQUIRE_STABLE_HASH=0`，该结果不能作为稳定性验收。
 
-历史 scorecard 汇总器也改为严格校验 12 列 TSV、提交号、非负指标、完成标记及指标上下界；缺列、重复提交、非法数字或“命中根因数超过人工真值”都会 fail-closed。公开仓库提供 [scorecard.template.tsv](../evals/scorecard.template.tsv)，并用 `evals/test-scorecard.sh` 做输入回归。
+历史 scorecard 汇总器也改为严格校验必需 TSV 列、提交号、非负指标、完成标记及指标上下界；缺列、重复提交、非法数字或“命中根因数超过人工真值”都会 fail-closed，同时允许保留额外评测元数据列。公开仓库提供 [scorecard.template.tsv](../evals/scorecard.template.tsv)，并用 `evals/test-scorecard.sh` 做输入回归。
 
 确定性预检属于 `local-review` 运行器，不属于直接执行 `codex`/`ollama run` 时的模型能力；高可靠审查必须从 `local-review` 或 `local-review-local` 入口发起。全局安装现在使用指向仓库脚本的符号链接，避免旧复制文件继续运行旧预检；`scripts/verify-runtime.sh` 同时校验全局入口与当前仓库脚本，发现漂移即失败。历史结果应记录运行器版本，否则不能把不同预检版本的召回率直接比较。
 
