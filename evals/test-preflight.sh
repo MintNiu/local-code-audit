@@ -113,6 +113,16 @@ public interface ModuleClient {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/TokenProxy.java" <<'EOF'
+package com.example.api.client;
+
+final class TokenProxy {
+    String forward(String token) {
+        return "https://internal.example/data?x-token=" + token;
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/Client.java" <<'EOF'
 package com.example.api.client;
 
@@ -139,6 +149,7 @@ PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" LOCAL_R
   "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissing' "$capture" >/dev/null
+grep -F '凭据值被拼接到 URL 查询参数或路径中' "$capture" >/dev/null
 grep -Fx 'devstral-small-2-review-tuned' "$resolved_model_capture" >/dev/null
 [[ ! -e "$fixture_root/textconv.marker" ]] || {
   echo 'git diff executed a configured textconv filter' >&2

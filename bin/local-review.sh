@@ -366,23 +366,87 @@ filter_unsupported_shard_findings() {
 }
 
 dedup_exact_findings() {
-  # Remove only byte-identical logical finding blocks. Distinct wording,
-  # paths, line ranges, and independently repairable findings remain visible.
+  # Remove byte-identical blocks and an aggregate block only when the same
+  # location already has independently reported component roots. This keeps
+  # every distinct root visible while avoiding "aggregate + two duplicates".
   awk '
-    function flush(    key) {
+    function flush(    key, header, body_text) {
       if (block == "") return
-      key = block
-      if (!seen[key]++) {
+      lines_count = split(block, block_lines, "\n")
+      header = block_lines[1]
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
+      sub(/[[:space:]]+-.*$/, "", header)
+      key = header
+      body_text = block
+      blocks[++count] = block
+      keys[count] = key
+      bodies[count] = body_text
+      has_null[count] = (body_text ~ /null|NullPointerException|空/)
+      has_div[count] = (body_text ~ /ArithmeticException|除零|除数|b[[:space:]]*==[[:space:]]*0/)
+      block = ""
+    }
+    /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    { block = block $0 "\n" }
+    END {
+      flush()
+      for (i = 1; i <= count; i++) {
+        duplicate = 0
+        aggregate = has_null[i] && has_div[i]
+        if (aggregate) {
+          for (j = 1; j <= count; j++) {
+            if (j == i || keys[j] != keys[i]) continue
+            if (has_null[j] && !has_div[j]) null_component = 1
+            if (has_div[j] && !has_null[j]) div_component = 1
+          }
+          if (null_component && div_component) skip = 1
+        }
+        if (!skip && !seen[bodies[i]]++) {
+          if (printed) printf "\n"
+          printf "%s", blocks[i]
+          printed = 1
+        }
+        null_component = 0
+        div_component = 0
+        skip = 0
+      }
+    }
+  '
+}
+
+filter_security_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-security-filter.XXXXXX")"
+  awk '
+    FILENAME == ARGV[1] {
+      if ($0 ~ /凭据值被拼接到 URL/) {
+        key = $2
+        security[key] = 1
+      }
+      next
+    }
+    function flush(    header, key) {
+      if (block == "") return
+      header = block
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
+      sub(/[[:space:]]+-.*$/, "", header)
+      sub(/-[0-9]+$/, "", header)
+      key = header
+      if (!(key in security) || block !~ /凭据|token|secret|URL|URI|查询参数|路径/) {
         if (printed) printf "\n"
         printf "%s", block
         printed = 1
       }
       block = ""
     }
-    /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
-    { block = block $0 "\n" }
-    END { flush() }
-  '
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
 }
 
 sort_findings_by_severity() {
@@ -1016,6 +1080,7 @@ merge_preflight_findings() {
   local merged_file
 
   [[ -s "$preflight_file" ]] || return 0
+  filter_security_preflight_duplicates "$output_file" "$preflight_file"
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
   {
     if grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$output_file"; then
@@ -1136,6 +1201,53 @@ collect_deleted_context_preflight() {
   LC_ALL=C sort -u -o "$output_file" "$output_file"
 }
 
+collect_security_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # Catch the unambiguous credential-in-URL pattern before model inference.
+  # This is intentionally narrow: only added lines that visibly concatenate a
+  # token/secret-like value into a query or path are reported.
+  awk '
+    function flush_hunk() {
+      if (hunk_start == "") return
+      line_no = hunk_start
+      hunk_start = ""
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      hunk_start = hunk + 0
+      line_no = hunk_start
+      next
+    }
+    {
+      if (hunk_start == "") next
+      if (substr($0, 1, 1) == "+") {
+        added = substr($0, 2)
+        if (added ~ /(^|[?&]|\/)([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)[=\/]/ &&
+            added ~ /\+[[:space:]]*(token|secret|password|passwd|apiKey|accessKey)([^[:alnum:]_]|$)/) {
+          printf "P1 %s:%d - 凭据值被拼接到 URL 查询参数或路径中，可能通过请求目标泄漏。\n影响：token/secret 等敏感值会进入 URL，可能被代理、网关或访问日志持久化。\n修复建议：改用受保护的请求头或安全的内部认证通道，避免把秘密放入 URL。\n验证方式：检查最终请求 URI 和网关/代理日志，确认 URL 不再包含敏感值。\n\n", path, line_no
+        }
+        line_no++
+      } else if (substr($0, 1, 1) == " ") {
+        line_no++
+      }
+    }
+  ' "$diff_file" >>"$output_file"
+  LC_ALL=C sort -u -o "$output_file" "$output_file"
+}
+
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
@@ -1206,6 +1318,7 @@ else
   : >"$java_main_source_index"
 fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
+collect_security_preflight "$chunk_input_file" "$build_preflight_file"
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames
