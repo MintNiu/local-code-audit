@@ -251,6 +251,8 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 风险族修复后的真实 `platform-api` 20 提交回归全部完成且无超时/截断；除已知的 `420ae70c` 构建阻断外，`63d520b` 和 `a1284658` 各新增 1 条从 URL 查询参数读取 `x-token` 的 P1 候选。差异中确实存在 header 缺失时回退到 `getParameter("x-token")` 的路径，因此它们不再被静默视为 clean；是否计入正式召回/误报指标仍需结合业务契约人工确认，旧 scorecard 不自动改写。
 
+为防止这类候选在后续重建中回归，合成门禁新增独立的 `java-token-query` 正例，覆盖 `request.getParameter("x-token")`；同时对模型把整份文件标为 `1-9`、预检标为第 `7` 行的重叠范围做了去重回归。修改后 5 轮均稳定命中，且内部 header 对照仍保持 clean。
+
 这套边界把模型从“必须记住两个固定答案”改成“负责开放式审计，确定性代码负责不可漏的已知高价值模式”。`evals/test-preflight.sh` 同时覆盖正例、负例、模型重复和字段连续性；每次修改 SYSTEM 规则或重建 tuned 模型后，必须先通过它和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh`。
 
 合成回归现在默认比较同一夹具第一次运行与后续运行的完整输出 SHA-256；任何内容漂移都会让门禁失败，而不是只打印哈希供人工查看。仅在排查模型波动时可临时设置 `SYNTHETIC_REQUIRE_STABLE_HASH=0`，该结果不能作为稳定性验收。

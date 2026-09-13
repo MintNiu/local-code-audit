@@ -650,29 +650,83 @@ filter_security_preflight_duplicates() {
       sub(/-[0-9]+$/, "", value)
       return canonicalize_key(value)
     }
+    function set_location(line,    value, suffix, pieces) {
+      value = line
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", value)
+      sub(/[[:space:]]+-.*$/, "", value)
+      loc_path = value
+      loc_start = 0
+      loc_end = 0
+      if (match(value, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?$/)) {
+        suffix = substr(value, RSTART, RLENGTH)
+        loc_path = substr(value, 1, RSTART - 1)
+        sub(/^:/, "", suffix)
+        gsub(/[[:space:]]+/, "", suffix)
+        split(suffix, pieces, "-")
+        loc_start = pieces[1] + 0
+        loc_end = (pieces[2] == "" ? loc_start : pieces[2] + 0)
+      }
+      loc_path = canonicalize_key(loc_path)
+    }
+    function overlaps(path, start, finish, other_path, other_start, other_finish) {
+      return path == other_path && start > 0 && other_start > 0 && start <= other_finish && other_start <= finish
+    }
     FILENAME == ARGV[1] {
-      key = finding_key($0)
       if ($0 ~ /凭据值被拼接到 URL|认证令牌从 URL 查询参数读取/) {
-        security[key] = 1
+        set_location($0)
+        security_path[++security_count] = loc_path
+        security_start[security_count] = loc_start
+        security_end[security_count] = loc_end
       }
       if ($0 ~ /Integer 包装类型参与除法时未见非空保护/) {
-        java_null[key] = 1
+        set_location($0)
+        java_null_path[++java_null_count] = loc_path
+        java_null_start[java_null_count] = loc_start
+        java_null_end[java_null_count] = loc_end
       }
       if ($0 ~ /除法分母未见非零保护/) {
-        java_zero[key] = 1
+        set_location($0)
+        java_zero_path[++java_zero_count] = loc_path
+        java_zero_start[java_zero_count] = loc_start
+        java_zero_end[java_zero_count] = loc_end
       }
       if ($0 ~ /配置文件新增了疑似硬编码凭据/) {
-        hardcoded_credential[key] = 1
+        set_location($0)
+        hardcoded_path[++hardcoded_count] = loc_path
+        hardcoded_start[hardcoded_count] = loc_start
+        hardcoded_end[hardcoded_count] = loc_end
       }
       next
     }
-    function flush(    header, key) {
+    function flush(    header, key, i) {
       if (block == "") return
-      key = finding_key(block)
-      duplicate_security = (key in security && block ~ /凭据|token|secret|URL|URI|查询参数|路径/)
-      duplicate_java_null = (key in java_null && block ~ /null|NullPointerException|拆箱|包装类型/)
-      duplicate_java_zero = (key in java_zero && block ~ /除零|除数|ArithmeticException|分母/)
-      duplicate_hardcoded_credential = (key in hardcoded_credential && block ~ /硬编码凭据|AccessKey|access-key|secret-key|api-key/)
+      header = block
+      sub(/[\r\n].*$/, "", header)
+      set_location(header)
+      duplicate_security = 0
+      if (block ~ /凭据|token|secret|URL|URI|查询参数|路径/) {
+        for (i = 1; i <= security_count; i++) {
+          if (overlaps(loc_path, loc_start, loc_end, security_path[i], security_start[i], security_end[i])) duplicate_security = 1
+        }
+      }
+      duplicate_java_null = 0
+      if (block ~ /null|NullPointerException|拆箱|包装类型/) {
+        for (i = 1; i <= java_null_count; i++) {
+          if (overlaps(loc_path, loc_start, loc_end, java_null_path[i], java_null_start[i], java_null_end[i])) duplicate_java_null = 1
+        }
+      }
+      duplicate_java_zero = 0
+      if (block ~ /除零|除数|ArithmeticException|分母/) {
+        for (i = 1; i <= java_zero_count; i++) {
+          if (overlaps(loc_path, loc_start, loc_end, java_zero_path[i], java_zero_start[i], java_zero_end[i])) duplicate_java_zero = 1
+        }
+      }
+      duplicate_hardcoded_credential = 0
+      if (block ~ /硬编码凭据|AccessKey|access-key|secret-key|api-key/) {
+        for (i = 1; i <= hardcoded_count; i++) {
+          if (overlaps(loc_path, loc_start, loc_end, hardcoded_path[i], hardcoded_start[i], hardcoded_end[i])) duplicate_hardcoded_credential = 1
+        }
+      }
       if (!duplicate_security && !duplicate_java_null && !duplicate_java_zero && !duplicate_hardcoded_credential) {
         if (printed) printf "\n"
         printf "%s", block

@@ -50,7 +50,7 @@
 
 ## 当前状态（2026-09-14）
 
-- 阶段 0：已通过。默认门禁完成 5/5 正例、5/5 负例；除法、URL 凭证泄漏、租户隔离、迁移删除、字面量凭据和预签名票据等正例每次全部命中，4 个 clean 负例没有 P0～P3，重复运行输出哈希保持一致，截断故障路径显式失败。无模型 `test-preflight.sh` 另外覆盖构建完整性、跨 hunk SSRF、URL builder、路径 API 别名、多处 Java 除法、配置凭据和 guard 边界；`run-synthetic.sh` 会先执行该门禁。
+- 阶段 0：已通过。默认门禁完成 5/5 正例、5/5 负例；除法、URL 拼接凭证、URL 查询参数令牌、租户隔离、迁移删除、字面量凭据和预签名票据等正例每次全部命中，4 个 clean 负例没有 P0～P3，重复运行输出哈希保持一致，截断故障路径显式失败。无模型 `test-preflight.sh` 另外覆盖构建完整性、跨 hunk SSRF、URL builder、路径 API 别名、多处 Java 除法、配置凭据和 guard 边界；`run-synthetic.sh` 会先执行该门禁。
 - 阶段 1：未完成。已从本地 `platform-api` 历史建立 20 个候选提交清单，保存在 `~/.local/share/local-review/evals/platform-api-20.tsv`；20 个提交都已完成首轮私有运行和人工初判，但仍需重复运行、补充跨仓库 context 样本并完善行号准确率统计。
 - 当前首轮证据：`91bff253` 和 `2f6c3934` 的模型候选均被人工判定为误报；`39955c8` 在默认 3000 字节门禁下记录为基础设施失败，提高预算后完整返回但 29 条候选仍均为误报；`cbe47ea0`、`501ad5a1`、`ccea445b`、`a1284658`、`f1a093a3` 以及剩余文件管理/Swagger/策略提交均完整返回 clean。`420ae70c` 的旧基线漏报了当前提交树缺失 DTO 的 P1 构建阻断；增加确定性 import 预检后复测识别出该根因。`f6fc2f89` 在提供 `platform-file` context 并启用删除类型预检后识别出跨仓库 P1 兼容性阻断。以上仍不足以计算高可信召回率，不能宣称已达到高可用生产标准。
 - 当前模型参数：`temperature=0`、`seed=42`、`top_k=40`、`top_p=0.9`、`num_ctx=16384`、`num_predict=4096`。通用 `local-review` 在超过 3000 字节时按文件、再按 hunk 分片，默认 `chunk_timeout=180s`、`chunk_num_predict=2048`；个人 `local-review-local` 为了减少复杂分片截断将 `chunk_num_predict` 覆盖为 4096。大变更也可显式提高 `num_ctx`，但必须重新评测耗时和超时率。
