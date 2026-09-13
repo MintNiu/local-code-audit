@@ -1027,12 +1027,22 @@ collect_build_preflight() {
 collect_deleted_context_preflight() {
   local deleted_types_file="$1"
   local output_file="$2"
-  local context_file context_path deleted_path fqcn import_line match_path match_line
+  local context_file context_path deleted_path java_relative_path fqcn import_line match_path match_line
 
   while IFS= read -r deleted_path; do
     [[ -n "$deleted_path" ]] || continue
-    [[ "$deleted_path" == src/main/java/*.java ]] || continue
-    fqcn="${deleted_path#src/main/java/}"
+    case "$deleted_path" in
+      src/main/java/*.java)
+        java_relative_path="${deleted_path#src/main/java/}"
+        ;;
+      */src/main/java/*.java)
+        java_relative_path="${deleted_path##*/src/main/java/}"
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    fqcn="$java_relative_path"
     fqcn="${fqcn%.java}"
     fqcn="${fqcn//\//.}"
     while IFS=: read -r match_path match_line _; do

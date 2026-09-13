@@ -6,6 +6,7 @@ fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-preflight-test.XXXXXX")"
 fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
 context="$fixture_root/downstream/Downstream.java"
+module_context="$fixture_root/downstream/ModuleDownstream.java"
 capture="$fixture_root/request.json"
 show_log="$fixture_root/ollama-show.log"
 tmp_dir="$fixture_root/tmp"
@@ -196,6 +197,30 @@ PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" \
   "$repo_root/bin/local-review.sh" --repo "$repo" --context "$context" >/dev/null
 grep -F '当前提交删除类型 com.example.api.dto.DeletedDTO' "$capture" >/dev/null
 grep -F '仓库内文件 src/main/java/com/example/api/client/Consumer.java' "$capture" >/dev/null
+
+mkdir -p "$repo/module-b/src/main/java/com/example/api/dto"
+cat >"$repo/module-b/src/main/java/com/example/api/dto/ModuleDeletedDTO.java" <<'EOF'
+package com.example.api.dto;
+
+public record ModuleDeletedDTO(String value) {}
+EOF
+git -C "$repo" add module-b/src/main/java/com/example/api/dto/ModuleDeletedDTO.java
+git -C "$repo" commit -qm module-dto-base
+cat >"$module_context" <<'EOF'
+package com.example.downstream;
+
+import com.example.api.dto.ModuleDeletedDTO;
+
+final class ModuleDownstream {
+    ModuleDeletedDTO value;
+}
+EOF
+git -C "$repo" rm -q module-b/src/main/java/com/example/api/dto/ModuleDeletedDTO.java
+
+PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" --context "$module_context" >/dev/null
+grep -F '当前提交删除类型 com.example.api.dto.ModuleDeletedDTO' "$capture" >/dev/null
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
