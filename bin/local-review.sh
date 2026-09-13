@@ -1630,13 +1630,13 @@ collect_security_preflight() {
           line_no++
           next
         }
-        credential_key = added ~ /(^|[.[:space:]_-])(access[-_]?key([-_]?id|[-_]?secret)?|secret[-_]?key|api[-_]?key|client[-_]?secret|private[-_]?key|password|passwd|token)([.[:space:]_:-]|=)/
+        credential_key = added ~ /(^|[.[:space:]_"-])(access[-_]?key([-_]?id|[-_]?secret)?|secret[-_]?key|api[-_]?key|client[-_]?secret|private[-_]?key|password|passwd|token)([.[:space:]_:"-]|=)/
         credential_high = added ~ /(access[-_]?key|secret[-_]?key|api[-_]?key|client[-_]?secret|private[-_]?key)/
         credential_placeholder = added ~ /\$\{[A-Za-z_][A-Za-z0-9_]*:[^}]+\}/ && added !~ /\$\{[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*\}/
-        credential_literal = added ~ /(:|=)[[:space:]]*"?[A-Za-z0-9][A-Za-z0-9_.\/+={}-]{15,}"?[[:space:]]*(#.*)?$/
+        credential_literal = added ~ /(:|=)[[:space:]]*"?[A-Za-z0-9][A-Za-z0-9_.\/+={}-]{15,}"?/
         if (path ~ /\.(ya?ml|properties|conf|ini|env|json|toml)$/ && credential_key &&
             ((credential_placeholder && tolower(added) !~ /change[_-]?me|redacted|example|placeholder|<[^>]+>/) ||
-             (credential_literal && tolower(added) !~ /change[_-]?me|redacted|example|dummy|placeholder|replace|your-|<[^>]+>/))) {
+             (credential_literal && tolower(added) !~ /change[_-]?me|redacted|dummy|placeholder|replace|your-|<[^>]+>/))) {
           credential_count++
           credential_lines[credential_count] = line_no
           credential_high_lines[credential_count] = credential_high

@@ -138,6 +138,18 @@ storage:
   password: ${DB_PASSWORD:}
   # access-key-secret: AKID_comment_should_not_trigger
 EOF
+cat >"$repo/application-credential.json" <<'EOF'
+{
+  "storage": {
+    "endpoint": "https://oss.example.invalid",
+    "api-key": "JSON_ApiKey_9f8e7d6c5b4a3210",
+    "name": "ordinary-value"
+  }
+}
+EOF
+cat >"$repo/application-credential-inline.json" <<'EOF'
+{"endpoint":"https://oss.example.invalid","api-key":"INLINE_ApiKey_9f8e7d6c5b4a3210","name":"ordinary-value"}
+EOF
 
 cat >"$repo/src/main/java/com/example/api/client/TokenProxy.java" <<'EOF'
 package com.example.api.client;
@@ -586,13 +598,25 @@ grep -F 'P1 application-credential.yml' "$capture" >/dev/null || {
   cat "$capture" >&2
   exit 1
 }
+grep -F 'P1 application-credential.json' "$capture" >/dev/null || {
+  echo 'missing JSON hardcoded credential preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'P1 application-credential-inline.json' "$capture" >/dev/null || {
+  echo 'missing inline JSON hardcoded credential preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
 if grep -F 'P1 application-credential-safe.yml' "$capture" >/dev/null; then
   echo 'hardcoded credential preflight reported placeholder/comment negative fixture' >&2
   cat "$capture" >&2
   exit 1
 fi
 if grep -F 'AKID_9f8e7d6c5b4a3210' "$review_output" >/dev/null || \
-   grep -F 'S3cr3t_9f8e7d6c5b4a3210' "$review_output" >/dev/null; then
+   grep -F 'S3cr3t_9f8e7d6c5b4a3210' "$review_output" >/dev/null || \
+   grep -F 'JSON_ApiKey_9f8e7d6c5b4a3210' "$review_output" >/dev/null || \
+   grep -F 'INLINE_ApiKey_9f8e7d6c5b4a3210' "$review_output" >/dev/null; then
   echo 'hardcoded credential value leaked into review output' >&2
   exit 1
 fi
