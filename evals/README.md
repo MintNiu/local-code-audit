@@ -9,6 +9,7 @@
 真实历史提交使用 `./evals/run-history.sh`。它默认调用个人高性能 `local-review-local`，只读取本地仓库，在临时目录展开父提交并应用目标 diff，把原始结果和元数据写入你指定的私有目录；不要把该目录指向本公开仓库。需要对比保守基线时，追加 `--profile baseline`。
 准备历史 diff 时同样会禁用仓库配置的 `textconv` 和 fsmonitor，确保评测过程不会执行目标仓库的可配置 Git 命令。
 每个提交的 `.meta.tsv` 会记录 profile、模型选择、temperature、seed、top-k/top-p、上下文/输出预算、diff 字节预算和 `keep_alive`，避免个人版与基线结果混用。
+切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
 
 ```bash
 ./evals/run-history.sh \
