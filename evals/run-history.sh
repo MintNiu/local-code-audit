@@ -105,9 +105,24 @@ if (( ${#context_files[@]} > 0 )); then
   done
   context_files=("${resolved_context_files[@]}")
 fi
-if (( ${#context_files[@]} > 0 )) && ! command -v shasum >/dev/null 2>&1; then
-  echo "使用 --context 时需要 shasum 以记录上下文版本哈希。" >&2
-  exit 2
+if (( ${#context_files[@]} > 0 )); then
+  if ! command -v shasum >/dev/null 2>&1; then
+    echo "使用 --context 时需要 shasum 以记录上下文版本哈希。" >&2
+    exit 2
+  fi
+  if ! command -v realpath >/dev/null 2>&1; then
+    echo "使用 --context 时需要 realpath 以规范化上下文路径。" >&2
+    exit 2
+  fi
+  normalized_context_files=()
+  for context_path in "${context_files[@]}"; do
+    if ! context_path="$(realpath "$context_path")"; then
+      echo "无法规范化 --context 路径: $context_path" >&2
+      exit 2
+    fi
+    normalized_context_files+=("$context_path")
+  done
+  context_files=("${normalized_context_files[@]}")
 fi
 git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel >/dev/null 2>&1 || {
   echo "--repo 不是 Git 仓库: $repo_dir" >&2
@@ -163,10 +178,23 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     break
   fi
 
+  if [[ ! "$commit" =~ ^[0-9a-fA-F]{7,64}$ || ! "$parent" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+    echo "跳过无效清单行：commit/parent 必须是十六进制 Git 提交号 ($commit / $parent)。" >&2
+    count=$((count + 1))
+    continue
+  fi
+  if ! git -c core.fsmonitor=false -C "$repo_root" cat-file -e "$commit^{commit}" 2>/dev/null || \
+     ! git -c core.fsmonitor=false -C "$repo_root" cat-file -e "$parent^{commit}" 2>/dev/null; then
+    echo "跳过无效清单行：commit 或 parent 不存在于 --repo ($commit / $parent)。" >&2
+    count=$((count + 1))
+    continue
+  fi
+
   worktree="$temp_root/$commit"
   patch_file="$temp_root/$commit.patch"
   result_file="$output_dir/$commit.txt"
   metadata_file="$output_dir/$commit.meta.tsv"
+  : >"$result_file"
   mkdir -p "$worktree"
 
   if ! git -c core.fsmonitor=false -C "$repo_root" archive "$parent" | tar -xf - -C "$worktree"; then
@@ -193,46 +221,55 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   exit_code=0
   resolved_model_file="$temp_root/$commit.resolved-model"
   resolved_model="unresolved"
-  context_hashes_before=()
-  context_hashes_after=()
-  context_changed=false
+  review_context_files=()
+  context_hashes=()
+  context_origins=()
+  context_snapshot_dir="$temp_root/$commit.context"
+  context_prepare_failed=false
+  context_snapshot_complete=true
   if (( ${#context_files[@]} > 0 )); then
+    mkdir -p "$context_snapshot_dir"
+    context_index=0
     for context_file in "${context_files[@]}"; do
-      context_hashes_before+=("$(shasum -a 256 "$context_file" | awk '{print $1}')")
+      context_snapshot="$context_snapshot_dir/context-$context_index-${context_file##*/}"
+      if ! cp "$context_file" "$context_snapshot"; then
+        echo "本次历史评测无效：无法冻结 context 文件 $context_file。" >&2
+        context_prepare_failed=true
+        context_snapshot_complete=false
+        break
+      fi
+      context_origins+=("$context_file")
+      review_context_files+=("$context_snapshot")
+      context_hashes+=("$(shasum -a 256 "$context_snapshot" | awk '{print $1}')")
+      context_index=$((context_index + 1))
     done
   fi
   review_args=(--repo "$worktree")
-  if (( ${#context_files[@]} > 0 )); then
-    for context_file in "${context_files[@]}"; do
-      review_args+=(--context "$context_file")
+  if (( ${#review_context_files[@]} > 0 )); then
+    for context_snapshot in "${review_context_files[@]}"; do
+      review_args+=(--context "$context_snapshot")
     done
   fi
-  LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_file" \
-    "$review_script" "${review_args[@]}" >"$result_file" 2>&1 || exit_code=$?
+  if [[ "$context_prepare_failed" == true ]]; then
+    exit_code=12
+  else
+    LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_file" \
+      "$review_script" "${review_args[@]}" >"$result_file" 2>&1 || exit_code=$?
+  fi
   end="$(date +%s)"
+  if [[ "$context_prepare_failed" == false && -f "$result_file" && ${#review_context_files[@]} -gt 0 ]]; then
+    for context_index in "${!review_context_files[@]}"; do
+      CONTEXT_FROM="${review_context_files[$context_index]}" \
+      CONTEXT_TO="${context_origins[$context_index]}" \
+        perl -0pi -e 's/\Q$ENV{CONTEXT_FROM}\E/$ENV{CONTEXT_TO}/g' "$result_file"
+    done
+  fi
   if [[ -s "$resolved_model_file" ]]; then
     resolved_model="$(head -n 1 "$resolved_model_file")"
   elif [[ "$exit_code" -eq 0 ]]; then
     echo "本次历史评测无效：审查成功但未记录实际模型名。" >&2
     exit_code=12
   fi
-  if (( ${#context_files[@]} > 0 )); then
-    for context_index in "${!context_files[@]}"; do
-      if [[ -f "${context_files[$context_index]}" ]]; then
-        context_hashes_after+=("$(shasum -a 256 "${context_files[$context_index]}" | awk '{print $1}')")
-      else
-        context_hashes_after+=(missing)
-      fi
-      if [[ "${context_hashes_before[$context_index]}" != "${context_hashes_after[$context_index]}" ]]; then
-        context_changed=true
-      fi
-    done
-  fi
-  if [[ "$context_changed" == true ]]; then
-    echo "本次历史评测无效：context 文件在审查期间发生变化，结果未计入评分。" >&2
-    exit_code=12
-  fi
-
   {
     printf 'commit\t%s\n' "$commit"
     printf 'parent\t%s\n' "$parent"
@@ -249,13 +286,13 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'num_predict\t%s\n' "$profile_num_predict"
     printf 'max_diff_bytes\t%s\n' "$profile_max_diff_bytes"
     printf 'keep_alive\t%s\n' "$profile_keep_alive"
-    if (( ${#context_files[@]} > 0 )); then
-      for context_index in "${!context_files[@]}"; do
-        printf 'context\t%s\tbefore=%s\tafter=%s\n' \
-          "${context_files[$context_index]}" "${context_hashes_before[$context_index]}" "${context_hashes_after[$context_index]}"
+    if (( ${#context_origins[@]} > 0 )); then
+      for context_index in "${!context_origins[@]}"; do
+        printf 'context\t%s\tsha256=%s\n' \
+          "${context_origins[$context_index]}" "${context_hashes[$context_index]}"
       done
     fi
-    printf 'context_changed\t%s\n' "$context_changed"
+    printf 'context_snapshot\t%s\n' "$context_snapshot_complete"
     if [[ "$exit_code" -eq 0 ]]; then
       printf 'status\tcompleted\n'
     else
