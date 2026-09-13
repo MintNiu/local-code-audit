@@ -274,7 +274,9 @@ sanitize_terminal_text() {
   # Normalize terminal control sequences before evidence filters inspect the
   # model text; otherwise an escape inserted inside a keyword could bypass a
   # deterministic boundary check.
-  perl -pe '
+  perl -MEncode -0777 -pe '
+    BEGIN { binmode STDOUT, ":encoding(UTF-8)"; }
+    $_ = decode("UTF-8", $_, Encode::FB_DEFAULT);
     s~\e\][^\a]*(?:\a|\e\\)~~g;
     s!\e\[[0-?]*[ -/]*[@-~]!!g;
     s~\e[()][0-2A-Za-z]~~g;
@@ -301,6 +303,7 @@ redact_sensitive_text() {
     s~((?:[?&]|^)(?:x-amz-)?(?:signature|sig|security-token|credential|access[-_]?token|refresh[-_]?token|id[-_]?token)=)[^&#[:space:],，;；)}`"]+~$1<REDACTED>~ig;
     s~((?:access[-_ ]?key(?:[-_ ]?(?:id|secret))?|secret|password|passwd|token|api[-_ ]?key)[[:space:]]*[:=：][[:space:]]*)[^[:space:],，;；)}`]+~$1<REDACTED>~ig;
     s~((?:字面量|硬编码|literal|hard[-_ ]coded)[[:space:]]*(?:凭据|令牌|token|secret|password)[[:space:]]+)[A-Za-z0-9][A-Za-z0-9._-]{7,}~$1<REDACTED>~ig;
+    s~((?:AccessKey|Secret|凭据|密钥)[^。\n]{0,120}?)([A-Za-z0-9][A-Za-z0-9._+/=-]{15,})~$1<REDACTED>~ig;
     s~\b(?:AKIA|ASIA|LTAI)[A-Za-z0-9_-]{8,}\b~<REDACTED>~g;
   '
 }
@@ -418,7 +421,7 @@ dedup_exact_findings() {
   # Remove byte-identical blocks and an aggregate block only when the same
   # location already has independently reported component roots. This keeps
   # every distinct root visible while avoiding "aggregate + two duplicates".
-  awk '
+  LC_ALL=C awk '
     function flush(    key, header, body_text) {
       if (block == "") return
       lines_count = split(block, block_lines, "\n")
@@ -591,7 +594,7 @@ filter_security_preflight_duplicates() {
 
   [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
   filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-security-filter.XXXXXX")"
-  awk '
+  LC_ALL=C awk '
     function canonicalize_key(value) {
       sub(/^[.][\/]/, "", value)
       sub(/^a[\/]/, "", value)
@@ -649,7 +652,7 @@ dedup_preflight_blocks() {
 
   [[ -s "$preflight_file" ]] || return 0
   deduped_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-dedup.XXXXXX")"
-  awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }' "$preflight_file" >"$deduped_file"
+  LC_ALL=C awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }' "$preflight_file" >"$deduped_file"
   mv "$deduped_file" "$preflight_file"
 }
 
@@ -657,7 +660,7 @@ sort_findings_by_severity() {
   # Split on every severity header, not only blank lines. This keeps the
   # global P0..P3 ordering even when a model emits adjacent findings without
   # an empty separator.
-  awk '
+  LC_ALL=C awk '
     function flush(    header, target) {
       if (block == "") return
       header = block
@@ -1048,7 +1051,7 @@ validate_response() {
   if grep -q '未发现阻塞问题' <<<"$response_text"; then
     # Some local models append the clean marker after a valid finding list.
     # Drop only standalone marker lines; never hide or rewrite findings.
-    cleaned_response="$(printf '%s\n' "$response_text" | awk '$0 !~ /^未发现阻塞问题[。.!！]?$/ && $0 !~ /^未发现其他阻塞问题[。.!！]?$/')"
+    cleaned_response="$(printf '%s\n' "$response_text" | LC_ALL=C awk '$0 !~ /^未发现阻塞问题[。.!！]?$/ && $0 !~ /^未发现其他阻塞问题[。.!！]?$/')"
     if [[ -n "$(printf '%s' "$cleaned_response" | tr -d '[:space:]')" ]]; then
       response_text="$cleaned_response"
     else
@@ -1061,7 +1064,7 @@ validate_response() {
   # Models may insert blank lines around evidence or a small code block inside
   # one finding. Validate logical finding blocks (each starts with a severity)
   # without rewriting the response that the caller will see.
-  validation_text="$(printf '%s\n' "$response_text" | awk '
+  validation_text="$(printf '%s\n' "$response_text" | LC_ALL=C awk '
     /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ {
       if (started) print ""
       started = 1
@@ -1069,7 +1072,7 @@ validate_response() {
     NF { print }
   ')"
 
-  if ! awk -v changed_file="$paths_file" -v repo_root="$repo_root" '
+  if ! LC_ALL=C awk -v changed_file="$paths_file" -v repo_root="$repo_root" '
     BEGIN {
       while ((getline path < changed_file) > 0) {
         changed_paths[path] = 1
@@ -2128,7 +2131,7 @@ if [[ "$has_findings" == true ]]; then
   # is ordered independently, so lexical chunk order cannot guarantee P0/P1
   # findings appear before lower-severity findings. Keep original order within
   # each severity and remove only byte-identical paragraphs.
-  sort_findings_by_severity <"$combined_output_file" | awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }'
+  sort_findings_by_severity <"$combined_output_file" | LC_ALL=C awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }'
 else
   printf '未发现阻塞问题\n'
 fi

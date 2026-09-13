@@ -818,7 +818,7 @@ printf '{"response":"P0 src/main/java/com/example/api/client/Client.java:1-93 - 
 EOF
 chmod +x "$fake_bin/curl"
 if ! shard_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
-  "$repo_root/bin/local-review.sh" --repo "$repo" 2>/dev/null)"; then
+  "$repo_root/bin/local-review.sh" --repo "$repo")"; then
   echo 'unsupported shard-boundary finding caused review failure' >&2
   exit 1
 fi
@@ -927,6 +927,24 @@ literal_token_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-smal
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - 凭据泄漏：真实凭据仍存在（<REDACTED>和FY84ZhmB4nGmmUeBKpgJYAXUE87lI9）\\n影响：凭据泄露。\\n修复建议：轮换。\\n验证方式：检查配置。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+natural_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+[[ "$natural_credential_output" == *'凭据泄漏：真实凭据仍存在（<REDACTED>和<REDACTED>）'* ]] || {
+  echo 'natural-language credential value was not redacted' >&2
+  printf '%s\n' "$natural_credential_output" >&2
+  exit 1
+}
+[[ "$natural_credential_output" != *'FY84ZhmB4nGmmUeBKpgJYAXUE87lI9'* ]] || {
+  echo 'natural-language credential leaked into output' >&2
+  printf '%s\n' "$natural_credential_output" >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - \\u001b[31mANSI marker\\u001b[0m remains visible\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
@@ -938,6 +956,19 @@ if printf '%s' "$safe_output" | LC_ALL=C grep -q $'\033'; then
 fi
 [[ "$safe_output" == *'ANSI marker'* ]] || {
   echo 'ANSI sanitization removed the finding text' >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - Unicode replacement \uFFFD marker。影响：示例影响。修复建议：示例修复。验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+unicode_output="$(LC_ALL=en_US.UTF-8 PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+[[ "$unicode_output" == *'Unicode replacement'* ]] || {
+  echo 'non-ASCII model output was rejected by locale-sensitive filtering' >&2
+  printf '%s\n' "$unicode_output" >&2
   exit 1
 }
 
