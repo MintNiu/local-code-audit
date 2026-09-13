@@ -7,6 +7,7 @@ output_dir=""
 limit=""
 commit_filter=""
 profile="personal"
+context_files=()
 
 usage() {
   cat <<'EOF'
@@ -23,6 +24,7 @@ usage() {
   --limit <n>        只运行前 n 个 pending-human-label 提交
   --commit <sha>     只运行指定的 pending-human-label 提交
   --profile <name>   使用 personal（默认，个人高性能）或 baseline profile
+  --context <file>   附加跨仓库或外部消费者上下文文件，可重复指定
 EOF
 }
 
@@ -60,6 +62,12 @@ while [[ $# -gt 0 ]]; do
         exit 2
       }
       profile="$2"
+      shift 2
+      ;;
+    --context)
+      [[ $# -ge 2 ]] || { echo "--context 需要文件" >&2; exit 2; }
+      [[ -f "$2" ]] || { echo "--context 文件不存在: $2" >&2; exit 2; }
+      context_files+=("$2")
       shift 2
       ;;
     -h|--help)
@@ -149,7 +157,13 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
 
   start="$(date +%s)"
   exit_code=0
-  "$review_script" --repo "$worktree" >"$result_file" 2>&1 || exit_code=$?
+  review_args=(--repo "$worktree")
+  if (( ${#context_files[@]} > 0 )); then
+    for context_file in "${context_files[@]}"; do
+      review_args+=(--context "$context_file")
+    done
+  fi
+  "$review_script" "${review_args[@]}" >"$result_file" 2>&1 || exit_code=$?
   end="$(date +%s)"
 
   {
@@ -167,6 +181,11 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'num_predict\t%s\n' "$profile_num_predict"
     printf 'max_diff_bytes\t%s\n' "$profile_max_diff_bytes"
     printf 'keep_alive\t%s\n' "$profile_keep_alive"
+    if (( ${#context_files[@]} > 0 )); then
+      for context_file in "${context_files[@]}"; do
+        printf 'context\t%s\n' "$context_file"
+      done
+    fi
     if [[ "$exit_code" -eq 0 ]]; then
       printf 'status\tcompleted\n'
     else

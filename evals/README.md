@@ -10,6 +10,7 @@
 准备历史 diff 时同样会禁用仓库配置的 `textconv` 和 fsmonitor，确保评测过程不会执行目标仓库的可配置 Git 命令。
 每个提交的 `.meta.tsv` 会记录 profile、模型选择、temperature、seed、top-k/top-p、上下文/输出预算、diff 字节预算和 `keep_alive`，避免个人版与基线结果混用。
 切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
+如果评测的是删除或修改公共契约的提交，可重复传入 `--context <file>`，把下游仓库的调用方、POM 或测试作为只读证据；这些路径会记录在私有 `.meta.tsv` 中。未提供下游 context 时，结果只能按单仓库范围解释。
 
 ```bash
 ./evals/run-history.sh \
@@ -17,6 +18,18 @@
   --manifest ~/.local/share/local-review/evals/platform-api-20.tsv \
   --out-dir ~/.local/share/local-review/evals/platform-api-results \
   --limit 1
+```
+
+跨仓库契约评测示例：
+
+```bash
+./evals/run-history.sh \
+  --repo /path/to/platform-api \
+  --manifest ~/.local/share/local-review/evals/platform-api-20.tsv \
+  --out-dir ~/.local/share/local-review/evals/platform-api-results-cross-repo \
+  --commit <sha> \
+  --context /path/to/platform-file/src/main/java/.../Consumer.java \
+  --context /path/to/platform-file/pom.xml
 ```
 
 运行结果仍需人工确认真实问题、误报、行号和无问题提交，不能把模型输出直接当作标注。
