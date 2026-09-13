@@ -2,6 +2,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Keep this deterministic regression hermetic; a user's private few-shot file
+# must not change the request-size preflight or the expected assertions.
+export LOCAL_REVIEW_EXAMPLES_FILE=/dev/null
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-preflight-test.XXXXXX")"
 fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
@@ -440,6 +443,25 @@ if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   exit 1
 fi
 
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  OLLAMA_REVIEW_NUM_CTX=4096 OLLAMA_REVIEW_NUM_PREDICT=512 \
+  OLLAMA_REVIEW_INPUT_RESERVE_TOKENS=256 \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'over-budget prompt was sent instead of rejected before Ollama' >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:999 - 行号越界示例。\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'out-of-range finding line was incorrectly accepted' >&2
+  exit 1
+fi
+
 retry_count_file="$fixture_root/retry-count"
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -462,6 +484,48 @@ PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" RETRY_COUNT_FILE="$retry_count_file" \
 [[ "$(<"$retry_count_file")" == "3" ]] || {
   echo 'transient Ollama failures were not retried within the configured limit' >&2
   cat "$retry_count_file" >&2
+  exit 1
+}
+
+budget_context="$fixture_root/oversized-context.txt"
+budget_curl_marker="$fixture_root/budget-curl.marker"
+awk 'BEGIN { for (i = 0; i < 30000; i++) printf "context-%06d\n", i }' >"$budget_context"
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+touch "${BUDGET_CURL_MARKER:?}"
+exit 99
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" BUDGET_CURL_MARKER="$budget_curl_marker" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" --context "$budget_context" >/dev/null 2>"$fixture_root/budget-error.log"; then
+  echo 'over-budget prompt was sent or unexpectedly accepted' >&2
+  exit 1
+fi
+grep -F '超过可用预算' "$fixture_root/budget-error.log" >/dev/null || {
+  echo 'over-budget prompt did not report the input budget' >&2
+  cat "$fixture_root/budget-error.log" >&2
+  exit 1
+}
+[[ ! -e "$budget_curl_marker" ]] || {
+  echo 'over-budget prompt contacted Ollama instead of failing closed' >&2
+  exit 1
+}
+
+line_range_error="$fixture_root/line-range-error"
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:999 - 行号超出文件范围的示例问题。\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" > /dev/null 2>"$line_range_error"; then
+  echo 'out-of-range finding line was incorrectly accepted' >&2
+  exit 1
+fi
+grep -F '行号超出当前文件范围' "$line_range_error" >/dev/null || {
+  echo 'line-range validation did not explain the rejected location' >&2
+  cat "$line_range_error" >&2
   exit 1
 }
 

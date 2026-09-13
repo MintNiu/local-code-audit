@@ -53,6 +53,11 @@ max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
 chunk_timeout_seconds="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-180}"
 chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
 retry_attempts="${OLLAMA_REVIEW_RETRY_ATTEMPTS:-2}"
+# Reserve part of the model context for tokenizer variance, request metadata,
+# and a small amount of runtime overhead.  The guard below rejects an
+# over-budget request before it reaches Ollama instead of allowing the model
+# to silently truncate the system rules or diff.
+input_reserve_tokens="${OLLAMA_REVIEW_INPUT_RESERVE_TOKENS:-1024}"
 active_request_body_file=""
 current_evidence_file=""
 
@@ -79,6 +84,7 @@ usage() {
 分片默认使用 OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180 和 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048，避免单个分片长时间占用服务；可按项目需要覆盖。
 整次审查默认受 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 限制（未设置时沿用单次超时），防止多个分片串行等待过久。
 Ollama 瞬时传输失败默认最多重试 2 次；可用 OLLAMA_REVIEW_RETRY_ATTEMPTS 覆盖，重试仍受整次审查总超时约束。
+请求会预留 OLLAMA_REVIEW_INPUT_RESERVE_TOKENS（默认 1024）个上下文 token，并把系统规则与用户材料一起估算；超出可用输入预算时会在请求前失败，不会返回可能被截断的审查结果。
 EOF
 }
 
@@ -200,6 +206,11 @@ if (( num_ctx < 256 )); then
 fi
 validate_positive_integer OLLAMA_REVIEW_NUM_PREDICT "$num_predict"
 validate_nonnegative_integer OLLAMA_REVIEW_RETRY_ATTEMPTS "$retry_attempts"
+validate_nonnegative_integer OLLAMA_REVIEW_INPUT_RESERVE_TOKENS "$input_reserve_tokens"
+if (( num_ctx <= num_predict + input_reserve_tokens )); then
+  echo "OLLAMA_REVIEW_NUM_CTX 必须大于 OLLAMA_REVIEW_NUM_PREDICT + OLLAMA_REVIEW_INPUT_RESERVE_TOKENS（当前 ${num_ctx} <= ${num_predict} + ${input_reserve_tokens}）。" >&2
+  exit 2
+fi
 
 if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds < 30 )); then
   echo "OLLAMA_REVIEW_TIMEOUT_SECONDS 必须是至少 30 秒的整数。" >&2
@@ -414,6 +425,128 @@ dedup_exact_findings() {
       }
     }
   '
+}
+
+validate_finding_line_ranges() {
+  local response_text="$1"
+  local paths_file="$2"
+  local line_counts_file
+  local report_path resolved_path line_count alias
+
+  # Build a small, read-only map once per response.  The model is allowed to
+  # use repository-relative paths (and the common ./ / a/ / b/ diff aliases),
+  # while the actual line count must come from the current file or an explicit
+  # context file.  Deleted files are intentionally skipped: their current
+  # contents do not exist, so a historical diff review can still report the
+  # deletion without inventing a present-day line range.
+  line_counts_file="$(mktemp "${TMPDIR:-/tmp}/local-review-line-counts.XXXXXX")"
+  while IFS= read -r report_path; do
+    [[ -n "$report_path" ]] || continue
+    resolved_path="$report_path"
+    if [[ "$resolved_path" != /* ]]; then
+      resolved_path="$repo_root/$resolved_path"
+    fi
+    [[ -f "$resolved_path" ]] || continue
+    line_count="$(awk 'END { print NR + 0 }' "$resolved_path")"
+    printf '%s\t%s\n' "$report_path" "$line_count" >>"$line_counts_file"
+
+    # Accept the path spellings commonly emitted when a model copies a diff
+    # header, but do not add bare basenames: scope validation already requires
+    # a unique reportable path and a basename could be ambiguous here.
+    alias="${report_path#./}"
+    if [[ "$alias" != "$report_path" ]]; then
+      printf '%s\t%s\n' "$alias" "$line_count" >>"$line_counts_file"
+    fi
+    if [[ "$report_path" != a/* ]]; then
+      printf 'a/%s\t%s\n' "$report_path" "$line_count" >>"$line_counts_file"
+    fi
+    if [[ "$report_path" != b/* ]]; then
+      printf 'b/%s\t%s\n' "$report_path" "$line_count" >>"$line_counts_file"
+    fi
+  done <"$paths_file"
+
+  if ! awk -F '\t' -v counts_file="$line_counts_file" -v paths_file="$paths_file" '
+    BEGIN {
+      while ((getline row < counts_file) > 0) {
+        split(row, fields, "\t")
+        if (fields[1] != "") line_counts[fields[1]] = fields[2] + 0
+      }
+      close(counts_file)
+      while ((getline row < paths_file) > 0) {
+        if (row != "") report_paths[++path_count] = row
+      }
+      close(paths_file)
+    }
+    function parse_range(token,    start, finish, tail) {
+      sub(/^[^0-9]*/, "", token)
+      start = token + 0
+      finish = start
+      if (token ~ /-/) {
+        tail = token
+        sub(/^.*-[[:space:]]*/, "", tail)
+        finish = tail + 0
+      }
+      if (start < 1 || finish < start || finish > target_max) {
+        invalid = 1
+        bad_token = token
+      }
+    }
+    function inspect_path_location(paragraph,    i, position, best_position, best_path, suffix, token) {
+      best_position = 0
+      best_path = ""
+      for (i = 1; i <= path_count; i++) {
+        position = index(paragraph, report_paths[i])
+        if (position > 0 && (best_position == 0 || position < best_position ||
+            (position == best_position && length(report_paths[i]) > length(best_path)))) {
+          best_position = position
+          best_path = report_paths[i]
+        }
+      }
+      if (best_position == 0 || !(best_path in line_counts)) return
+      target_max = line_counts[best_path]
+      suffix = substr(paragraph, best_position + length(best_path))
+      if (match(suffix, /^[[:space:]]*[,，:：][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?/)) {
+        token = substr(suffix, RSTART, RLENGTH)
+        parse_range(token)
+      }
+      # Also validate explicit “行号/line(s)/第 N 行” labels in the same
+      # finding block; this covers formats where the path and line are split
+      # across separate lines.
+      while (match(paragraph, /(行号|[Ll][Ii][Nn][Ee][Ss]?)[[:space:]]*[:：]?[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?/)) {
+        token = substr(paragraph, RSTART, RLENGTH)
+        parse_range(token)
+        paragraph = substr(paragraph, RSTART + RLENGTH)
+      }
+      while (match(paragraph, /第[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?[[:space:]]*行/)) {
+        token = substr(paragraph, RSTART, RLENGTH)
+        parse_range(token)
+        paragraph = substr(paragraph, RSTART + RLENGTH)
+      }
+    }
+    {
+      if ($0 ~ /^[[:space:]]*$/) {
+        if (paragraph != "") {
+          inspect_path_location(paragraph)
+        }
+        paragraph = ""
+      } else {
+        paragraph = paragraph $0 " "
+      }
+    }
+    END {
+      if (!invalid && paragraph != "") inspect_path_location(paragraph)
+      if (invalid) {
+        limit = target_max + 0
+        printf "行号超出当前文件范围：%s（当前最多 %d 行）\n", bad_token, limit > "/dev/stderr"
+        exit 1
+      }
+    }
+  ' <<<"$response_text"; then
+    rm -f "$line_counts_file"
+    return 1
+  fi
+  rm -f "$line_counts_file"
+  return 0
 }
 
 filter_security_preflight_duplicates() {
@@ -674,6 +807,35 @@ build_prompt() {
   fi
   printf '%s\n' "$diff_text"
   printf '\n--- 以上材料结束；审查规则已作为系统指令发送 ---\n'
+}
+
+check_prompt_budget() {
+  local prompt="$1"
+  local system_bytes prompt_bytes system_ascii_bytes prompt_ascii_bytes
+  local system_nonascii_bytes prompt_nonascii_bytes estimated_input_tokens available_input_tokens
+
+  # Ollama's context limit is token based while this script deliberately does
+  # not depend on a model-specific tokenizer.  Estimate ASCII and non-ASCII
+  # UTF-8 at roughly three bytes per token.  This is conservative
+  # for the mixed Chinese prose/source-code prompts used here while avoiding a
+  # false alarm for the default few-shot examples.  The reserve absorbs
+  # tokenizer and protocol variance; a false positive is recoverable by
+  # raising num_ctx or reducing optional context, while a false negative could
+  # silently drop review rules or evidence.
+  system_bytes="$(printf '%s' "$review_system" | wc -c | tr -d ' ')"
+  prompt_bytes="$(printf '%s' "$prompt" | wc -c | tr -d ' ')"
+  system_ascii_bytes="$(printf '%s' "$review_system" | LC_ALL=C tr -cd '\001-\177' | wc -c | tr -d ' ')"
+  prompt_ascii_bytes="$(printf '%s' "$prompt" | LC_ALL=C tr -cd '\001-\177' | wc -c | tr -d ' ')"
+  system_nonascii_bytes=$((system_bytes - system_ascii_bytes))
+  prompt_nonascii_bytes=$((prompt_bytes - prompt_ascii_bytes))
+  estimated_input_tokens=$(( (system_ascii_bytes + 2) / 3 + (prompt_ascii_bytes + 2) / 3 + (system_nonascii_bytes + 2) / 3 + (prompt_nonascii_bytes + 2) / 3 ))
+  available_input_tokens=$(( num_ctx - num_predict - input_reserve_tokens ))
+
+  if (( estimated_input_tokens > available_input_tokens )); then
+    echo "本地代码审查失败：系统规则与本次审查材料估算需要 ${estimated_input_tokens} 个输入 token，超过可用预算 ${available_input_tokens}（num_ctx=${num_ctx}, num_predict=${num_predict}, reserve=${input_reserve_tokens}）。" >&2
+    echo "请提高 OLLAMA_REVIEW_NUM_CTX，减少 --context/--with-readme/示例内容，或先缩小差异后重试；为避免静默截断，本次请求未发送。" >&2
+    return 13
+  fi
 }
 
 invoke_ollama() {
@@ -941,6 +1103,12 @@ validate_response() {
     return 12
   fi
 
+  if ! validate_finding_line_ranges "$response_text" "$paths_file"; then
+    echo "本地代码审查失败：模型报告的文件/行号超出当前文件或显式 context 的真实范围，拒绝使用该结果。原始输出如下：" >&2
+    printf '%s\n' "$response_text" >&2
+    return 12
+  fi
+
   response_text="$(printf '%s\n' "$response_text" | sort_findings_by_severity)"
   printf '%s\n' "$response_text" >"$output_file"
   printf 'findings\n' >"$kind_file"
@@ -1080,6 +1248,10 @@ run_one_prompt() {
   local evidence_file="${7:-$chunk_input_file}"
 
   current_evidence_file="$evidence_file"
+
+  if ! check_prompt_budget "$prompt"; then
+    return 13
+  fi
 
   if ! invoke_ollama "$prompt" "$response_file" "$request_timeout"; then
     echo "本地代码审查失败：Ollama 请求未完成。请检查 Ollama 服务、模型内存和上下文长度。" >&2
