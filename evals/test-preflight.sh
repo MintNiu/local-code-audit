@@ -462,6 +462,19 @@ if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   exit 1
 fi
 
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:1 - 同行字段示例。影响：示例影响。修复建议：示例修复。验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+compact_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$compact_output" | grep -F '同行字段示例' >/dev/null || {
+  echo 'valid single-line finding fields were incorrectly rejected' >&2
+  printf '%s\n' "$compact_output" >&2
+  exit 1
+}
+
 retry_count_file="$fixture_root/retry-count"
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash

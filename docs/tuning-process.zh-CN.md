@@ -218,6 +218,8 @@ context_files[@]: unbound variable
 
 本轮新增的 `evals/test-preflight.sh` 回归覆盖了重试次数、超预算拒绝和越界行号拒绝；随后使用当前 tuned 模型跑了一轮完整合成门禁，除截断故障按预期非零退出外，`divide=1`、`security=1`、`tenant=1`、`clean=4`、`migration=1`、`secret=1` 全部通过。全局 `~/.local/bin/local-review` 已重新同步，Ollama 模型未被脚本自动下载或常驻保持。
 
+真实 `platform-file:273887d` 评测又暴露了一个门禁兼容性问题：模型把“影响：”“修复建议：”“验证方式：”三个字段连续写在同一行，旧校验只接受字段位于换行开头，因而把合法的 4 条凭据问题和 2 条配置问题误判为格式失败。现在校验要求字段在同一问题段内可解析即可，仍保留严重级别、路径和行号门槛；同一提交修复后以 0 退出并完成输出。该回归也加入 `evals/test-preflight.sh`，防止以后再次把模型的紧凑排版误判为失败。
+
 ## 4. 当前运行链路
 
 ```text

@@ -1080,9 +1080,9 @@ validate_response() {
       first_line_pattern = "^(P[0-3]|信息)[[:space:]:：]+"
       has_location = (paragraph ~ explicit_line_pattern || paragraph_has_adjacent_location() || (!require_changed_path && paragraph ~ generic_location_pattern))
       has_changed_path = paragraph_has_changed_path()
-      has_impact = (paragraph ~ /(^|\n)[[:space:]]*(影响|[Ii]mpact)[：:]/)
-      has_fix = (paragraph ~ /(^|\n)[[:space:]]*(修复建议|修复|[Ff]ix|[Rr]emediation)[：:]/)
-      has_verification = (paragraph ~ /(^|\n)[[:space:]]*(验证方式|验证|[Vv]erification|[Tt]est)[：:]/)
+      has_impact = (paragraph ~ /(^|[[:space:]\n])*(影响|[Ii]mpact)[：:]/)
+      has_fix = (paragraph ~ /(^|[[:space:]\n])*(修复建议|修复|[Ff]ix|[Rr]emediation)[：:]/)
+      has_verification = (paragraph ~ /(^|[[:space:]\n])*(验证方式|验证|[Vv]erification|[Tt]est)[：:]/)
       if (paragraph !~ first_line_pattern || !has_location || (require_changed_path && !has_changed_path) || !has_impact || !has_fix || !has_verification) invalid = 1
     }
     {
