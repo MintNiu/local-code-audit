@@ -230,6 +230,8 @@ context_files[@]: unbound variable
 - 新增代码从 `request.getParameter("x-token")` 等 URL 查询参数读取认证令牌时，输出凭据可能进入访问日志、代理历史或 Referer 的 P1；仅通过内部请求头传递 token 的负例保持 clean。
 
 随后补上了一个容易被分片掩盖的边界：如果除法改动所在的 hunk 没有包含方法签名，预检会只在当前仓库对应文件中向上查找有限范围内的 `Integer` 参数声明，再判断实际除法操作数；常量除法、无关的 `Integer` 参数和注释仍不触发。保护条件还要求出现在除法之前，避免“除法之后才检查”被误当成安全。该场景已加入预检回归样本。
+
+URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKey`、`signature` 和 `credential` 等常见别名，并覆盖同一行 URL 字面量拼接到查询参数或路径的场景；普通 ID、固定 URL 和仅出现在注释中的示例不触发。模型输出的降噪过滤改为按当前 finding 的文件路径隔离证据，避免 A 文件的安全写法把 B 文件的真实问题误删。
 - 预检结果按完整问题段去重，不能再用逐行 `sort -u` 破坏“影响/修复建议/验证方式”的归属；模型重复同一位置和同一风险族时只保留一条，但不同根因继续全部保留。
 
 这套边界把模型从“必须记住两个固定答案”改成“负责开放式审计，确定性代码负责不可漏的已知高价值模式”。`evals/test-preflight.sh` 同时覆盖正例、负例、模型重复和字段连续性；每次修改 SYSTEM 规则或重建 tuned 模型后，必须先通过它和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh`。

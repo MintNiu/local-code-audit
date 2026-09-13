@@ -313,9 +313,32 @@ filter_unsupported_shard_findings() {
   awk -v evidence_file="$current_evidence_file" '
     BEGIN {
       if (evidence_file != "") {
-        while ((getline line < evidence_file) > 0) evidence = evidence line "\n"
+        evidence_path = ""
+        while ((getline line < evidence_file) > 0) {
+          if (line ~ /^diff --git /) {
+            evidence_path = ""
+            continue
+          }
+          if (line ~ /^\+\+\+ b\//) {
+            evidence_path = substr(line, 7)
+            sub(/[[:space:]]+$/, "", evidence_path)
+            continue
+          }
+          if (evidence_path != "") evidence_by_path[evidence_path] = evidence_by_path[evidence_path] line "\n"
+        }
         close(evidence_file)
       }
+    }
+    function finding_path(text,    header) {
+      header = text
+      sub(/[\r\n].*$/, "", header)
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
+      sub(/[[:space:]]+-.*$/, "", header)
+      sub(/:[0-9]+(-[0-9]+)?[[:space:]]*$/, "", header)
+      sub(/^[.][\/]/, "", header)
+      sub(/^a[\/]/, "", header)
+      sub(/^b[\/]/, "", header)
+      return header
     }
     function incomplete_only_finding(text,    line_count, lines, first, description, i) {
       line_count = split(text, lines, "\n")
@@ -329,49 +352,52 @@ filter_unsupported_shard_findings() {
       }
       return 1
     }
-    function flush(    invalid) {
+    function flush(    invalid, path_evidence) {
       if (block == "") return
+      path_evidence = evidence_by_path[finding_path(block)]
       # Drop only a wholly generic "the shard is incomplete" paragraph. If
       # the same block also contains concrete evidence, keep the finding so
       # output filtering can never hide an independently actionable problem.
       invalid = incomplete_only_finding(block)
       # Java `x instanceof Type t` is false when x is null; reject the
       # specific contradiction only when the visible evidence has that form.
-      if (block ~ /instanceof/ && block ~ /attributes/ && block ~ /null/ && block ~ /检查会通过/ && evidence ~ /instanceof[[:space:]]+ServletRequestAttributes/) invalid = 1
+      if (block ~ /instanceof/ && block ~ /attributes/ && block ~ /null/ && block ~ /检查会通过/ && path_evidence ~ /instanceof[[:space:]]+ServletRequestAttributes/) invalid = 1
       # Do not let the model claim missing header/parameter guards when the
       # current shard visibly contains both guards.
       if (block ~ /getHeader/ && block ~ /getParameter/ && block ~ /null/ &&
           (block ~ /没有.*检查/ || block ~ /没有.*isBlank/) &&
-          evidence ~ /header[[:space:]]*!=[[:space:]]*null/ &&
-          evidence ~ /parameter[[:space:]]*==[[:space:]]*null/ && evidence ~ /parameter\.isBlank\(\)/) invalid = 1
+          path_evidence ~ /header[[:space:]]*!=[[:space:]]*null/ &&
+          path_evidence ~ /parameter[[:space:]]*==[[:space:]]*null/ && path_evidence ~ /parameter\.isBlank\(\)/) invalid = 1
       # Spring supplies @Bean method arguments; do not report a generic null
       # check for an injected properties object when the annotation and type
       # are visible in the current evidence.
       if (block ~ /properties/ && block ~ /null/ && block ~ /缺少/ &&
-          evidence ~ /@Bean/ && evidence ~ /PlatformDictClientProperties[[:space:]]+properties/) invalid = 1
+          path_evidence ~ /@Bean/ && path_evidence ~ /PlatformDictClientProperties[[:space:]]+properties/) invalid = 1
       # These are already visible guards/defaults, not actionable findings.
       if (block ~ /currentToken|token/ && block ~ /null/ && block ~ /空/ &&
-          evidence ~ /token[[:space:]]*!=[[:space:]]*null/ && evidence ~ /token\.isBlank\(\)/) invalid = 1
+          path_evidence ~ /token[[:space:]]*!=[[:space:]]*null/ && path_evidence ~ /token\.isBlank\(\)/) invalid = 1
       # A DTO access guarded by `dto == null ? null : ... dto.getX()` is not
       # a null-dereference or empty-value defect merely because the model
       # speculates about the alternate branch.
       if (block ~ /dto/ && block ~ /null|空/ && block ~ /NPE|NullPointerException|空字符串/ &&
-          evidence ~ /dto[[:space:]]*==[[:space:]]*null[[:space:]]*\?[[:space:]]*null[[:space:]]*:/) invalid = 1
+          path_evidence ~ /dto[[:space:]]*==[[:space:]]*null[[:space:]]*\?[[:space:]]*null[[:space:]]*:/) invalid = 1
       if (block ~ /connectTimeout|readTimeout|超时/ && block ~ /默认|校验|无限/ &&
-          evidence ~ /DEFAULT_(CONNECT|READ)_TIMEOUT/ && evidence ~ /requireFinitePositiveTimeout/) invalid = 1
-      if (block ~ /baseUrl/ && block ~ /缺少/ && block ~ /格式|空/ && evidence ~ /baseUrl[[:space:]]*=[[:space:]]*"http/) invalid = 1
-      if (block ~ /TOKEN_HEADER/ && block ~ /常量|校验|定义/ && evidence ~ /TOKEN_HEADER[[:space:]]*=/) invalid = 1
+          path_evidence ~ /DEFAULT_(CONNECT|READ)_TIMEOUT/ && path_evidence ~ /requireFinitePositiveTimeout/) invalid = 1
+      if (block ~ /baseUrl/ && block ~ /缺少/ && block ~ /格式|空/ && path_evidence ~ /baseUrl[[:space:]]*=[[:space:]]*"http/) invalid = 1
+      if (block ~ /TOKEN_HEADER/ && block ~ /常量|校验|定义/ && path_evidence ~ /TOKEN_HEADER[[:space:]]*=/) invalid = 1
       # A shard does not contain the whole repository. Claims that a type or
       # build declaration is missing merely because the current shard does
       # not show it are not evidence of a defect.
       if (block ~ /当前分片/ && block ~ /没有提供|没有展示|未展示|找不到|无法验证/ &&
           block ~ /类型|依赖|构建配置|实现/) invalid = 1
-      # Configuration retention/format speculation without a concrete
-      # contract or failure is not an actionable finding.
-      if (block ~ /临时文件保留时间配置可能不足|业务类型不一致|业务 ID 不一致|临时目录配置可能影响生产环境/) invalid = 1
+      # A deleted migration file has no current contents to inspect. Do not
+      # turn that absence itself into an information-level finding; the
+      # deletion/upgrade-path risk remains reportable as a concrete finding.
+      if (block ~ /^信息[[:space:]:：]/ && block ~ /\.sql/ &&
+          block ~ /删除|移除/ && block ~ /无法验证|未展示|内容/) invalid = 1
       # Likewise, a visible method body is not an unimplemented declaration.
       if (block ~ /方法/ && block ~ /未实现|没有方法体/ &&
-          evidence ~ /->/ && evidence ~ /return/) invalid = 1
+          path_evidence ~ /->/ && path_evidence ~ /return/) invalid = 1
       # Missing logging/monitoring by itself is explicitly outside the audit
       # contract; concrete secret logging remains reportable by its evidence.
       if (block ~ /缺少.*日志|没有.*日志|日志记录/ && block !~ /秘密|Secret|password|密码/) invalid = 1
@@ -1434,7 +1460,9 @@ collect_security_preflight() {
   # Catch unambiguous credential-in-URL patterns before model inference. This
   # is intentionally narrow: only added lines that visibly concatenate a
   # token/secret-like value into a query/path, or read an authentication token
-  # from a URL query parameter, are reported.
+  # from a URL query parameter, are reported. The alias set covers common
+  # names such as authToken/signature/credential without treating ordinary IDs
+  # as secrets.
   awk '
     function flush_hunk() {
       if (hunk_start == "") return
@@ -1469,8 +1497,19 @@ collect_security_preflight() {
           line_no++
           next
         }
-        if (added ~ /(^|[?&]|\/)([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)[=\/]/ &&
-            added ~ /\+[[:space:]]*(token|secret|password|passwd|apiKey|accessKey)([^[:alnum:]_]|$)/) {
+        url_risk = 0
+        if (added ~ /(^|[?&]|\/)([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key|auth|sig|signature|credential|session[_-]?key)[A-Za-z0-9_.-]*)[=\/]/ &&
+            added ~ /\+[[:space:]]*(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential)([^[:alnum:]_]|$)/) {
+          url_risk = 1
+        }
+        # Some APIs use generic query names such as `code` or `auth`, and
+        # some put the credential directly in a path segment. Require both a
+        # visible URL literal and a high-confidence credential variable so
+        # ordinary URL/ID concatenation remains out of scope.
+        if (added ~ /https?:\/\// && added ~ /\+[[:space:]]*(authToken|accessToken|refreshToken|sessionKey|signature|credential)([^[:alnum:]_]|$)/ && added ~ /[?&\/]/) {
+          url_risk = 1
+        }
+        if (url_risk) {
           printf "P1 %s:%d - 凭据值被拼接到 URL 查询参数或路径中，可能通过请求目标泄漏。\n影响：token/secret 等敏感值会进入 URL，可能被代理、网关或访问日志持久化。\n修复建议：改用受保护的请求头或安全的内部认证通道，避免把秘密放入 URL。\n验证方式：检查最终请求 URI 和网关/代理日志，确认 URL 不再包含敏感值。\n\n", path, line_no
         }
         if (added ~ /getParameter[[:space:]]*\([^[:alnum:]_]*(x-token|token|authorization|TOKEN_HEADER)/) {

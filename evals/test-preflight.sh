@@ -139,6 +139,16 @@ final class QueryTokenProxy {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/QueryTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class QueryTokenAlias {
+    String build(String authToken, String signature, String credential) {
+        return "https://internal.example/download?code=" + credential + "&auth=" + authToken + "&sig=" + signature;
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/Divide.java" <<'EOF'
 package com.example.api.client;
 
@@ -258,6 +268,7 @@ grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO'
 }
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissing' "$capture" >/dev/null
 grep -F '凭据值被拼接到 URL 查询参数或路径中' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/QueryTokenAlias.java' "$capture" >/dev/null
 grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/SingleDivide.java' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/LongMethodDivide.java' "$capture" >/dev/null
@@ -443,6 +454,41 @@ mixed_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-revi
 if ! printf '%s\n' "$mixed_output" | grep -F 'tenantId' >/dev/null; then
   echo 'mixed incomplete-context finding was incorrectly filtered' >&2
   printf '%s\n' "$mixed_output" >&2
+  exit 1
+fi
+
+cat >"$repo/src/main/java/com/example/api/client/GuardedDTO.java" <<'EOF'
+package com.example.api.client;
+
+final class GuardedDTO {
+    String name(InputDTO dto) {
+        return dto == null ? null : dto.getName();
+    }
+}
+EOF
+cat >"$repo/src/main/java/com/example/api/client/UnguardedDTO.java" <<'EOF'
+package com.example.api.client;
+
+final class UnguardedDTO {
+    String name(InputDTO dto) {
+        return dto.getName();
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/GuardedDTO.java src/main/java/com/example/api/client/UnguardedDTO.java
+git -C "$repo" commit -qm dto-guard-base
+perl -0pi -e 's/dto\.getName\(\);/dto.getName().trim();/' "$repo/src/main/java/com/example/api/client/GuardedDTO.java"
+perl -0pi -e 's/dto\.getName\(\);/dto.getName().trim();/' "$repo/src/main/java/com/example/api/client/UnguardedDTO.java"
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/UnguardedDTO.java:5 - dto 可能为空导致 NPE。\\n影响：空输入会使请求失败。\\n修复建议：增加空值校验。\\n验证方式：使用 null 输入测试。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+cross_file_filter_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if ! printf '%s\n' "$cross_file_filter_output" | grep -F 'UnguardedDTO.java:5' >/dev/null; then
+  echo 'a guard in another file incorrectly filtered an actionable DTO finding' >&2
+  printf '%s\n' "$cross_file_filter_output" >&2
   exit 1
 fi
 
