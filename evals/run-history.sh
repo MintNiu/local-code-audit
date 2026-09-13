@@ -137,6 +137,8 @@ fi
 mkdir -p "$output_dir"
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-history.XXXXXX")"
 trap 'rm -rf "$temp_root"' EXIT
+seen_commits_file="$temp_root/seen-commits"
+: >"$seen_commits_file"
 
 repo_root="$(git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel)"
 if (( ${#context_files[@]} > 0 )); then
@@ -195,6 +197,11 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   [[ "$commit" == "commit" || -z "$commit" ]] && continue
   [[ "$status" == "pending-human-label" ]] || continue
   [[ -z "$commit_filter" || "$commit" == "$commit_filter" ]] || continue
+  if grep -Fqx -- "$commit" "$seen_commits_file"; then
+    echo "跳过重复提交清单行：$commit" >&2
+    continue
+  fi
+  printf '%s\n' "$commit" >>"$seen_commits_file"
   if [[ -n "$limit" && "$count" -ge "$limit" ]]; then
     break
   fi
