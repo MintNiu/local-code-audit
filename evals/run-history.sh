@@ -226,8 +226,9 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   context_origins=()
   context_snapshot_dir="$temp_root/$commit.context"
   context_prepare_failed=false
-  context_snapshot_complete=true
+  context_snapshot_complete=false
   if (( ${#context_files[@]} > 0 )); then
+    context_snapshot_complete=true
     mkdir -p "$context_snapshot_dir"
     context_index=0
     for context_file in "${context_files[@]}"; do
