@@ -445,6 +445,21 @@ dedup_exact_findings() {
       has_null[count] = (body_text ~ /null|NullPointerException|空/)
       has_div[count] = (body_text ~ /ArithmeticException|除零|除数|b[[:space:]]*==[[:space:]]*0/)
       has_credential[count] = (body_text ~ /凭据|AccessKey|Secret|secret|password|passwd|token|令牌|硬编码/)
+      # Keep semantic deduplication scoped to the same credential risk family.
+      # A configuration literal and a URL token can share a path/range in a
+      # compact diff but are independent findings and must both remain visible.
+      config_path = (key ~ /\.(ya?ml|properties|conf|ini|env|json|toml):[0-9]/)
+      config_cue = (body_text ~ /硬编码凭据|AccessKey|access-key|secret-key|api-key|client-secret|private-key|密码|password|passwd|配置文件|字面量/)
+      url_cue = (body_text ~ /URL|URI|查询参数|请求目标|访问日志|Referer|拼接到 URL|URL中|URL 中/)
+      if (config_cue || (config_path && !url_cue)) {
+        credential_family[count] = "config"
+      } else if (url_cue) {
+        credential_family[count] = "url"
+      } else if (has_credential[count]) {
+        credential_family[count] = "credential"
+      } else {
+        credential_family[count] = ""
+      }
       severity[count] = severity_rank(block_lines[1])
       block = ""
     }
@@ -469,7 +484,8 @@ dedup_exact_findings() {
         # different locations or for independent risk families.
         if (!skip && has_credential[i]) {
           for (j = 1; j < i; j++) {
-            if (keys[j] != keys[i] || !has_credential[j]) continue
+            if (keys[j] != keys[i] || !has_credential[j] ||
+                credential_family[j] == "" || credential_family[j] != credential_family[i]) continue
             if (severity[j] <= severity[i]) {
               duplicate = 1
             } else {

@@ -698,6 +698,20 @@ duplicate_credential_count="$(printf '%s\n' "$duplicate_credential_output" | gre
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P1 application-credential.yml:3 - 明文 AccessKey 已提交。影响：凭据泄露。修复建议：改用无默认值的环境变量。验证方式：检查配置与历史。\\n\\nP1 application-credential.yml:3 - token 被拼接到 URL 查询参数。影响：令牌可能进入访问日志。修复建议：改用请求头。验证方式：检查最终请求 URI。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+independent_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+independent_credential_count="$(printf '%s\n' "$independent_credential_output" | grep -c '^P1 application-credential.yml:3' || true)"
+[[ "$independent_credential_count" == "2" ]] || {
+  echo 'independent credential risk families at one location were incorrectly merged' >&2
+  printf '%s\n' "$independent_credential_output" >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 set -euo pipefail
 previous=""
 for argument in "$@"; do
