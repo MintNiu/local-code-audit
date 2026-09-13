@@ -66,12 +66,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --context)
       [[ $# -ge 2 ]] || { echo "--context 需要文件" >&2; exit 2; }
-      [[ -f "$2" ]] || { echo "--context 文件不存在: $2" >&2; exit 2; }
-      context_path="$2"
-      if [[ "$context_path" != /* ]]; then
-        context_path="$(cd "$(dirname "$context_path")" && pwd)/$(basename "$context_path")"
-      fi
-      context_files+=("$context_path")
+      context_files+=("$2")
       shift 2
       ;;
     -h|--help)
@@ -89,6 +84,27 @@ done
 [[ -n "$repo_dir" && -n "$manifest_file" && -n "$output_dir" ]] || { usage >&2; exit 2; }
 [[ -d "$repo_dir" ]] || { echo "仓库目录不存在: $repo_dir" >&2; exit 2; }
 [[ -f "$manifest_file" ]] || { echo "清单文件不存在: $manifest_file" >&2; exit 2; }
+if (( ${#context_files[@]} > 0 )); then
+  resolved_context_files=()
+  for context_file in "${context_files[@]}"; do
+    context_path="$context_file"
+    if [[ "$context_path" != /* ]]; then
+      if [[ -f "$context_path" ]]; then
+        context_path="$(cd "$(dirname "$context_path")" && pwd)/$(basename "$context_path")"
+      elif [[ -f "$repo_dir/$context_path" ]]; then
+        context_path="$(cd "$repo_dir" && pwd)/$context_path"
+      else
+        echo "--context 文件不存在（按当前目录或 --repo 根目录解析）: $context_file" >&2
+        exit 2
+      fi
+    elif [[ ! -f "$context_path" ]]; then
+      echo "--context 文件不存在: $context_file" >&2
+      exit 2
+    fi
+    resolved_context_files+=("$context_path")
+  done
+  context_files=("${resolved_context_files[@]}")
+fi
 if (( ${#context_files[@]} > 0 )) && ! command -v shasum >/dev/null 2>&1; then
   echo "使用 --context 时需要 shasum 以记录上下文版本哈希。" >&2
   exit 2
@@ -108,6 +124,16 @@ temp_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-history.XXXXXX")"
 trap 'rm -rf "$temp_root"' EXIT
 
 repo_root="$(git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel)"
+if (( ${#context_files[@]} > 0 )); then
+  for context_file in "${context_files[@]}"; do
+    case "$context_file" in
+      "$repo_root"/*)
+        echo "--context 不能指向主仓库当前工作树；历史评测请先提取目标 ref 的私有快照: $context_file" >&2
+        exit 2
+        ;;
+    esac
+  done
+fi
 workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$profile" == "personal" ]]; then
   review_script="$workflow_root/bin/local-review-local.sh"
@@ -165,6 +191,14 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
 
   start="$(date +%s)"
   exit_code=0
+  context_hashes_before=()
+  context_hashes_after=()
+  context_changed=false
+  if (( ${#context_files[@]} > 0 )); then
+    for context_file in "${context_files[@]}"; do
+      context_hashes_before+=("$(shasum -a 256 "$context_file" | awk '{print $1}')")
+    done
+  fi
   review_args=(--repo "$worktree")
   if (( ${#context_files[@]} > 0 )); then
     for context_file in "${context_files[@]}"; do
@@ -173,6 +207,22 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   fi
   "$review_script" "${review_args[@]}" >"$result_file" 2>&1 || exit_code=$?
   end="$(date +%s)"
+  if (( ${#context_files[@]} > 0 )); then
+    for context_index in "${!context_files[@]}"; do
+      if [[ -f "${context_files[$context_index]}" ]]; then
+        context_hashes_after+=("$(shasum -a 256 "${context_files[$context_index]}" | awk '{print $1}')")
+      else
+        context_hashes_after+=(missing)
+      fi
+      if [[ "${context_hashes_before[$context_index]}" != "${context_hashes_after[$context_index]}" ]]; then
+        context_changed=true
+      fi
+    done
+  fi
+  if [[ "$context_changed" == true ]]; then
+    echo "本次历史评测无效：context 文件在审查期间发生变化，结果未计入评分。" >&2
+    exit_code=12
+  fi
 
   {
     printf 'commit\t%s\n' "$commit"
@@ -190,10 +240,12 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'max_diff_bytes\t%s\n' "$profile_max_diff_bytes"
     printf 'keep_alive\t%s\n' "$profile_keep_alive"
     if (( ${#context_files[@]} > 0 )); then
-      for context_file in "${context_files[@]}"; do
-        printf 'context\t%s\t%s\n' "$context_file" "$(shasum -a 256 "$context_file" | awk '{print $1}')"
+      for context_index in "${!context_files[@]}"; do
+        printf 'context\t%s\tbefore=%s\tafter=%s\n' \
+          "${context_files[$context_index]}" "${context_hashes_before[$context_index]}" "${context_hashes_after[$context_index]}"
       done
     fi
+    printf 'context_changed\t%s\n' "$context_changed"
     if [[ "$exit_code" -eq 0 ]]; then
       printf 'status\tcompleted\n'
     else

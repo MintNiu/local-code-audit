@@ -240,6 +240,19 @@ fi
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P1 module-b/src/main/java/com/example/api/dto/ModuleDeletedDTO.java:1 - 文件内容不完整，但当前代码明确把未校验的 tenantId 传入跨租户查询。\\n行号：1\\n影响：可能读取其他租户数据。\\n修复建议：增加 tenantId 约束。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+mixed_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" 2>/dev/null)"
+if ! printf '%s\n' "$mixed_output" | grep -F 'tenantId' >/dev/null; then
+  echo 'mixed incomplete-context finding was incorrectly filtered' >&2
+  printf '%s\n' "$mixed_output" >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - Authorization: Bearer super-secret-token-value; \\\"Authorization\\\": \\\"Basic basic-secret-value\\\"\\n影响：凭据可能进入审查输出。\\n修复建议：轮换并移除凭据。\\n验证方式：确认输出不包含原始凭据。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"

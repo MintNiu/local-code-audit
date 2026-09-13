@@ -42,7 +42,7 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
-如果当前提交删除、重命名或修改了对外 API、DTO 或声明式客户端，审查主仓库不会自动读取其他仓库。请把下游消费者的接口、配置、调用方或测试文件逐个用 `--context` 传入（该参数可重复），否则只能得到当前仓库范围内的结论：
+如果当前提交删除、重命名或修改了对外 API、DTO 或声明式客户端，审查主仓库不会自动读取其他仓库。请先从与目标提交匹配的下游 Git ref 提取消费者接口、配置、调用方或测试文件，再逐个用 `--context` 传入（该参数可重复），否则只能得到当前仓库范围内的结论。历史评测可使用 `scripts/extract-context-snapshot.sh` 生成私有快照：
 
 ```bash
 local-review --repo /path/to/platform-api \

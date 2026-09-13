@@ -302,9 +302,24 @@ filter_unsupported_shard_findings() {
         close(evidence_file)
       }
     }
+    function incomplete_only_finding(text,    line_count, lines, first, description, i) {
+      line_count = split(text, lines, "\n")
+      first = lines[1]
+      sub(/^.* -[[:space:]]*/, "", first)
+      if (first !~ /^(文件内容不完整，缺少类声明和字段定义，导致无法验证代码逻辑是否正确|代码片段[^。！？\n]*缺少上下文|提供完整的文件内容)[。.!！]?$/) return 0
+      for (i = 2; i <= line_count; i++) {
+        line = lines[i]
+        if (line == "") continue
+        if (line !~ /^(影响|修复建议|验证方式)[：:][[:space:]]*(无法确定代码是否符合项目规则|提供完整的文件内容|补充完整文件内容|请提供完整代码)[。.!！]?$/) return 0
+      }
+      return 1
+    }
     function flush(    invalid) {
       if (block == "") return
-      invalid = (block ~ /文件内容不完整|代码片段[^。！？\n]*缺少上下文|提供完整的文件内容|无法验证代码逻辑是否正确/)
+      # Drop only a wholly generic "the shard is incomplete" paragraph. If
+      # the same block also contains concrete evidence, keep the finding so
+      # output filtering can never hide an independently actionable problem.
+      invalid = incomplete_only_finding(block)
       # Java `x instanceof Type t` is false when x is null; reject the
       # specific contradiction only when the visible evidence has that form.
       if (block ~ /instanceof/ && block ~ /attributes/ && block ~ /null/ && block ~ /检查会通过/ && evidence ~ /instanceof[[:space:]]+ServletRequestAttributes/) invalid = 1
