@@ -206,6 +206,18 @@ context_files[@]: unbound variable
 
 审查结果（单次请求及分片聚合）现在会在最终输出前重新建立全局严重程度顺序（P0、P1、P2、P3、信息），并保持同级问题的原始顺序；这样大 diff 不会因为分片文件名排序而把高优先级问题排在低优先级之后。预检夹具覆盖了跨分片返回 P2/P0 的反向顺序。
 
+### 3.10 加固运行时可信度
+
+在稳定性回归通过后，又补上了三道不依赖模型自觉性的护栏：
+
+- Ollama 的瞬时传输失败默认最多重试两次，但每次重试都会重新计算整次审查的剩余总超时；`OLLAMA_REVIEW_RETRY_ATTEMPTS=0` 可关闭重试，避免网络或服务抖动直接丢失一次审查。
+- 输出门禁在结构校验后核对报告中的文件/行号。当前文件或显式 context 文件存在时，超过真实文件行数的定位会失败；删除文件不强行按当前内容校验，避免把历史删除问题误判为行号错误。
+- 请求发送前按 UTF-8 字节估算 system 规则、上下文和 diff 的输入 token，并为输出与 tokenizer 波动保留空间。估算超出 `num_ctx - num_predict - OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` 时直接失败，不把可能被静默截断的请求交给模型；默认 16k/4096 profile 已用真实合成回归验证。
+
+`scripts/verify-runtime.sh` 现在还会从 `config/Modelfile` 与 `ollama show --modelfile` 提取完整 SYSTEM 块并比较 SHA-256。规则缺失、格式异常或运行态漂移都会 fail-closed；`evals/test-runtime-verify.sh` 覆盖一致通过和人为漂移失败两条路径。该机制解决的是“脚本已更新但 Ollama 派生模型仍是旧规则”的运维问题，不代表基础模型能力发生变化。
+
+本轮新增的 `evals/test-preflight.sh` 回归覆盖了重试次数、超预算拒绝和越界行号拒绝；随后使用当前 tuned 模型跑了一轮完整合成门禁，除截断故障按预期非零退出外，`divide=1`、`security=1`、`tenant=1`、`clean=4`、`migration=1`、`secret=1` 全部通过。全局 `~/.local/bin/local-review` 已重新同步，Ollama 模型未被脚本自动下载或常驻保持。
+
 ## 4. 当前运行链路
 
 ```text
@@ -217,7 +229,11 @@ local-review 的 system 指令与 Ollama options
     ↓
 devstral-small-2-review-tuned
     ↓
+输入预算与请求重试边界
+    ↓
 校验 response、done_reason 和截断状态
+    ↓
+行号、路径、字段完整性与去重门禁
     ↓
 输出完整审计结果或明确失败
 ```
