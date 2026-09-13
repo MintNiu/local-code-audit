@@ -154,13 +154,15 @@ if [[ "$profile" == "personal" ]]; then
   review_script="$workflow_root/bin/local-review-local.sh"
   profile_num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
   profile_num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
-  profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-6000}"
+  profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
+  profile_chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-4096}"
   profile_keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-5m}"
 else
   review_script="$workflow_root/bin/local-review.sh"
   profile_num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
   profile_num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
   profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
+  profile_chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
   profile_keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
 fi
 review_model="${OLLAMA_REVIEW_MODEL:-auto:tuned→review→base}"
@@ -286,6 +288,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'num_ctx\t%s\n' "$profile_num_ctx"
     printf 'num_predict\t%s\n' "$profile_num_predict"
     printf 'max_diff_bytes\t%s\n' "$profile_max_diff_bytes"
+    printf 'chunk_num_predict\t%s\n' "$profile_chunk_num_predict"
     printf 'keep_alive\t%s\n' "$profile_keep_alive"
     if (( ${#context_origins[@]} > 0 )); then
       for context_index in "${!context_origins[@]}"; do

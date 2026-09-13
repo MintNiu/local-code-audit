@@ -352,6 +352,11 @@ filter_unsupported_shard_findings() {
       # These are already visible guards/defaults, not actionable findings.
       if (block ~ /currentToken|token/ && block ~ /null/ && block ~ /空/ &&
           evidence ~ /token[[:space:]]*!=[[:space:]]*null/ && evidence ~ /token\.isBlank\(\)/) invalid = 1
+      # A DTO access guarded by `dto == null ? null : ... dto.getX()` is not
+      # a null-dereference or empty-value defect merely because the model
+      # speculates about the alternate branch.
+      if (block ~ /dto/ && block ~ /null|空/ && block ~ /NPE|NullPointerException|空字符串/ &&
+          evidence ~ /dto[[:space:]]*==[[:space:]]*null[[:space:]]*\?[[:space:]]*null[[:space:]]*:/) invalid = 1
       if (block ~ /connectTimeout|readTimeout|超时/ && block ~ /默认|校验|无限/ &&
           evidence ~ /DEFAULT_(CONNECT|READ)_TIMEOUT/ && evidence ~ /requireFinitePositiveTimeout/) invalid = 1
       if (block ~ /baseUrl/ && block ~ /缺少/ && block ~ /格式|空/ && evidence ~ /baseUrl[[:space:]]*=[[:space:]]*"http/) invalid = 1
@@ -359,8 +364,11 @@ filter_unsupported_shard_findings() {
       # A shard does not contain the whole repository. Claims that a type or
       # build declaration is missing merely because the current shard does
       # not show it are not evidence of a defect.
-      if (block ~ /当前分片/ && block ~ /没有提供|未展示|找不到/ &&
+      if (block ~ /当前分片/ && block ~ /没有提供|没有展示|未展示|找不到|无法验证/ &&
           block ~ /类型|依赖|构建配置|实现/) invalid = 1
+      # Configuration retention/format speculation without a concrete
+      # contract or failure is not an actionable finding.
+      if (block ~ /临时文件保留时间配置可能不足|业务类型不一致|业务 ID 不一致|临时目录配置可能影响生产环境/) invalid = 1
       # Likewise, a visible method body is not an unimplemented declaration.
       if (block ~ /方法/ && block ~ /未实现|没有方法体/ &&
           evidence ~ /->/ && evidence ~ /return/) invalid = 1
@@ -1480,17 +1488,55 @@ collect_security_preflight() {
 collect_java_division_preflight() {
   local diff_file="$1"
   local output_file="$2"
+  local source_root="${3:-}"
 
-  # This deliberately recognizes only a complete visible diff hunk that adds
-  # a method with boxed Integer parameters and divides one of those parameters.
-  # It does not infer contracts for ordinary int arithmetic, unrelated
-  # constants, or a different variable that merely happens to be in the same
-  # hunk. Guards are tracked per parameter rather than per hunk.
-  awk '
+  # This deliberately recognizes only a changed division whose operands are
+  # boxed Integer parameters of the containing method. When a method
+  # signature is outside the normal three-line diff context, the current
+  # checked-out source is consulted by path/line to recover that signature;
+  # this keeps the preflight narrow without widening the model prompt.
+  awk -v repo_root="$source_root" '
+    function source_method_parameters(    source_path, i, j, candidate, signature, depth, k, value) {
+      if (repo_root == "" || path == "" || division_line == 0) return
+      source_path = repo_root "/" path
+      if (source_loaded[path]) return
+      source_loaded[path] = 1
+      source_count[path] = 0
+      while ((getline value < source_path) > 0) {
+        source_count[path]++
+        source_lines[path, source_count[path]] = value
+      }
+      close(source_path)
+      if (source_count[path] == 0) return
+      # Look backward only within the containing method practical prefix.
+      # Reject control-flow/call expressions so a nearby Integer-typed call
+      # cannot be mistaken for a declaration.
+      for (i = division_line; i >= 1 && i >= division_line - 256; i--) {
+        candidate = source_lines[path, i]
+        if (candidate !~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/ || candidate !~ /\(/) continue
+        if (candidate ~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|return)[[:space:]]*\(/) continue
+        signature = candidate
+        j = i
+        while (signature !~ /\)/ && j < source_count[path] && j < i + 12) {
+          j++
+          signature = signature " " source_lines[path, j]
+        }
+        if (signature !~ /\)/) continue
+        record_integer_parameters(signature)
+        if (has_integer_parameter) {
+          for (k = i; k <= division_line && k <= source_count[path]; k++) record_guards(source_lines[path, k], k)
+          return
+        }
+      }
+    }
+    function unguarded(name, guards) {
+      return !(name in guards) || guards[name] > division_line
+    }
     function emit_hunk(    null_risk, zero_risk) {
       if (path == "" || hunk_start == "") return
-      null_risk = has_division && ((division_left in integer_names && !(division_left in null_guards)) || (division_right in integer_names && !(division_right in null_guards)))
-      zero_risk = has_division && (division_right in integer_names) && !(division_right in zero_guards)
+      if (has_division && !has_integer_parameter) source_method_parameters()
+      null_risk = has_division && ((division_left in integer_names && unguarded(division_left, null_guards)) || (division_right in integer_names && unguarded(division_right, null_guards)))
+      zero_risk = has_division && (division_right in integer_names) && unguarded(division_right, zero_guards)
       if (null_risk) {
         printf "P1 %s:%d - Integer 包装类型参与除法时未见非空保护，自动拆箱可能抛出 NullPointerException。\n影响：调用方传入 null 时方法会在进入业务处理前失败，导致请求或任务异常。\n修复建议：在除法前显式拒绝 null，或改用基本类型并由边界层完成输入校验。\n验证方式：分别以 null 参数调用方法，确认返回受控错误而不是 NullPointerException。\n\n", path, integer_line
       }
@@ -1529,12 +1575,12 @@ collect_java_division_preflight() {
         }
       }
     }
-    function record_guards(text,    name, pattern) {
+    function record_guards(text, line,    name, pattern) {
       for (name in integer_names) {
         pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*(==|!=)[[:space:]]*null([^[:alnum:]_]|$)"
-        if (text ~ pattern) null_guards[name] = 1
+        if (text ~ pattern && (!(name in null_guards) || line < null_guards[name])) null_guards[name] = line
         pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*(==|!=|<=|>=|<|>)[[:space:]]*0([^[:alnum:]_]|$)"
-        if (text ~ pattern) zero_guards[name] = 1
+        if (text ~ pattern && (!(name in zero_guards) || line < zero_guards[name])) zero_guards[name] = line
       }
     }
     function record_division(text,    expression, parts, count, left, right) {
@@ -1551,7 +1597,6 @@ collect_java_division_preflight() {
       gsub(/[^A-Za-z0-9_]*$/, "", left)
       gsub(/^[^A-Za-z0-9_]*/, "", right)
       gsub(/[^A-Za-z0-9_]*$/, "", right)
-      if (!(left in integer_names) && !(right in integer_names)) return
       has_division = 1
       division_left = left
       division_right = right
@@ -1588,7 +1633,7 @@ collect_java_division_preflight() {
       text = (prefix == "+" ? substr($0, 2) : $0)
       if (prefix == "+" || prefix == " ") {
         if (prefix == "+") record_integer_parameters(text)
-        record_guards(text)
+        record_guards(text, line_no)
         record_division(text)
         if (integer_line == 0 && has_integer_parameter) {
           if (integer_line == 0) integer_line = line_no
@@ -1676,7 +1721,7 @@ else
 fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file"
-collect_java_division_preflight "$chunk_input_file" "$build_preflight_file"
+collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames

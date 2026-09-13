@@ -176,6 +176,56 @@ package com.example.api.client;
 final class CommentOnly {}
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/LongMethodDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class LongMethodDivide {
+    int divide(Integer divisor) {
+        int first = 1;
+        int second = 2;
+        int third = 3;
+        int fourth = 4;
+        int fifth = 5;
+        int sixth = 6;
+        int seventh = 7;
+        int eighth = 8;
+        int ninth = 9;
+        int tenth = 10;
+        int eleventh = 11;
+        int twelfth = 12;
+        return 10 / divisor;
+    }
+}
+EOF
+
+git -C "$repo" add src/main/java/com/example/api/client/LongMethodDivide.java
+git -C "$repo" commit -qm long-method-base
+perl -0pi -e 's/return 10 \/ divisor;/return 20 \/ divisor;/' "$repo/src/main/java/com/example/api/client/LongMethodDivide.java"
+
+cat >"$repo/src/main/java/com/example/api/client/LongDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class LongDivide {
+    int divide(Integer divisor) {
+        int first = 1;
+        int second = 2;
+        int third = 3;
+        int fourth = 4;
+        int fifth = 5;
+        int sixth = 6;
+        int seventh = 7;
+        int eighth = 8;
+        return 10 / divisor;
+    }
+}
+EOF
+# Commit the fixture's original method first, then change only the division.
+# The default three-line diff context no longer contains the Integer
+# signature; the deterministic preflight must recover it from the checkout.
+git -C "$repo" add src/main/java/com/example/api/client/LongDivide.java
+git -C "$repo" commit -qm long-divide-base
+sed -i '' 's/return 10 \/ divisor;/return 20 \/ divisor;/' "$repo/src/main/java/com/example/api/client/LongDivide.java"
+
 cat >"$repo/src/main/java/com/example/api/client/Client.java" <<'EOF'
 package com.example.api.client;
 
@@ -210,6 +260,8 @@ grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissi
 grep -F '凭据值被拼接到 URL 查询参数或路径中' "$capture" >/dev/null
 grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/SingleDivide.java' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/LongMethodDivide.java' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/LongDivide.java' "$capture" >/dev/null
 if grep -F 'P1 src/main/java/com/example/api/client/UnrelatedDivide.java' "$capture" >/dev/null; then
   echo 'Java division preflight reported unrelated constant division' >&2
   exit 1
