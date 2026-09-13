@@ -300,6 +300,7 @@ redact_sensitive_text() {
     s~((?:authorization|proxy-authorization)[[:space:]]*"?[[:space:]]*[:=：][[:space:]]*"?[[:space:]]*)(?!Bearer[[:space:]]|Basic[[:space:]])[^[:space:],，;；)}`"]+~$1<REDACTED>~ig;
     s~((?:[?&]|^)(?:x-amz-)?(?:signature|sig|security-token|credential|access[-_]?token|refresh[-_]?token|id[-_]?token)=)[^&#[:space:],，;；)}`"]+~$1<REDACTED>~ig;
     s~((?:access[-_ ]?key(?:[-_ ]?(?:id|secret))?|secret|password|passwd|token|api[-_ ]?key)[[:space:]]*[:=：][[:space:]]*)[^[:space:],，;；)}`]+~$1<REDACTED>~ig;
+    s~((?:字面量|硬编码|literal|hard[-_ ]coded)[[:space:]]*(?:凭据|令牌|token|secret|password)[[:space:]]+)[A-Za-z0-9][A-Za-z0-9._-]{7,}~$1<REDACTED>~ig;
     s~\b(?:AKIA|ASIA|LTAI)[A-Za-z0-9_-]{8,}\b~<REDACTED>~g;
   '
 }
@@ -557,28 +558,36 @@ filter_security_preflight_duplicates() {
   [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
   filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-security-filter.XXXXXX")"
   awk '
+    function canonicalize_key(value) {
+      sub(/^[.][\/]/, "", value)
+      sub(/^a[\/]/, "", value)
+      sub(/^b[\/]/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function finding_key(line,    value) {
+      value = line
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", value)
+      sub(/[[:space:]]+-.*$/, "", value)
+      sub(/-[0-9]+$/, "", value)
+      return canonicalize_key(value)
+    }
     FILENAME == ARGV[1] {
+      key = finding_key($0)
       if ($0 ~ /凭据值被拼接到 URL|认证令牌从 URL 查询参数读取/) {
-        key = $2
         security[key] = 1
       }
       if ($0 ~ /Integer 包装类型参与除法时未见非空保护/) {
-        key = $2
         java_null[key] = 1
       }
       if ($0 ~ /除法分母未见非零保护/) {
-        key = $2
         java_zero[key] = 1
       }
       next
     }
     function flush(    header, key) {
       if (block == "") return
-      header = block
-      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
-      sub(/[[:space:]]+-.*$/, "", header)
-      sub(/-[0-9]+$/, "", header)
-      key = header
+      key = finding_key(block)
       duplicate_security = (key in security && block ~ /凭据|token|secret|URL|URI|查询参数|路径/)
       duplicate_java_null = (key in java_null && block ~ /null|NullPointerException|拆箱|包装类型/)
       duplicate_java_zero = (key in java_zero && block ~ /除零|除数|ArithmeticException|分母/)
@@ -929,8 +938,9 @@ invoke_ollama() {
       rm -f "$request_body_file"
       active_request_body_file=""
       return 0
+    else
+      curl_status=$?
     fi
-    curl_status=$?
     if (( attempt >= max_attempts )); then
       break
     fi
@@ -1430,6 +1440,7 @@ collect_security_preflight() {
     }
     /^\+\+\+ b\// {
       path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
       next
     }
     /^@@ / {
@@ -1444,6 +1455,12 @@ collect_security_preflight() {
       if (hunk_start == "") next
       if (substr($0, 1, 1) == "+") {
         added = substr($0, 2)
+        trimmed = added
+        sub(/^[[:space:]]+/, "", trimmed)
+        if (trimmed ~ /^\/\// || trimmed ~ /^\/\*|^\*/) {
+          line_no++
+          next
+        }
         if (added ~ /(^|[?&]|\/)([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)[=\/]/ &&
             added ~ /\+[[:space:]]*(token|secret|password|passwd|apiKey|accessKey)([^[:alnum:]_]|$)/) {
           printf "P1 %s:%d - 凭据值被拼接到 URL 查询参数或路径中，可能通过请求目标泄漏。\n影响：token/secret 等敏感值会进入 URL，可能被代理、网关或访问日志持久化。\n修复建议：改用受保护的请求头或安全的内部认证通道，避免把秘密放入 URL。\n验证方式：检查最终请求 URI 和网关/代理日志，确认 URL 不再包含敏感值。\n\n", path, line_no
@@ -1465,14 +1482,15 @@ collect_java_division_preflight() {
   local output_file="$2"
 
   # This deliberately recognizes only a complete visible diff hunk that adds
-  # a method with boxed Integer parameters and an unguarded division. It does
-  # not infer contracts for ordinary int arithmetic, and it does not report a
-  # risk when a null/zero guard is visible in the same hunk.
+  # a method with boxed Integer parameters and divides one of those parameters.
+  # It does not infer contracts for ordinary int arithmetic, unrelated
+  # constants, or a different variable that merely happens to be in the same
+  # hunk. Guards are tracked per parameter rather than per hunk.
   awk '
     function emit_hunk(    null_risk, zero_risk) {
       if (path == "" || hunk_start == "") return
-      null_risk = has_integer_parameter && has_division && !has_null_guard
-      zero_risk = has_integer_parameter && has_division && !has_zero_guard
+      null_risk = has_division && ((division_left in integer_names && !(division_left in null_guards)) || (division_right in integer_names && !(division_right in null_guards)))
+      zero_risk = has_division && (division_right in integer_names) && !(division_right in zero_guards)
       if (null_risk) {
         printf "P1 %s:%d - Integer 包装类型参与除法时未见非空保护，自动拆箱可能抛出 NullPointerException。\n影响：调用方传入 null 时方法会在进入业务处理前失败，导致请求或任务异常。\n修复建议：在除法前显式拒绝 null，或改用基本类型并由边界层完成输入校验。\n验证方式：分别以 null 参数调用方法，确认返回受控错误而不是 NullPointerException。\n\n", path, integer_line
       }
@@ -1481,12 +1499,62 @@ collect_java_division_preflight() {
       }
     }
     function reset_hunk() {
-      has_integer_parameter = 0
       has_division = 0
-      has_null_guard = 0
-      has_zero_guard = 0
+      has_integer_parameter = 0
       integer_line = 0
       division_line = 0
+      division_left = ""
+      division_right = ""
+      for (name in integer_names) delete integer_names[name]
+      for (name in null_guards) delete null_guards[name]
+      for (name in zero_guards) delete zero_guards[name]
+    }
+    function record_integer_parameters(text,    signature, params, count, i, fields, field_count, j, candidate) {
+      if (text !~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/ || text !~ /\(/) return
+      signature = text
+      sub(/^[^(]*\(/, "", signature)
+      sub(/\).*/, "", signature)
+      count = split(signature, params, ",")
+      for (i = 1; i <= count; i++) {
+        if (params[i] !~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/) continue
+        gsub(/\[\]/, " ", params[i])
+        field_count = split(params[i], fields, /[[:space:]]+/)
+        for (j = field_count; j >= 1; j--) {
+          candidate = fields[j]
+          if (candidate ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && candidate != "Integer") {
+            integer_names[candidate] = 1
+            has_integer_parameter = 1
+            break
+          }
+        }
+      }
+    }
+    function record_guards(text,    name, pattern) {
+      for (name in integer_names) {
+        pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*(==|!=)[[:space:]]*null([^[:alnum:]_]|$)"
+        if (text ~ pattern) null_guards[name] = 1
+        pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*(==|!=|<=|>=|<|>)[[:space:]]*0([^[:alnum:]_]|$)"
+        if (text ~ pattern) zero_guards[name] = 1
+      }
+    }
+    function record_division(text,    expression, parts, count, left, right) {
+      if (text !~ /return[[:space:]]+[^;]*\/[^;]+;/ && text !~ /=[[:space:]]*[^;]*\/[^;]+;/) return
+      expression = text
+      if (expression ~ /return[[:space:]]+/) sub(/^.*return[[:space:]]+/, "", expression)
+      else sub(/^.*=[[:space:]]*/, "", expression)
+      sub(/;.*/, "", expression)
+      count = split(expression, parts, "/")
+      if (count < 2) return
+      left = parts[1]
+      right = parts[2]
+      gsub(/^[^A-Za-z0-9_]*/, "", left)
+      gsub(/[^A-Za-z0-9_]*$/, "", left)
+      gsub(/^[^A-Za-z0-9_]*/, "", right)
+      gsub(/[^A-Za-z0-9_]*$/, "", right)
+      if (!(left in integer_names) && !(right in integer_names)) return
+      has_division = 1
+      division_left = left
+      division_right = right
     }
     /^diff --git / {
       emit_hunk()
@@ -1499,6 +1567,7 @@ collect_java_division_preflight() {
     /^\+\+\+ b\// {
       emit_hunk()
       path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
       hunk_start = ""
       reset_hunk()
       next
@@ -1518,16 +1587,13 @@ collect_java_division_preflight() {
       prefix = substr($0, 1, 1)
       text = (prefix == "+" ? substr($0, 2) : $0)
       if (prefix == "+" || prefix == " ") {
-        if (text ~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/ && text ~ /\([^\n]*(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/) {
-          has_integer_parameter = 1
+        if (prefix == "+") record_integer_parameters(text)
+        record_guards(text)
+        record_division(text)
+        if (integer_line == 0 && has_integer_parameter) {
           if (integer_line == 0) integer_line = line_no
         }
-        if (text ~ /return[[:space:]]+[^;]*\/[^;]+;/ || text ~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)[^;=]*=[^;]*\/[^;]+;/) {
-          has_division = 1
-          if (division_line == 0) division_line = line_no
-        }
-        if (text ~ /(==|!=|instanceof|requireNonNull|isNull|Objects\.requireNonNull|Objects\.nonNull)/ && text ~ /null/) has_null_guard = 1
-        if (text ~ /(^|[^[:alnum:]_])[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(==|!=|<=|>=|<|>)[[:space:]]*0([^[:alnum:]_]|$)/ || text ~ /(^|[^[:alnum:]_])0[[:space:]]*(==|!=|<=|>=|<|>)[[:space:]]*[A-Za-z_]/) has_zero_guard = 1
+        if (division_line == 0 && has_division) division_line = line_no
         if (prefix == "+") line_no++
       } else if (prefix == "-") {
         next

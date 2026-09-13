@@ -232,6 +232,8 @@ context_files[@]: unbound variable
 
 这套边界把模型从“必须记住两个固定答案”改成“负责开放式审计，确定性代码负责不可漏的已知高价值模式”。`evals/test-preflight.sh` 同时覆盖正例、负例、模型重复和字段连续性；每次修改 SYSTEM 规则或重建 tuned 模型后，必须先通过它和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh`。
 
+真实 `platform-file:273887d` 的复测还发现，模型有时会在自然语言中复述“字面量令牌 <值>”。运行器现在对这类表达也做确定性脱敏；问题级别、路径、行号、影响和修复建议仍完整保留。复测结果中令牌值已替换为 `<REDACTED>`，不会因为增强脱敏而隐藏凭据泄漏这一条问题本身。
+
 ## 4. 当前运行链路
 
 ```text

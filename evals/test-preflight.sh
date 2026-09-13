@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Keep this deterministic regression hermetic; a user's private few-shot file
 # must not change the request-size preflight or the expected assertions.
 export LOCAL_REVIEW_EXAMPLES_FILE=/dev/null
+export OLLAMA_REVIEW_MAX_DIFF_BYTES=60000
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-preflight-test.XXXXXX")"
 fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
@@ -148,6 +149,33 @@ final class Divide {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/UnrelatedDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class UnrelatedDivide {
+    int divide(Integer unused) {
+        return 10 / 2;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/SingleDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class SingleDivide {
+    int divide(Integer divisor) {
+        return 10 / divisor;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/CommentOnly.java" <<'EOF'
+package com.example.api.client;
+
+// request.getParameter("x-token") is documentation, not executable code.
+final class CommentOnly {}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/Client.java" <<'EOF'
 package com.example.api.client;
 
@@ -171,11 +199,25 @@ rm -f "$fixture_root/fsmonitor.marker"
 PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_capture" OLLAMA_SHOW_LOG="$show_log" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   TEXTCONV_MARKER="$fixture_root/textconv.marker" FSMONITOR_MARKER="$fixture_root/fsmonitor.marker" \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
   "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
-grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null
+grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null || {
+  echo 'missing deterministic MissingDTO preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissing' "$capture" >/dev/null
 grep -F '凭据值被拼接到 URL 查询参数或路径中' "$capture" >/dev/null
 grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/SingleDivide.java' "$capture" >/dev/null
+if grep -F 'P1 src/main/java/com/example/api/client/UnrelatedDivide.java' "$capture" >/dev/null; then
+  echo 'Java division preflight reported unrelated constant division' >&2
+  exit 1
+fi
+if grep -F 'P1 src/main/java/com/example/api/client/CommentOnly.java' "$capture" >/dev/null; then
+  echo 'security preflight reported a comment-only token reference' >&2
+  exit 1
+fi
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -375,6 +417,24 @@ redacted_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-r
 }
 [[ "$redacted_output" != *'basic-secret-value'* ]] || {
   echo 'raw Basic authorization value leaked in review output' >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - 字面量令牌 platform-dev-shared-internal-token；影响：凭据泄露。修复建议：轮换。验证方式：检查配置。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+literal_token_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+[[ "$literal_token_output" == *'字面量令牌 <REDACTED>'* ]] || {
+  echo 'natural-language literal token value was not redacted' >&2
+  printf '%s\n' "$literal_token_output" >&2
+  exit 1
+}
+[[ "$literal_token_output" != *'platform-dev-shared-internal-token'* ]] || {
+  echo 'natural-language literal token leaked into output' >&2
+  printf '%s\n' "$literal_token_output" >&2
   exit 1
 }
 
