@@ -684,7 +684,7 @@ duplicate_security_count="$(printf '%s\n' "$duplicate_security_output" | grep -F
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '{"response":"P1 application-credential.yml:3 - 明文 AccessKey 已提交。影响：凭据泄露。修复建议：改用无默认值的环境变量。验证方式：检查配置与历史。","done":true,"done_reason":"stop"}\n'
+printf '{"response":"P1 application-credential.yml:3 - 明文 AccessKey 已提交。影响：凭据泄露。修复建议：改用无默认值的环境变量。验证方式：检查配置与历史。\\n\\nP1 application-credential.yml:3 - 同一凭据暴露风险的另一种描述。影响：凭据泄露。修复建议：轮换凭据。验证方式：检查配置历史。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
 duplicate_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \

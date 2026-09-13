@@ -422,6 +422,15 @@ dedup_exact_findings() {
   # location already has independently reported component roots. This keeps
   # every distinct root visible while avoiding "aggregate + two duplicates".
   LC_ALL=C awk '
+    function severity_rank(text,    header) {
+      header = text
+      sub(/^[[:space:]]*/, "", header)
+      if (header ~ /^P0[[:space:]:：]+/) return 0
+      if (header ~ /^P1[[:space:]:：]+/) return 1
+      if (header ~ /^P2[[:space:]:：]+/) return 2
+      if (header ~ /^P3[[:space:]:：]+/) return 3
+      return 4
+    }
     function flush(    key, header, body_text) {
       if (block == "") return
       lines_count = split(block, block_lines, "\n")
@@ -435,6 +444,8 @@ dedup_exact_findings() {
       bodies[count] = body_text
       has_null[count] = (body_text ~ /null|NullPointerException|空/)
       has_div[count] = (body_text ~ /ArithmeticException|除零|除数|b[[:space:]]*==[[:space:]]*0/)
+      has_credential[count] = (body_text ~ /凭据|AccessKey|Secret|secret|password|passwd|token|令牌|硬编码/)
+      severity[count] = severity_rank(block_lines[1])
       block = ""
     }
     /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
@@ -452,7 +463,21 @@ dedup_exact_findings() {
           }
           if (null_component && div_component) skip = 1
         }
-        if (!skip && !seen[bodies[i]]++) {
+        # Models often describe the same credential exposure twice with
+        # different prose. Keep one finding for the same path/range and risk
+        # family, preferring the more severe entry; preserve findings at
+        # different locations or for independent risk families.
+        if (!skip && has_credential[i]) {
+          for (j = 1; j < i; j++) {
+            if (keys[j] != keys[i] || !has_credential[j]) continue
+            if (severity[j] <= severity[i]) {
+              duplicate = 1
+            } else {
+              skipped[j] = 1
+            }
+          }
+        }
+        if (!skip && !duplicate && !skipped[i] && !seen[bodies[i]]++) {
           if (printed) printf "\n"
           printf "%s", blocks[i]
           printed = 1
