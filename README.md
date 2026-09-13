@@ -47,8 +47,8 @@ local-review-local
 local-review-local --repo /path/to/repo --base origin/main
 ```
 
-`local-review-local` keeps the same evidence, tenant-isolation, security, and
-truncation gates. Its default budgets remain the validated 16k/4096 profile and
+`local-review-local` keeps the same evidence, security, and truncation gates. Its
+default budgets remain the validated 16k/4096 profile and
 it keeps the model resident for consecutive reviews; this avoids the timeout
 observed with oversized 32k/8192 requests on real cross-repository diffs.
 It keeps the validated general-purpose decoding defaults
@@ -56,9 +56,9 @@ It keeps the validated general-purpose decoding defaults
 high-impact check you can opt into greedy decoding with
 `OLLAMA_REVIEW_TOP_K=1 OLLAMA_REVIEW_TOP_P=1`; this is intentionally not the
 default because some real configuration diffs can make greedy generation stall.
-Override any value with the same
-`OLLAMA_REVIEW_*` environment variables when needed. The team-safe `local-review`
-command remains the default and is the one to share with collaborators.
+Override any value with the same `OLLAMA_REVIEW_*` environment variables when
+needed. Use `local-review` for the conservative baseline and
+`local-review-local` when you want the personal high-performance defaults.
 
 The launcher polls model availability at 100 ms intervals and reuses the successful
 automatic model probe, avoiding an extra startup delay without changing the timeout

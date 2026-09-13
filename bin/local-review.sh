@@ -84,6 +84,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --base)
       [[ $# -ge 2 ]] || { echo "--base 需要一个 Git ref" >&2; exit 2; }
+      [[ "$2" != -* ]] || { echo "--base 不接受以 - 开头的值，以避免 Git 选项注入。" >&2; exit 2; }
       base_ref="$2"
       shift 2
       ;;
@@ -138,7 +139,7 @@ for required_command in git ollama jq curl awk tr sort rg perl; do
   fi
 done
 
-repo_root="$(git -C "$repo_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+repo_root="$(git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$repo_root" ]]; then
   echo "当前目录不是 Git 仓库: $repo_dir" >&2
   echo "请进入项目目录，或使用: local-review --repo /path/to/repo" >&2
@@ -255,13 +256,35 @@ print_context_file() {
   fi
 }
 
+sanitize_terminal_text() {
+  # Normalize terminal control sequences before evidence filters inspect the
+  # model text; otherwise an escape inserted inside a keyword could bypass a
+  # deterministic boundary check.
+  perl -pe '
+    s~\e\][^\a]*(?:\a|\e\\)~~g;
+    s!\e\[[0-?]*[ -/]*[@-~]!!g;
+    s~\e[()][0-2A-Za-z]~~g;
+    s~\e~~g;
+    s~[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]~~g;
+    s~\r~~g;
+  '
+}
+
 redact_sensitive_text() {
   # Keep the finding, path, and line number visible while preventing model
   # output from copying credentials into terminals, logs, or review artifacts.
   # The diff itself is sent only to the local model; this protects every
   # user-visible response and truncation diagnostic.
   perl -pe '
+    s~\e\][^\a]*(?:\a|\e\\)~~g;
+    s!\e\[[0-?]*[ -/]*[@-~]!!g;
+    s~\e[()][0-2A-Za-z]~~g;
+    s~\e~~g;
+    s~[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]~~g;
+    s~\r~~g;
     s~((?:authorization|proxy-authorization)[[:space:]]*"?[[:space:]]*[:=：][[:space:]]*"?[[:space:]]*(?:Bearer|Basic)[[:space:]]+)[^[:space:],，;；)}`"]+~$1<REDACTED>~ig;
+    s~((?:authorization|proxy-authorization)[[:space:]]*"?[[:space:]]*[:=：][[:space:]]*"?[[:space:]]*)(?!Bearer[[:space:]]|Basic[[:space:]])[^[:space:],，;；)}`"]+~$1<REDACTED>~ig;
+    s~((?:[?&]|^)(?:x-amz-)?(?:signature|sig|security-token|credential|access[-_]?token|refresh[-_]?token|id[-_]?token)=)[^&#[:space:],，;；)}`"]+~$1<REDACTED>~ig;
     s~((?:access[-_ ]?key(?:[-_ ]?(?:id|secret))?|secret|password|passwd|token|api[-_ ]?key)[[:space:]]*[:=：][[:space:]]*)[^[:space:],，;；)}`]+~$1<REDACTED>~ig;
     s~\b(?:AKIA|ASIA|LTAI)[A-Za-z0-9_-]{8,}\b~<REDACTED>~g;
   '
@@ -347,22 +370,22 @@ dedup_exact_findings() {
   '
 }
 
-git -C "$repo_root" status --short >"$status_file"
+git -c core.fsmonitor=false -C "$repo_root" status --short >"$status_file"
 
-git -C "$repo_root" diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ --cached -- >"$staged_file"
-git -C "$repo_root" diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ -- >"$unstaged_file"
+git -c core.fsmonitor=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached -- >"$staged_file"
+git -c core.fsmonitor=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- >"$unstaged_file"
 
 if [[ -n "$base_ref" ]]; then
-  git -C "$repo_root" diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ "$base_ref...HEAD" -- >"$base_file"
+  git -c core.fsmonitor=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ "$base_ref...HEAD" -- >"$base_file"
 fi
 
 # Include untracked files so newly created source files are reviewed too.
 while IFS= read -r -d '' path; do
   (
     cd "$repo_root"
-    git diff --no-index --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >>"$untracked_file" || true
+    git -c core.fsmonitor=false diff --no-index --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >>"$untracked_file" || true
   )
-done < <(git -C "$repo_root" ls-files --others --exclude-standard -z)
+done < <(git -c core.fsmonitor=false -C "$repo_root" ls-files --others --exclude-standard -z)
 
 if [[ -n "$base_ref" && ! -s "$base_file" && ! -s "$staged_file" && ! -s "$unstaged_file" && ! -s "$untracked_file" ]]; then
   echo "没有发现待审查的 Git 变更。"
@@ -634,7 +657,7 @@ validate_response() {
   # Keep the raw response local while applying evidence filters; redact only
   # after filtering/deduplication so guards such as `token: null` remain
   # visible to the deterministic shard-boundary checks.
-  response_text="$(jq -r '.response' <"$response_file" | filter_unsupported_shard_findings | dedup_exact_findings | redact_sensitive_text)"
+  response_text="$(jq -r '.response' <"$response_file" | sanitize_terminal_text | filter_unsupported_shard_findings | dedup_exact_findings | redact_sensitive_text)"
   normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
 
   if [[ -z "$normalized_response" ]]; then
@@ -933,7 +956,7 @@ collect_build_preflight() {
     source_file="$repo_root/$changed_path"
     [[ -f "$source_file" ]] || continue
     source_index="$java_main_source_index"
-    if [[ "$changed_path" == src/test/java/* ]]; then
+    if [[ "$changed_path" == src/test/java/* || "$changed_path" == */src/test/java/* ]]; then
       source_index="$java_source_index"
     fi
     package_name="$(awk '$1 == "package" { gsub(/[;\r]/, "", $2); print $2; exit }' "$source_file")"
@@ -1034,12 +1057,12 @@ trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$b
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
-  git -C "$repo_root" diff --name-only --no-renames -z --cached
-  git -C "$repo_root" diff --name-only --no-renames -z
+  git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z --cached
+  git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z
   if [[ -n "$base_ref" ]]; then
-    git -C "$repo_root" diff --name-only --no-renames -z "$base_ref...HEAD"
+    git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z "$base_ref...HEAD"
   fi
-  git -C "$repo_root" ls-files --others --exclude-standard -z
+  git -c core.fsmonitor=false -C "$repo_root" ls-files --others --exclude-standard -z
 } | tr '\0' '\n' | LC_ALL=C sort -u >"$changed_paths_file"
 if [[ -f "$repo_root/AGENTS.md" ]]; then
   printf '%s\n' "AGENTS.md" >>"$changed_paths_file"
@@ -1092,10 +1115,10 @@ else
 fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 {
-  git -C "$repo_root" diff --name-status --no-renames --cached
-  git -C "$repo_root" diff --name-status --no-renames
+  git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
+  git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames
   if [[ -n "$base_ref" ]]; then
-    git -C "$repo_root" diff --name-status --no-renames "$base_ref...HEAD"
+    git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames "$base_ref...HEAD"
   fi
 } | awk '$1 == "D" { print $2 }' | LC_ALL=C sort -u >"$deleted_types_file"
 collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"

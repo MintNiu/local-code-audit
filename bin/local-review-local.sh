@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Personal high-performance profile. Values remain overridable per invocation.
-# It still uses the same conservative tenant/security rules and private examples
-# as local-review; only runtime budgets and model residency are changed.
+# It keeps the same evidence and security gates as local-review; only runtime
+# budgets, model residency, and the local private examples path are changed.
 export OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-16384}"
 export OLLAMA_REVIEW_NUM_PREDICT="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
 export OLLAMA_REVIEW_MAX_DIFF_BYTES="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-6000}"
@@ -17,6 +17,8 @@ export OLLAMA_REVIEW_KEEP_ALIVE="${OLLAMA_REVIEW_KEEP_ALIVE:-5m}"
 # on some real config diffs it can make generation stall for several minutes.
 export OLLAMA_REVIEW_TOP_K="${OLLAMA_REVIEW_TOP_K:-40}"
 export OLLAMA_REVIEW_TOP_P="${OLLAMA_REVIEW_TOP_P:-0.9}"
+local_review_data_dir="${LOCAL_REVIEW_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/local-review}"
+export LOCAL_REVIEW_EXAMPLES_FILE="${LOCAL_REVIEW_EXAMPLES_FILE:-$local_review_data_dir/examples.md}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$script_dir/local-review.sh" "$@"

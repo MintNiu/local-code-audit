@@ -43,6 +43,10 @@ PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_SHOW_LOG="$show_log" \
   cat "$show_log" >&2
   exit 1
 }
+if PATH="$fake_bin:$PATH" "$repo_root/bin/local-review.sh" --base '--output=/tmp/local-review-option-injection' --help >/dev/null 2>&1; then
+  echo '--base accepted a Git option-like value' >&2
+  exit 1
+fi
 
 git -C "$repo" init -q
 git -C "$repo" config user.email test@example.invalid
@@ -70,6 +74,43 @@ PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_SHOW_LOG="$show_log" \
 }
 : >"$show_log"
 
+cat >"$fake_bin/textconv" <<'EOF'
+#!/usr/bin/env bash
+touch "${TEXTCONV_MARKER:?}"
+cat "$1"
+EOF
+chmod +x "$fake_bin/textconv"
+git -C "$repo" config diff.evil.textconv "$fake_bin/textconv"
+printf '*.bin diff=evil\n' >"$repo/.gitattributes"
+printf 'base binary-like content\n' >"$repo/sample.bin"
+git -C "$repo" add .gitattributes sample.bin
+git -C "$repo" commit -qm textconv-base
+printf 'changed binary-like content\n' >"$repo/sample.bin"
+rm -f "$fixture_root/textconv.marker"
+
+mkdir -p "$repo/module-a/src/main/java/com/example/api/client" "$repo/module-a/src/test/java/com/example/api/dto"
+cat >"$repo/module-a/src/main/java/com/example/api/client/ModuleClient.java" <<'EOF'
+package com.example.api.client;
+
+public interface ModuleClient {}
+EOF
+cat >"$repo/module-a/src/test/java/com/example/api/dto/ModuleMissing.java" <<'EOF'
+package com.example.api.dto;
+
+final class ModuleMissing {}
+EOF
+git -C "$repo" add module-a
+git -C "$repo" commit -qm module-base
+cat >"$repo/module-a/src/main/java/com/example/api/client/ModuleClient.java" <<'EOF'
+package com.example.api.client;
+
+import com.example.api.dto.ModuleMissing;
+
+public interface ModuleClient {
+    ModuleMissing call();
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/Client.java" <<'EOF'
 package com.example.api.client;
 
@@ -80,10 +121,30 @@ public interface Client {
 }
 EOF
 
+cat >"$fake_bin/fsmonitor" <<'EOF'
+#!/usr/bin/env bash
+touch "${FSMONITOR_MARKER:-/dev/null}"
+printf 'token\n'
+exit 0
+EOF
+chmod +x "$fake_bin/fsmonitor"
+git -C "$repo" config core.fsmonitor "$fake_bin/fsmonitor"
+rm -f "$fixture_root/fsmonitor.marker"
+
 PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_SHOW_LOG="$show_log" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  TEXTCONV_MARKER="$fixture_root/textconv.marker" FSMONITOR_MARKER="$fixture_root/fsmonitor.marker" \
   "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null
+grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissing' "$capture" >/dev/null
+[[ ! -e "$fixture_root/textconv.marker" ]] || {
+  echo 'git diff executed a configured textconv filter' >&2
+  exit 1
+}
+[[ ! -e "$fixture_root/fsmonitor.marker" ]] || {
+  echo 'git status executed a configured fsmonitor hook' >&2
+  exit 1
+}
 [[ "$(wc -l <"$show_log" | tr -d ' ')" == "1" ]] || {
   echo 'automatic model selection performed a redundant model probe' >&2
   cat "$show_log" >&2
@@ -175,6 +236,46 @@ redacted_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-r
 }
 [[ "$redacted_output" != *'basic-secret-value'* ]] || {
   echo 'raw Basic authorization value leaked in review output' >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - \\u001b[31mANSI marker\\u001b[0m remains visible","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+safe_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if printf '%s' "$safe_output" | LC_ALL=C grep -q $'\033'; then
+  echo 'ANSI escape sequence leaked in review output' >&2
+  exit 1
+fi
+[[ "$safe_output" == *'ANSI marker'* ]] || {
+  echo 'ANSI sanitization removed the finding text' >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - https://oss.example.test/upload?X-Amz-Credential=AKID_EXAMPLE&X-Amz-Signature=signature-secret-value&X-Amz-Security-Token=session-secret-value","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+url_safe_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+[[ "$url_safe_output" == *'X-Amz-Credential=<REDACTED>'* ]] || {
+  echo 'presigned URL credential was not redacted' >&2
+  exit 1
+}
+[[ "$url_safe_output" == *'X-Amz-Signature=<REDACTED>'* ]] || {
+  echo 'presigned URL signature was not redacted' >&2
+  exit 1
+}
+[[ "$url_safe_output" == *'X-Amz-Security-Token=<REDACTED>'* ]] || {
+  echo 'presigned URL security token was not redacted' >&2
+  exit 1
+}
+[[ "$url_safe_output" != *'signature-secret-value'* && "$url_safe_output" != *'session-secret-value'* ]] || {
+  echo 'raw presigned URL credential leaked in review output' >&2
   exit 1
 }
 

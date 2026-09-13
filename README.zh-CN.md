@@ -47,7 +47,7 @@ local-review-local
 local-review-local --repo /path/to/repo --base origin/main
 ```
 
-它不会去掉多租户、权限或安全检查，默认沿用已在真实提交上验证过的 16k/4096 预算，并在连续审查时保留模型；真实跨仓库大 diff 曾证明盲目使用 32k/8192 会增加超时。仍可用同一组 `OLLAMA_REVIEW_*` 环境变量临时覆盖。团队共享时使用默认的 `local-review`，该命令不依赖你的私有 few-shot 数据。
+它保留证据、权限和安全检查，默认沿用已在真实提交上验证过的 16k/4096 预算，并在连续审查时保留模型；真实跨仓库大 diff 曾证明盲目使用 32k/8192 会增加超时。仍可用同一组 `OLLAMA_REVIEW_*` 环境变量临时覆盖。`local-review` 是保守基线，`local-review-local` 提供个人本地高性能默认值；两者都可使用本机私有 few-shot 数据。
 
 实测同一个 clean 样例：保留模型 5 分钟时连续两次约 23 秒、4 秒；每次卸载时约 20 秒、21 秒。因此本地高性能版默认保留模型用于连续审查；更关注电量时可设置 `OLLAMA_REVIEW_KEEP_ALIVE=0`。
 
