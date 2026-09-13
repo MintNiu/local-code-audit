@@ -5,12 +5,18 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 runs="${SYNTHETIC_REVIEW_RUNS:-5}"
 timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-180}"
 model="${OLLAMA_REVIEW_MODEL:-devstral-small-2-review-tuned}"
+require_stable_hash="${SYNTHETIC_REQUIRE_STABLE_HASH:-1}"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic.XXXXXX")"
 output_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic-results.XXXXXX")"
 trap 'rm -rf "$fixture_root" "$output_root"' EXIT
 
 if [[ ! "$runs" =~ ^[1-9][0-9]*$ ]]; then
   echo "SYNTHETIC_REVIEW_RUNS 必须是正整数。" >&2
+  exit 2
+fi
+
+if [[ "$require_stable_hash" != "0" && "$require_stable_hash" != "1" ]]; then
+  echo "SYNTHETIC_REQUIRE_STABLE_HASH 必须是 0 或 1。" >&2
   exit 2
 fi
 
@@ -162,8 +168,21 @@ run_review() {
       fi
     fi
 
+    output_hash="$(shasum -a 256 "$output_file" | awk '{print $1}')"
+    baseline_hash_file="$output_dir/baseline.sha256"
+    if [[ "$run" -eq 1 ]]; then
+      printf '%s\n' "$output_hash" >"$baseline_hash_file"
+    elif [[ "$require_stable_hash" == "1" ]]; then
+      baseline_hash="$(<"$baseline_hash_file")"
+      if [[ "$output_hash" != "$baseline_hash" ]]; then
+        echo "$name run $run output is not stable: expected sha256=$baseline_hash, got sha256=$output_hash" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    fi
+
     printf '%s run=%s exit=%s elapsed=%ss sha256=%s\n' \
-      "$name" "$run" "$exit_code" "$((end - start))" "$(shasum -a 256 "$output_file" | awk '{print $1}')"
+      "$name" "$run" "$exit_code" "$((end - start))" "$output_hash"
   done
 }
 

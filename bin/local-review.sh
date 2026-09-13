@@ -1476,6 +1476,9 @@ collect_security_preflight() {
         path_emitted = 1
       }
     }
+    function emit_hardcoded_credential(at_line) {
+      printf "P1 %s:%d - 配置文件新增了疑似硬编码凭据。\n影响：凭据可能随代码仓库、构建产物或配置分发链泄漏，并被用于访问外部资源。\n修复建议：移除字面量并改用无默认值的环境变量/密钥管理服务，已暴露的凭据应立即轮换。\n验证方式：检查 Git 历史、构建产物和运行时配置，确认不再包含该字面量，并用轮换后的凭据完成连接测试。\n\n", path, at_line
+    }
     function reset_hunk(    name) {
       for (name in url_input_vars) delete url_input_vars[name]
       url_guard_line = 0
@@ -1492,6 +1495,16 @@ collect_security_preflight() {
     function reset_file(    name) {
       for (name in file_url_input_vars) delete file_url_input_vars[name]
       file_url_changed = 0
+      for (name in credential_lines) delete credential_lines[name]
+      for (name in credential_high_lines) delete credential_high_lines[name]
+      credential_count = 0
+      remote_endpoint_seen = 0
+    }
+    function flush_credential_defaults(    i) {
+      if (!remote_endpoint_seen && credential_count == 0) return
+      for (i = 1; i <= credential_count; i++) {
+        if (remote_endpoint_seen || credential_high_lines[i]) emit_hardcoded_credential(credential_lines[i])
+      }
     }
     function record_url_guard(text, at_line, name) {
       if (text !~ /(ALLOWED_HOST|allowlist|allowedHosts|allowedHost)[^;]*(getHost|uri|target|endpoint)|isAllowedHost[[:space:]]*\(/) return
@@ -1542,6 +1555,7 @@ collect_security_preflight() {
     }
     /^diff --git / {
       flush_hunk()
+      flush_credential_defaults()
       reset_file()
       path = $4
       sub(/^b\//, "", path)
@@ -1568,7 +1582,8 @@ collect_security_preflight() {
       code = (prefix == "+" ? substr($0, 2) : $0)
       trimmed_code = code
       sub(/^[[:space:]]+/, "", trimmed_code)
-      if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/) {
+      if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/ && trimmed_code !~ /^#/) {
+        if (code ~ /https?:\/\// && code !~ /localhost|127\.0\.0\.1|0\.0\.0\.0/) remote_endpoint_seen = 1
         if (code ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/) {
           input_assignment = code
           sub(/[[:space:]]*=.*/, "", input_assignment)
@@ -1611,9 +1626,20 @@ collect_security_preflight() {
         added = substr($0, 2)
         trimmed = added
         sub(/^[[:space:]]+/, "", trimmed)
-        if (trimmed ~ /^\/\// || trimmed ~ /^\/\*|^\*/) {
+        if (trimmed ~ /^\/\// || trimmed ~ /^\/\*|^\*/ || trimmed ~ /^#/) {
           line_no++
           next
+        }
+        credential_key = added ~ /(^|[.[:space:]_-])(access[-_]?key([-_]?id|[-_]?secret)?|secret[-_]?key|api[-_]?key|client[-_]?secret|private[-_]?key|password|passwd|token)([.[:space:]_:-]|=)/
+        credential_high = added ~ /(access[-_]?key|secret[-_]?key|api[-_]?key|client[-_]?secret|private[-_]?key)/
+        credential_placeholder = added ~ /\$\{[A-Za-z_][A-Za-z0-9_]*:[^}]+\}/ && added !~ /\$\{[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*\}/
+        credential_literal = added ~ /(:|=)[[:space:]]*"?[A-Za-z0-9][A-Za-z0-9_.\/+={}-]{15,}"?[[:space:]]*(#.*)?$/
+        if (path ~ /\.(ya?ml|properties|conf|ini|env|json|toml)$/ && credential_key &&
+            ((credential_placeholder && tolower(added) !~ /change[_-]?me|redacted|example|placeholder|<[^>]+>/) ||
+             (credential_literal && tolower(added) !~ /change[_-]?me|redacted|example|dummy|placeholder|replace|your-|<[^>]+>/))) {
+          credential_count++
+          credential_lines[credential_count] = line_no
+          credential_high_lines[credential_count] = credential_high
         }
         if (added ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/) {
           input_assignment = added
@@ -1667,7 +1693,10 @@ collect_security_preflight() {
         line_no++
       }
     }
-    END { flush_hunk() }
+    END {
+      flush_hunk()
+      flush_credential_defaults()
+    }
   ' "$diff_file" >>"$output_file"
   dedup_preflight_blocks "$output_file"
 }

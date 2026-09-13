@@ -16,6 +16,7 @@ repo="$fixture_root/repo"
 context="$fixture_root/downstream/Downstream.java"
 module_context="$fixture_root/downstream/ModuleDownstream.java"
 capture="$fixture_root/request.json"
+review_output="$fixture_root/review-output.txt"
 resolved_model_capture="$fixture_root/resolved-model.txt"
 show_log="$fixture_root/ollama-show.log"
 tmp_dir="$fixture_root/tmp"
@@ -76,7 +77,7 @@ git -C "$repo" add .
 git -C "$repo" commit -qm base
 
 PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_SHOW_LOG="$show_log" \
-  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
+  "$repo_root/bin/local-review.sh" --repo "$repo" >"$review_output"
 [[ ! -s "$show_log" ]] || {
   echo 'clean repository unexpectedly contacted Ollama' >&2
   cat "$show_log" >&2
@@ -119,6 +120,23 @@ import com.example.api.dto.ModuleMissing;
 public interface ModuleClient {
     ModuleMissing call();
 }
+EOF
+
+# Configuration fixtures exercise the deterministic hardcoded-credential rule.
+# Keep the literal values synthetic; the scanner must report the lines without
+# echoing either value into the request or terminal output.
+cat >"$repo/application-credential.yml" <<'EOF'
+storage:
+  endpoint: https://oss.example.invalid
+  access-key-id: AKID_9f8e7d6c5b4a3210
+  access-key-secret: S3cr3t_9f8e7d6c5b4a3210
+EOF
+cat >"$repo/application-credential-safe.yml" <<'EOF'
+storage:
+  endpoint: https://oss.example.invalid
+  access-key-id: ${OSS_ACCESS_KEY_ID}
+  password: ${DB_PASSWORD:}
+  # access-key-secret: AKID_comment_should_not_trigger
 EOF
 
 cat >"$repo/src/main/java/com/example/api/client/TokenProxy.java" <<'EOF'
@@ -563,6 +581,21 @@ grep -F 'P1 src/main/java/com/example/api/client/PathTraversalPreflight.java' "$
   exit 1
 }
 grep -F '路径遍历' "$capture" >/dev/null
+grep -F 'P1 application-credential.yml' "$capture" >/dev/null || {
+  echo 'missing hardcoded credential preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+if grep -F 'P1 application-credential-safe.yml' "$capture" >/dev/null; then
+  echo 'hardcoded credential preflight reported placeholder/comment negative fixture' >&2
+  cat "$capture" >&2
+  exit 1
+fi
+if grep -F 'AKID_9f8e7d6c5b4a3210' "$review_output" >/dev/null || \
+   grep -F 'S3cr3t_9f8e7d6c5b4a3210' "$review_output" >/dev/null; then
+  echo 'hardcoded credential value leaked into review output' >&2
+  exit 1
+fi
 grep -F 'P1 src/main/java/com/example/api/client/SingleDivide.java' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/LongMethodDivide.java' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/LongDivide.java' "$capture" >/dev/null
