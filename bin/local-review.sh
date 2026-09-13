@@ -370,6 +370,29 @@ dedup_exact_findings() {
   '
 }
 
+sort_findings_by_severity() {
+  # Preserve model order within each severity while making the final stream
+  # deterministic for both single-request and sharded reviews.
+  awk '
+    BEGIN { RS = ""; ORS = "" }
+    {
+      if ($0 ~ /^[[:space:]]*P0[[:space:]:：]+/) p0 = p0 (p0 == "" ? "" : "\n\n") $0
+      else if ($0 ~ /^[[:space:]]*P1[[:space:]:：]+/) p1 = p1 (p1 == "" ? "" : "\n\n") $0
+      else if ($0 ~ /^[[:space:]]*P2[[:space:]:：]+/) p2 = p2 (p2 == "" ? "" : "\n\n") $0
+      else if ($0 ~ /^[[:space:]]*P3[[:space:]:：]+/) p3 = p3 (p3 == "" ? "" : "\n\n") $0
+      else if ($0 ~ /^[[:space:]]*信息[[:space:]:：]+/) info = info (info == "" ? "" : "\n\n") $0
+    }
+    END {
+      output = p0
+      if (p1 != "") output = output (output == "" ? "" : "\n\n") p1
+      if (p2 != "") output = output (output == "" ? "" : "\n\n") p2
+      if (p3 != "") output = output (output == "" ? "" : "\n\n") p3
+      if (info != "") output = output (output == "" ? "" : "\n\n") info
+      if (output != "") printf "%s\n", output
+    }
+  '
+}
+
 git -c core.fsmonitor=false -C "$repo_root" status --short >"$status_file"
 
 git -c core.fsmonitor=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached -- >"$staged_file"
@@ -798,6 +821,7 @@ validate_response() {
     return 12
   fi
 
+  response_text="$(printf '%s\n' "$response_text" | sort_findings_by_severity)"
   printf '%s\n' "$response_text" >"$output_file"
   printf 'findings\n' >"$kind_file"
   return 0
@@ -1262,9 +1286,11 @@ if [[ "$has_findings" == true ]]; then
       printf '\n\n' >>"$combined_output_file"
     fi
   done
-  # Shards can repeat one deterministic preflight finding verbatim. Remove
-  # only byte-identical paragraphs; distinct findings remain untouched.
-  awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }' "$combined_output_file"
+  # Re-establish the global severity order after shard aggregation. Each shard
+  # is ordered independently, so lexical chunk order cannot guarantee P0/P1
+  # findings appear before lower-severity findings. Keep original order within
+  # each severity and remove only byte-identical paragraphs.
+  sort_findings_by_severity <"$combined_output_file" | awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }'
 else
   printf '未发现阻塞问题\n'
 fi

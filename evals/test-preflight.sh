@@ -292,6 +292,56 @@ if ! printf '%s\n' "$marker_output" | grep -Fx '未发现阻塞问题' >/dev/nul
   exit 1
 fi
 
+sort_repo="$fixture_root/sort-repo"
+mkdir -p "$sort_repo/src"
+git -C "$sort_repo" init -q
+git -C "$sort_repo" config user.email test@example.invalid
+git -C "$sort_repo" config user.name preflight-test
+: >"$sort_repo/src/A.java"
+: >"$sort_repo/src/B.java"
+for i in {1..12}; do
+  printf 'class A { int value = 1; } // baseline line %02d\n' "$i" >>"$sort_repo/src/A.java"
+  printf 'class B { int value = 1; } // baseline line %02d\n' "$i" >>"$sort_repo/src/B.java"
+done
+git -C "$sort_repo" add .
+git -C "$sort_repo" commit -qm sort-base
+: >"$sort_repo/src/A.java"
+: >"$sort_repo/src/B.java"
+for i in {1..12}; do
+  printf 'class A { int value = 2; } // changed line %02d\n' "$i" >>"$sort_repo/src/A.java"
+  printf 'class B { int value = 2; } // changed line %02d\n' "$i" >>"$sort_repo/src/B.java"
+done
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+previous=""
+request_file=""
+for argument in "$@"; do
+  if [[ "$previous" == "--data-binary" && "$argument" == @* ]]; then
+    request_file="${argument#@}"
+  fi
+  previous="$argument"
+done
+prompt="$(jq -r '.prompt' "$request_file")"
+if printf '%s\n' "$prompt" | grep -q '^diff --git a/src/A.java'; then
+  printf '{"response":"P2 src/A.java:1 - 低严重度示例问题。","done":true,"done_reason":"stop"}\n'
+else
+  printf '{"response":"P0 src/B.java:1 - 高严重度示例问题。","done":true,"done_reason":"stop"}\n'
+fi
+EOF
+chmod +x "$fake_bin/curl"
+sorted_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=512 \
+  OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=30 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS=120 \
+  "$repo_root/bin/local-review.sh" --repo "$sort_repo")"
+p0_line="$(printf '%s\n' "$sorted_output" | grep -n '^P0 ' | head -n1 | cut -d: -f1)"
+p2_line="$(printf '%s\n' "$sorted_output" | grep -n '^P2 ' | head -n1 | cut -d: -f1)"
+if [[ -z "$p0_line" || -z "$p2_line" || "$p0_line" -ge "$p2_line" ]]; then
+  echo 'aggregated findings were not globally sorted by severity' >&2
+  printf '%s\n' "$sorted_output" >&2
+  exit 1
+fi
+
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '{"response":"P1 src/main/java/com/example/api/client/Client.java:5 - incomplete","done":false,"done_reason":"length"}\n'
