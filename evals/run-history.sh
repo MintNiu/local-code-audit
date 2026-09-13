@@ -6,6 +6,7 @@ manifest_file=""
 output_dir=""
 limit=""
 commit_filter=""
+profile="personal"
 
 usage() {
   cat <<'EOF'
@@ -21,6 +22,7 @@ usage() {
   --out-dir <dir>    私有结果目录，不要指向公开仓库
   --limit <n>        只运行前 n 个 pending-human-label 提交
   --commit <sha>     只运行指定的 pending-human-label 提交
+  --profile <name>   使用 personal（默认，个人高性能）或 baseline profile
 EOF
 }
 
@@ -49,6 +51,15 @@ while [[ $# -gt 0 ]]; do
     --commit)
       [[ $# -ge 2 ]] || { echo "--commit 需要提交 SHA" >&2; exit 2; }
       commit_filter="$2"
+      shift 2
+      ;;
+    --profile)
+      [[ $# -ge 2 ]] || { echo "--profile 需要 personal 或 baseline" >&2; exit 2; }
+      [[ "$2" == "personal" || "$2" == "baseline" ]] || {
+        echo "--profile 只能是 personal 或 baseline" >&2
+        exit 2
+      }
+      profile="$2"
       shift 2
       ;;
     -h|--help)
@@ -82,6 +93,11 @@ trap 'rm -rf "$temp_root"' EXIT
 
 repo_root="$(git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel)"
 workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "$profile" == "personal" ]]; then
+  review_script="$workflow_root/bin/local-review-local.sh"
+else
+  review_script="$workflow_root/bin/local-review.sh"
+fi
 count=0
 
 while IFS=$'\t' read -r commit parent date subject status _rest; do
@@ -120,7 +136,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
 
   start="$(date +%s)"
   exit_code=0
-  "$workflow_root/bin/local-review.sh" --repo "$worktree" >"$result_file" 2>&1 || exit_code=$?
+  "$review_script" --repo "$worktree" >"$result_file" 2>&1 || exit_code=$?
   end="$(date +%s)"
 
   {
@@ -128,6 +144,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'parent\t%s\n' "$parent"
     printf 'date\t%s\n' "$date"
     printf 'subject\t%s\n' "$subject"
+    printf 'profile\t%s\n' "$profile"
     if [[ "$exit_code" -eq 0 ]]; then
       printf 'status\tcompleted\n'
     else
