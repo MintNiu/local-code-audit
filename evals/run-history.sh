@@ -150,6 +150,25 @@ if (( ${#context_files[@]} > 0 )); then
   done
 fi
 workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+command -v shasum >/dev/null 2>&1 || { echo "历史评测需要 shasum 记录审计器版本。" >&2; exit 2; }
+workflow_git_revision="$(git -C "$workflow_root" rev-parse HEAD 2>/dev/null || printf 'not-a-git-checkout')"
+workflow_dirty="$(git -C "$workflow_root" status --short 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+modelfile_path="$workflow_root/config/Modelfile"
+modelfile_sha256="unavailable"
+system_sha256="unavailable"
+if [[ -f "$modelfile_path" ]]; then
+  modelfile_sha256="$(shasum -a 256 "$modelfile_path" | awk '{print $1}')"
+  system_tmp="$(mktemp "$temp_root/system.XXXXXX")"
+  if awk '
+    BEGIN { state = 0; blocks = 0 }
+    state == 0 && $0 ~ /^SYSTEM[[:space:]]+"""[[:space:]]*$/ { state = 1; blocks++; next }
+    state == 1 && $0 ~ /^"""[[:space:]]*$/ { state = 2; next }
+    state == 1 { sub(/\r$/, ""); print; next }
+    END { if (blocks != 1 || state != 2) exit 1 }
+  ' "$modelfile_path" >"$system_tmp"; then
+    system_sha256="$(shasum -a 256 "$system_tmp" | awk '{print $1}')"
+  fi
+fi
 if [[ "$profile" == "personal" ]]; then
   review_script="$workflow_root/bin/local-review-local.sh"
   profile_num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
@@ -279,6 +298,11 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'date\t%s\n' "$date"
     printf 'subject\t%s\n' "$subject"
     printf 'profile\t%s\n' "$profile"
+    printf 'workflow_git_revision\t%s\n' "$workflow_git_revision"
+    printf 'workflow_dirty_state_sha256\t%s\n' "$workflow_dirty"
+    printf 'review_script_sha256\t%s\n' "$(shasum -a 256 "$review_script" | awk '{print $1}')"
+    printf 'modelfile_sha256\t%s\n' "$modelfile_sha256"
+    printf 'system_sha256\t%s\n' "$system_sha256"
     printf 'model\t%s\n' "$review_model"
     printf 'resolved_model\t%s\n' "$resolved_model"
     printf 'temperature\t%s\n' "$review_temperature"

@@ -19,6 +19,14 @@ if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]] || (( timeout_seconds < 30 )); then
   exit 2
 fi
 
+# The model gate cannot prove that deterministic wrapper rules still run. Run
+# the hermetic no-model preflight regression first so a broken known-pattern
+# detector fails the same synthetic command instead of silently lowering recall.
+if ! "$repo_root/evals/test-preflight.sh" >/dev/null; then
+  echo "确定性预检回归失败；未发送模型请求。" >&2
+  exit 1
+fi
+
 prepare_fixture() {
   local name="$1"
   local source_dir="$repo_root/evals/fixtures/$name"

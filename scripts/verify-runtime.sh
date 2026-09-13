@@ -61,6 +61,27 @@ sha256_file() {
   fi
 }
 
+verify_global_wrapper_file() {
+  local global_wrapper="$1"
+  local expected_script="$2"
+  [[ -e "$global_wrapper" ]] || return 0
+  local expected_hash actual_hash
+  expected_hash="$(sha256_file "$expected_script")"
+  actual_hash="$(sha256_file "$global_wrapper")"
+  if [[ "$expected_hash" != "$actual_hash" ]]; then
+    printf '全局 local-review 与当前仓库脚本不一致: expected=%s actual=%s\n' \
+      "$expected_hash" "$actual_hash" >&2
+    echo "请执行: $project_root/scripts/install-global.sh" >&2
+    return 1
+  fi
+}
+
+global_bin_dir="${LOCAL_REVIEW_BIN_DIR:-$HOME/.local/bin}"
+verify_global_wrapper_file "$global_bin_dir/local-review" "$project_root/bin/local-review.sh"
+verify_global_wrapper_file "$global_bin_dir/local-review.sh" "$project_root/bin/local-review.sh"
+verify_global_wrapper_file "$global_bin_dir/local-review-local" "$project_root/bin/local-review-local.sh"
+verify_global_wrapper_file "$global_bin_dir/local-review-local.sh" "$project_root/bin/local-review-local.sh"
+
 if ! extract_system_prompt "$modelfile" "$expected_system_file"; then
   echo "当前 config/Modelfile 缺少可解析的唯一 SYSTEM 规则块。" >&2
   exit 2

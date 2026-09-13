@@ -5,8 +5,22 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bin_dir="${LOCAL_REVIEW_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$bin_dir"
 
-install -m 755 "$project_dir/bin/local-review.sh" "$bin_dir/local-review.sh"
-install -m 755 "$project_dir/bin/local-review-local.sh" "$bin_dir/local-review-local.sh"
+link_script() {
+  local source="$1"
+  local target="$2"
+  if [[ -e "$target" && ! -L "$target" ]]; then
+    local backup="${target}.backup-$(date +%Y%m%d%H%M%S)"
+    mv "$target" "$backup"
+    printf '已保留旧脚本备份: %s\n' "$backup"
+  fi
+  ln -sfn "$source" "$target"
+}
+
+# Keep the global entry points linked to the checked-out workflow. A copied
+# script can silently keep old deterministic prechecks after the repository is
+# updated, which is exactly how known findings start recurring.
+link_script "$project_dir/bin/local-review.sh" "$bin_dir/local-review.sh"
+link_script "$project_dir/bin/local-review-local.sh" "$bin_dir/local-review-local.sh"
 ln -sfn "$bin_dir/local-review.sh" "$bin_dir/local-review"
 ln -sfn "$bin_dir/local-review-local.sh" "$bin_dir/local-review-local"
 

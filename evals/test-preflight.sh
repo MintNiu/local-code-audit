@@ -6,6 +6,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # must not change the request-size preflight or the expected assertions.
 export LOCAL_REVIEW_EXAMPLES_FILE=/dev/null
 export OLLAMA_REVIEW_MAX_DIFF_BYTES=60000
+# The fixture intentionally contains several independent division cases; keep
+# the fake review request above the normal 16k budget so this test exercises
+# preflight output rather than the input-budget rejection path.
+export OLLAMA_REVIEW_NUM_CTX=32768
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-preflight-test.XXXXXX")"
 fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
@@ -267,6 +271,138 @@ git -C "$repo" add src/main/java/com/example/api/client/SsrfContext.java
 git -C "$repo" commit -qm ssrf-context-base
 perl -0pi -e 's/return target;/return new RestTemplate().getForObject(target, String.class);/' "$repo/src/main/java/com/example/api/client/SsrfContext.java"
 
+cat >"$repo/src/main/java/com/example/api/client/SsrfOnlySource.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.web.client.RestTemplate;
+
+final class SsrfOnlySource {
+    String fetch(HttpServletRequest request) {
+        String target = "https://fixed.example";
+        return new RestTemplate().getForObject(target, String.class);
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/SsrfOnlySource.java
+git -C "$repo" commit -qm ssrf-source-base
+sed -i '' 's/String target = "https:\/\/fixed.example";/String target = request.getParameter("url");/' "$repo/src/main/java/com/example/api/client/SsrfOnlySource.java"
+
+cat >"$repo/src/main/java/com/example/api/client/SsrfCrossHunk.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.web.client.RestTemplate;
+
+final class SsrfCrossHunk {
+    String fetch(HttpServletRequest request) {
+        String target = "https://fixed.example";
+        int one = 1;
+        int two = 2;
+        int three = 3;
+        int four = 4;
+        int five = 5;
+        int six = 6;
+        int seven = 7;
+        int eight = 8;
+        return target;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/SsrfCrossHunk.java
+git -C "$repo" commit -qm ssrf-cross-hunk-base
+perl -0pi -e 's/String target = "https:\/\/fixed.example";/String target = request.getParameter("url");/; s/return target;/return new RestTemplate().getForObject(target, String.class);/' "$repo/src/main/java/com/example/api/client/SsrfCrossHunk.java"
+
+cat >"$repo/src/main/java/com/example/api/client/SsrfAlias.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.web.client.RestTemplate;
+
+final class SsrfAlias {
+    String fetch(HttpServletRequest request) {
+        String endpoint = request.getParameter("endpoint");
+        return new RestTemplate().getForObject(endpoint, String.class);
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/SsrfGuardAfter.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+import java.util.Set;
+import org.springframework.web.client.RestTemplate;
+
+final class SsrfGuardAfter {
+    private static final Set<String> ALLOWED_HOSTS = Set.of("api.internal.example");
+
+    String fetch(HttpServletRequest request) {
+        String target = request.getParameter("url");
+        String result = new RestTemplate().getForObject(target, String.class);
+        if (!ALLOWED_HOSTS.contains(java.net.URI.create(target).getHost())) {
+            throw new IllegalArgumentException("unsupported target");
+        }
+        return result;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/TokenBuilder.java" <<'EOF'
+package com.example.api.client;
+
+final class TokenBuilder {
+    String build(String bearerToken) {
+        return org.springframework.web.util.UriComponentsBuilder
+            .fromUriString("https://internal.example/download")
+            .queryParam("token", bearerToken)
+            .toUriString();
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/TokenBuilderSafe.java" <<'EOF'
+package com.example.api.client;
+
+final class TokenBuilderSafe {
+    String build(String resourceId) {
+        return org.springframework.web.util.UriComponentsBuilder
+            .fromUriString("https://internal.example/download")
+            .queryParam("id", resourceId)
+            .toUriString();
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/PathAliasPreflight.java" <<'EOF'
+package com.example.api.client;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+final class PathAliasPreflight {
+    String read(Path root, String userInput) throws Exception {
+        Path target = Path.of(root.toString(), userInput);
+        return Files.readString(target);
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/PathAliasSafe.java" <<'EOF'
+package com.example.api.client;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+final class PathAliasSafe {
+    String read(Path root, String resourceId) throws Exception {
+        Path target = Path.of(root.toString(), resourceId).normalize();
+        if (!target.startsWith(root.toAbsolutePath().normalize())) throw new IllegalArgumentException("path escapes root");
+        return Files.readString(target);
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/LongMethodDivide.java" <<'EOF'
 package com.example.api.client;
 
@@ -317,6 +453,51 @@ git -C "$repo" add src/main/java/com/example/api/client/LongDivide.java
 git -C "$repo" commit -qm long-divide-base
 sed -i '' 's/return 10 \/ divisor;/return 20 \/ divisor;/' "$repo/src/main/java/com/example/api/client/LongDivide.java"
 
+cat >"$repo/src/main/java/com/example/api/client/MultiDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class MultiDivide {
+    int divide(Integer a, Integer b) {
+        int first = 1;
+        return 10 / a;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/MultiDivide.java
+git -C "$repo" commit -qm multi-divide-base
+perl -0pi -e 's/int first = 1;/int first = a \/ b;/; s/return 10 \/ a;/return 20 \/ a;/' "$repo/src/main/java/com/example/api/client/MultiDivide.java"
+
+cat >"$repo/src/main/java/com/example/api/client/GuardedDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class GuardedDivide {
+    int divide(Integer a, Integer b) {
+        if (a != null) System.out.println(a);
+        if (b != 0) System.out.println(b);
+        return 10 / b;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/GuardedDivide.java
+git -C "$repo" commit -qm guarded-divide-base
+sed -i '' 's/return 10 \/ b;/return 20 \/ b;/' "$repo/src/main/java/com/example/api/client/GuardedDivide.java"
+
+cat >"$repo/src/main/java/com/example/api/client/ExpressionDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class ExpressionDivide {
+    int divide(Integer a, Integer b) {
+        consume(a / b);
+        return a;
+    }
+
+    private void consume(int value) {}
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/ExpressionDivide.java
+git -C "$repo" commit -qm expression-divide-base
+sed -i '' 's/consume(a \/ b);/consume(a \/ b + 1);/' "$repo/src/main/java/com/example/api/client/ExpressionDivide.java"
+
 cat >"$repo/src/main/java/com/example/api/client/Client.java" <<'EOF'
 package com.example.api.client;
 
@@ -354,6 +535,28 @@ grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/SsrfPreflight.java' "$capture" >/dev/null
 grep -F '服务端请求伪造' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/SsrfContext.java' "$capture" >/dev/null
+for ssrf_fixture in SsrfOnlySource SsrfAlias SsrfGuardAfter; do
+  grep -F "P1 src/main/java/com/example/api/client/${ssrf_fixture}.java" "$capture" >/dev/null || {
+    echo "missing SSRF preflight for ${ssrf_fixture}" >&2
+    cat "$capture" >&2
+    exit 1
+  }
+done
+grep -F 'P1 src/main/java/com/example/api/client/SsrfCrossHunk.java' "$capture" >/dev/null || {
+  echo 'missing cross-hunk SSRF preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'P1 src/main/java/com/example/api/client/TokenBuilder.java' "$capture" >/dev/null || {
+  echo 'missing token builder URL preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'P1 src/main/java/com/example/api/client/PathAliasPreflight.java' "$capture" >/dev/null || {
+  echo 'missing path API alias preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F 'P1 src/main/java/com/example/api/client/PathTraversalPreflight.java' "$capture" >/dev/null || {
   echo 'missing path traversal preflight' >&2
   cat "$capture" >&2
@@ -372,7 +575,9 @@ if grep -F 'P1 src/main/java/com/example/api/client/CommentOnly.java' "$capture"
   exit 1
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/SsrfSafe.java' "$capture" >/dev/null || \
-   grep -F 'P1 src/main/java/com/example/api/client/PathTraversalSafe.java' "$capture" >/dev/null; then
+   grep -F 'P1 src/main/java/com/example/api/client/PathTraversalSafe.java' "$capture" >/dev/null || \
+   grep -F 'P1 src/main/java/com/example/api/client/TokenBuilderSafe.java' "$capture" >/dev/null || \
+   grep -F 'P1 src/main/java/com/example/api/client/PathAliasSafe.java' "$capture" >/dev/null; then
   echo 'security preflight reported a guarded SSRF/path traversal negative fixture' >&2
   exit 1
 fi
@@ -432,6 +637,24 @@ for java_division_header in 'Integer 包装类型参与除法时未见非空保�
     exit 1
   fi
 done
+multi_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1 src/main/java/com/example/api/client/MultiDivide.java:' || true)"
+[[ "$multi_division_count" -ge 4 ]] || {
+  echo 'Java division preflight collapsed independent divisions in one hunk' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
+guarded_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1 src/main/java/com/example/api/client/GuardedDivide.java:' || true)"
+[[ "$guarded_division_count" -ge 2 ]] || {
+  echo 'Java division preflight treated unrelated logging comparisons as guards' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
+expression_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1 src/main/java/com/example/api/client/ExpressionDivide.java:' || true)"
+[[ "$expression_division_count" -ge 2 ]] || {
+  echo 'Java division preflight missed division inside a method call expression' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
 
 grep -Fx 'devstral-small-2-review-tuned' "$resolved_model_capture" >/dev/null
 [[ ! -e "$fixture_root/textconv.marker" ]] || {

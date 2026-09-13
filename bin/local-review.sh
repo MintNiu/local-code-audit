@@ -1464,10 +1464,10 @@ collect_security_preflight() {
   # names such as authToken/signature/credential without treating ordinary IDs
   # as secrets.
   awk '
-    function emit_ssrf() {
-      if (!ssrf_emitted) {
-        printf "P1 %s:%d - 不可信 URL 直接进入出站 HTTP 调用，存在服务端请求伪造（SSRF）风险。\n影响：攻击者可借助服务端访问内网服务、云 metadata 或任意外部地址，绕过客户端网络边界。\n修复建议：仅允许明确的 https scheme 和 host allowlist，在发起请求前解析并校验目标，拒绝内网和 metadata 地址。\n验证方式：使用外部地址、内网地址和云 metadata 地址测试，确认未允许的目标均在出站调用前被拒绝。\n\n", path, line_no
-        ssrf_emitted = 1
+    function emit_ssrf(at_line) {
+      if (!(at_line in ssrf_emitted_lines)) {
+        printf "P1 %s:%d - 不可信 URL 直接进入出站 HTTP 调用，存在服务端请求伪造（SSRF）风险。\n影响：攻击者可借助服务端访问内网服务、云 metadata 或任意外部地址，绕过客户端网络边界。\n修复建议：仅允许明确的 https scheme 和 host allowlist，在发起请求前解析并校验目标，拒绝内网和 metadata 地址。\n验证方式：使用外部地址、内网地址和云 metadata 地址测试，确认未允许的目标均在出站调用前被拒绝。\n\n", path, at_line
+        ssrf_emitted_lines[at_line] = 1
       }
     }
     function emit_path_traversal() {
@@ -1478,14 +1478,60 @@ collect_security_preflight() {
     }
     function reset_hunk(    name) {
       for (name in url_input_vars) delete url_input_vars[name]
-      url_guard = 0
-      ssrf_emitted = 0
+      url_guard_line = 0
+      url_changed = 0
+      for (name in ssrf_emitted_lines) delete ssrf_emitted_lines[name]
       path_candidate = 0
       path_line = 0
       path_changed = 0
       path_access = 0
       path_guard = 0
       path_emitted = 0
+      for (name in path_candidate_vars) delete path_candidate_vars[name]
+    }
+    function reset_file(    name) {
+      for (name in file_url_input_vars) delete file_url_input_vars[name]
+      file_url_changed = 0
+    }
+    function record_url_guard(text, at_line, name) {
+      if (text !~ /(ALLOWED_HOST|allowlist|allowedHosts|allowedHost)[^;]*(getHost|uri|target|endpoint)|isAllowedHost[[:space:]]*\(/) return
+      for (name in url_input_vars) {
+        if (text ~ ("(^|[^[:alnum:]_])" name "([^[:alnum:]_]|$)")) {
+          if (url_guard_line == 0) url_guard_line = at_line
+          return
+        }
+      }
+      for (name in file_url_input_vars) {
+        if (text ~ ("(^|[^[:alnum:]_])" name "([^[:alnum:]_]|$)")) {
+          if (url_guard_line == 0) url_guard_line = at_line
+          return
+        }
+      }
+    }
+    function record_path_candidate(text, is_added, at_line, assignment, fields, count, name) {
+      if (text !~ /\.resolve[[:space:]]*\([[:space:]]*(filename|fileName|path|objectKey|relativePath|name|userInput|input|key|resourceId|objectName)[[:space:]]*\)/ &&
+          text !~ /new[[:space:]]+File[[:space:]]*\([^,]+,[[:space:]]*(filename|fileName|path|objectKey|relativePath|name|userInput|input|key|resourceId|objectName)[[:space:]]*\)/ &&
+          text !~ /(Paths|Path)[[:space:]]*\.[[:space:]]*(get|of)[[:space:]]*\([^,]+,[[:space:]]*(userInput|input|key|resourceId|objectName|filename|fileName|path)[[:space:]]*\)/) return
+      path_candidate = 1
+      if (path_line == 0) path_line = at_line
+      assignment = text
+      sub(/[[:space:]]*=.*/, "", assignment)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", assignment)
+      count = split(assignment, fields, /[[:space:]]+/)
+      name = fields[count]
+      if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) path_candidate_vars[name] = 1
+      if (is_added) path_changed = 1
+    }
+    function record_path_access(text, is_added, name) {
+      if (text !~ /Files[[:space:]]*\.|FileInputStream|FileOutputStream|FileSystemResource|Resource[[:space:]]*\(/) return
+      path_access = 1
+      if (!is_added) return
+      for (name in path_candidate_vars) {
+        if (text ~ ("(^|[^[:alnum:]_])" name "([^[:alnum:]_]|$)")) {
+          path_changed = 1
+          return
+        }
+      }
     }
     function flush_hunk() {
       if (hunk_start == "") return
@@ -1496,6 +1542,7 @@ collect_security_preflight() {
     }
     /^diff --git / {
       flush_hunk()
+      reset_file()
       path = $4
       sub(/^b\//, "", path)
       next
@@ -1522,25 +1569,42 @@ collect_security_preflight() {
       trimmed_code = code
       sub(/^[[:space:]]+/, "", trimmed_code)
       if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/) {
-        if (code ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect)[^)]*\)/) {
+        if (code ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/) {
           input_assignment = code
           sub(/[[:space:]]*=.*/, "", input_assignment)
           gsub(/^[[:space:]]+|[[:space:]]+$/, "", input_assignment)
           split(input_assignment, assignment_fields, /[[:space:]]+/)
           input_name = assignment_fields[length(assignment_fields)]
-          if (input_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) url_input_vars[input_name] = 1
+          if (input_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            url_input_vars[input_name] = 1
+            file_url_input_vars[input_name] = 1
+            if (prefix == "+") url_changed = 1
+            if (prefix == "+") file_url_changed = 1
+          }
         }
-        if (code ~ /ALLOWED_HOST|allowlist|allowedHosts|getHost[[:space:]]*\(|getScheme[[:space:]]*\(|startsWith[[:space:]]*\([[:space:]]*https/) url_guard = 1
-        if (code ~ /\.resolve[[:space:]]*\([[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/ ||
-            code ~ /new[[:space:]]+File[[:space:]]*\([^,]+,[[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/) {
-          path_candidate = 1
-          if (path_line == 0) path_line = line_no
-          if (prefix == "+") path_changed = 1
+        record_url_guard(code, line_no)
+        outbound = code ~ /getForObject|getForEntity|getForStream|\.exchange[[:space:]]*\(|\.execute[[:space:]]*\(|\.sendAsync?[[:space:]]*\(|\.newCall[[:space:]]*\(|\.retrieve[[:space:]]*\(/ || (code ~ /HttpClient/ && code ~ /\.send[[:space:]]*\(/)
+        if (outbound) {
+          if (prefix == "+") {
+            url_changed = 1
+            file_url_changed = 1
+          }
+          if ((url_changed || file_url_changed) && code ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/ && (!url_guard_line || url_guard_line > line_no)) emit_ssrf(line_no)
+          for (input_name in url_input_vars) {
+            if (code ~ ("(^|[^[:alnum:]_])" input_name "([^[:alnum:]_]|$)")) {
+              if ((url_changed || file_url_changed) && (!url_guard_line || url_guard_line > line_no)) emit_ssrf(line_no)
+              break
+            }
+          }
+          for (input_name in file_url_input_vars) {
+            if (code ~ ("(^|[^[:alnum:]_])" input_name "([^[:alnum:]_]|$)")) {
+              if ((url_changed || file_url_changed) && (!url_guard_line || url_guard_line > line_no)) emit_ssrf(line_no)
+              break
+            }
+          }
         }
-        if (code ~ /Files[[:space:]]*\.|FileInputStream|FileOutputStream|FileSystemResource|Resource[[:space:]]*\(/) {
-          path_access = 1
-          if (prefix == "+") path_changed = 1
-        }
+        record_path_candidate(code, prefix == "+", line_no)
+        record_path_access(code, prefix == "+")
         if (code ~ /\.normalize[[:space:]]*\(|\.toRealPath[[:space:]]*\(|\.getCanonicalPath[[:space:]]*\(|\.startsWith[[:space:]]*\(/) path_guard = 1
       }
       if (prefix == "+") {
@@ -1551,51 +1615,51 @@ collect_security_preflight() {
           line_no++
           next
         }
-        if (added ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect)[^)]*\)/) {
+        if (added ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/) {
           input_assignment = added
           sub(/[[:space:]]*=.*/, "", input_assignment)
           gsub(/^[[:space:]]+|[[:space:]]+$/, "", input_assignment)
           split(input_assignment, assignment_fields, /[[:space:]]+/)
           input_name = assignment_fields[length(assignment_fields)]
-          if (input_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) url_input_vars[input_name] = 1
-        }
-        if (added ~ /ALLOWED_HOST|allowlist|allowedHosts|getHost[[:space:]]*\(|getScheme[[:space:]]*\(|startsWith[[:space:]]*\([[:space:]]*https/) url_guard = 1
-        outbound = added ~ /getForObject|getForEntity|getForStream|\.exchange[[:space:]]*\(|\.execute[[:space:]]*\(|\.sendAsync?[[:space:]]*\(|\.newCall[[:space:]]*\(|\.retrieve[[:space:]]*\(/ || added ~ /HttpClient/ && added ~ /\.send[[:space:]]*\(/
-        if (outbound) {
-          for (input_name in url_input_vars) {
-            if (added ~ ("(^|[^[:alnum:]_])" input_name "([^[:alnum:]_]|$)")) {
-              if (!url_guard) emit_ssrf()
-              break
-            }
+          if (input_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            url_input_vars[input_name] = 1
+            file_url_input_vars[input_name] = 1
+            url_changed = 1
+            file_url_changed = 1
           }
         }
-        if (added ~ /\.resolve[[:space:]]*\([[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/ ||
-            added ~ /new[[:space:]]+File[[:space:]]*\([^,]+,[[:space:]]*(filename|fileName|path|objectKey|relativePath|name)[[:space:]]*\)/) {
-          path_candidate = 1
-          path_changed = 1
-          if (path_line == 0) path_line = line_no
-        }
-        if (added ~ /Files[[:space:]]*\.|FileInputStream|FileOutputStream|FileSystemResource|Resource[[:space:]]*\(/) {
-          path_access = 1
-          path_changed = 1
-        }
+        record_url_guard(added, line_no)
+        record_path_candidate(added, 1, line_no)
+        record_path_access(added, 1)
         if (added ~ /\.normalize[[:space:]]*\(|\.toRealPath[[:space:]]*\(|\.getCanonicalPath[[:space:]]*\(|\.startsWith[[:space:]]*\(/) path_guard = 1
         url_risk = 0
         if (added ~ /(^|[?&]|\/)([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key|auth|sig|signature|credential|session[_-]?key)[A-Za-z0-9_.-]*)[=\/]/ &&
-            added ~ /\+[[:space:]]*(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential)([^[:alnum:]_]|$)/) {
+            added ~ /\+[[:space:]]*(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)([^[:alnum:]_]|$)/) {
           url_risk = 1
         }
         # Some APIs use generic query names such as `code` or `auth`, and
         # some put the credential directly in a path segment. Require both a
         # visible URL literal and a high-confidence credential variable so
         # ordinary URL/ID concatenation remains out of scope.
-        if (added ~ /https?:\/\// && added ~ /\+[[:space:]]*(authToken|accessToken|refreshToken|sessionKey|signature|credential)([^[:alnum:]_]|$)/ && added ~ /[?&\/]/) {
+        if (added ~ /https?:\/\// && added ~ /\+[[:space:]]*(authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)([^[:alnum:]_]|$)/ && added ~ /[?&\/]/) {
+          url_risk = 1
+        }
+        # Cover common URL-builder and formatting APIs that do not use a
+        # literal `+ token` expression. Keep the rule narrow: a visible URL or
+        # query-key must appear on the changed line together with a
+        # high-confidence secret-like variable.
+        builder_query = (added ~ /queryParam[[:space:]]*\([^,]*(token|secret|password|api[_-]?key|auth|sig|credential)[^,]*,[^)]*/) ||
+          (added ~ /query[[:space:]]*\([^,]*(token|secret|password|api[_-]?key|auth|sig|credential)[^,]*/)
+        builder_secret = added ~ /(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)/
+        format_risk = (added ~ /String[[:space:]]*\.[[:space:]]*format[[:space:]]*\(/ && added ~ /https?:\/\/|[?&](token|secret|password|api[_-]?key|auth|sig|credential)/ && builder_secret)
+        append_risk = added ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\+=[^;]*(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)/
+        if ((builder_query && builder_secret) || format_risk || append_risk) {
           url_risk = 1
         }
         if (url_risk) {
           printf "P1 %s:%d - 凭据值被拼接到 URL 查询参数或路径中，可能通过请求目标泄漏。\n影响：token/secret 等敏感值会进入 URL，可能被代理、网关或访问日志持久化。\n修复建议：改用受保护的请求头或安全的内部认证通道，避免把秘密放入 URL。\n验证方式：检查最终请求 URI 和网关/代理日志，确认 URL 不再包含敏感值。\n\n", path, line_no
         }
-        if (added ~ /getParameter[[:space:]]*\([^[:alnum:]_]*(x-token|token|authorization|TOKEN_HEADER)/) {
+        if (added ~ /getParameter[[:space:]]*\([^[:alnum:]_]*(x[-_]?token|token|authorization|access[-_]?token|refresh[-_]?token|session[-_]?key|jwt|api[-_]?key|TOKEN_HEADER)/) {
           printf "P1 %s:%d - 认证令牌从 URL 查询参数读取，可能进入访问日志、代理历史或 Referer。\n影响：请求参数中的 token 可能在到达下游前被日志或外部引用链持久化，造成会话凭据泄漏。\n修复建议：仅接受受保护的请求头或明确的安全认证通道，不要从 URL 查询参数读取认证令牌。\n验证方式：用带有 x-token 查询参数的请求检查访问日志、代理记录和下游请求，确认令牌不会进入 URL 相关记录。\n\n", path, line_no
         }
         line_no++
@@ -1647,24 +1711,30 @@ collect_java_division_preflight() {
         if (signature !~ /\)/) continue
         record_integer_parameters(signature)
         if (has_integer_parameter) {
+          if (integer_line == 0) integer_line = i
           for (k = i; k <= division_line && k <= source_count[path]; k++) record_guards(source_lines[path, k], k)
           return
         }
       }
     }
-    function unguarded(name, guards) {
-      return !(name in guards) || guards[name] > division_line
+    function unguarded(name, guards, at_line) {
+      return !(name in guards) || guards[name] > at_line
     }
-    function emit_hunk(    null_risk, zero_risk) {
+    function emit_hunk(    i, null_risk, zero_risk, at_line, left, right) {
       if (path == "" || hunk_start == "") return
       if (has_division && !has_integer_parameter) source_method_parameters()
-      null_risk = has_division && ((division_left in integer_names && unguarded(division_left, null_guards)) || (division_right in integer_names && unguarded(division_right, null_guards)))
-      zero_risk = has_division && (division_right in integer_names) && unguarded(division_right, zero_guards)
-      if (null_risk) {
-        printf "P1 %s:%d - Integer 包装类型参与除法时未见非空保护，自动拆箱可能抛出 NullPointerException。\n影响：调用方传入 null 时方法会在进入业务处理前失败，导致请求或任务异常。\n修复建议：在除法前显式拒绝 null，或改用基本类型并由边界层完成输入校验。\n验证方式：分别以 null 参数调用方法，确认返回受控错误而不是 NullPointerException。\n\n", path, integer_line
-      }
-      if (zero_risk) {
-        printf "P1 %s:%d - 除法分母未见非零保护，运行时可能抛出 ArithmeticException。\n影响：分母为 0 时请求或任务会异常终止，可能造成接口失败或批处理任务中断。\n修复建议：在执行除法前拒绝 0，或定义并验证分母为 0 时的业务结果。\n验证方式：分别以分母为 0 和非 0 的输入执行单元测试，确认错误路径和正常路径均符合契约。\n\n", path, division_line
+      for (i = 1; i <= division_count; i++) {
+        at_line = division_lines[i]
+        left = division_lefts[i]
+        right = division_rights[i]
+        null_risk = has_division && ((left in integer_names && unguarded(left, null_guards, at_line)) || (right in integer_names && unguarded(right, null_guards, at_line)))
+        zero_risk = has_division && (right in integer_names) && unguarded(right, zero_guards, at_line)
+        if (null_risk) {
+          printf "P1 %s:%d - Integer 包装类型参与除法时未见非空保护，自动拆箱可能抛出 NullPointerException。\n影响：调用方传入 null 时方法会在进入业务处理前失败，导致请求或任务异常。\n修复建议：在除法前显式拒绝 null，或改用基本类型并由边界层完成输入校验。\n验证方式：分别以 null 参数调用方法，确认返回受控错误而不是 NullPointerException。\n\n", path, at_line
+        }
+        if (zero_risk) {
+          printf "P1 %s:%d - 除法分母未见非零保护，运行时可能抛出 ArithmeticException。\n影响：分母为 0 时请求或任务会异常终止，可能造成接口失败或批处理任务中断。\n修复建议：在执行除法前拒绝 0，或定义并验证分母为 0 时的业务结果。\n验证方式：分别以分母为 0 和非 0 的输入执行单元测试，确认错误路径和正常路径均符合契约。\n\n", path, at_line
+        }
       }
     }
     function reset_hunk() {
@@ -1672,8 +1742,10 @@ collect_java_division_preflight() {
       has_integer_parameter = 0
       integer_line = 0
       division_line = 0
-      division_left = ""
-      division_right = ""
+      division_count = 0
+      for (name in division_lefts) delete division_lefts[name]
+      for (name in division_rights) delete division_rights[name]
+      for (name in division_lines) delete division_lines[name]
       for (name in integer_names) delete integer_names[name]
       for (name in null_guards) delete null_guards[name]
       for (name in zero_guards) delete zero_guards[name]
@@ -1699,6 +1771,12 @@ collect_java_division_preflight() {
       }
     }
     function record_guards(text, line,    name, pattern) {
+      # A comparison in a log statement or an unrelated branch is not proof
+      # that the value is safe at the division.  Only accept compact guards
+      # whose same line exits/throws/asserts; multi-line control-flow guards
+      # remain model-reviewed instead of suppressing a deterministic finding.
+      if (text !~ /(^|[^[:alnum:]_])(if|assert)[[:space:]]*\(/ ||
+          text !~ /(throw|return|continue|break|assert|requireNonNull)/) return
       for (name in integer_names) {
         pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*(==|!=)[[:space:]]*null([^[:alnum:]_]|$)"
         if (text ~ pattern && (!(name in null_guards) || line < null_guards[name])) null_guards[name] = line
@@ -1706,23 +1784,28 @@ collect_java_division_preflight() {
         if (text ~ pattern && (!(name in zero_guards) || line < zero_guards[name])) zero_guards[name] = line
       }
     }
-    function record_division(text,    expression, parts, count, left, right) {
-      if (text !~ /return[[:space:]]+[^;]*\/[^;]+;/ && text !~ /=[[:space:]]*[^;]*\/[^;]+;/) return
-      expression = text
-      if (expression ~ /return[[:space:]]+/) sub(/^.*return[[:space:]]+/, "", expression)
-      else sub(/^.*=[[:space:]]*/, "", expression)
-      sub(/;.*/, "", expression)
-      count = split(expression, parts, "/")
-      if (count < 2) return
-      left = parts[1]
-      right = parts[2]
-      gsub(/^[^A-Za-z0-9_]*/, "", left)
-      gsub(/[^A-Za-z0-9_]*$/, "", left)
-      gsub(/^[^A-Za-z0-9_]*/, "", right)
-      gsub(/[^A-Za-z0-9_]*$/, "", right)
+    function record_division(text,    expression, slash, left_text, right_text, left, right, trimmed) {
+      trimmed = text
+      sub(/^[[:space:]]+/, "", trimmed)
+      if (trimmed ~ /^\/\// || trimmed ~ /^\/\*|^\*/) return
+      if (text !~ /\/[[:space:]]*[A-Za-z0-9_()+-]/) return
+      slash = index(text, "/")
+      if (slash == 0) return
+      left_text = substr(text, 1, slash - 1)
+      right_text = substr(text, slash + 1)
+      gsub(/[^A-Za-z0-9_]+$/, "", left_text)
+      gsub(/^[^A-Za-z0-9_]+/, "", right_text)
+      sub(/[^A-Za-z0-9_].*$/, "", right_text)
+      left = left_text
+      sub(/^.*[^A-Za-z0-9_]/, "", left)
+      right = right_text
+      if (left == "" || right == "") return
       has_division = 1
-      division_left = left
-      division_right = right
+      division_count++
+      division_lefts[division_count] = left
+      division_rights[division_count] = right
+      division_lines[division_count] = line_no
+      if (division_line == 0) division_line = line_no
     }
     /^diff --git / {
       emit_hunk()
