@@ -107,7 +107,7 @@ Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during com
 
 The default temperature is `0` for repeatable local audits. This is a stability setting, not a substitute for human verification.
 
-The default `keep_alive=0` unloads the model after each review. Set `OLLAMA_REVIEW_KEEP_ALIVE=5m` when running several reviews consecutively.
+The conservative `local-review` command defaults to `keep_alive=0` and unloads the model after each review. The personal `local-review-local` wrapper defaults to `5m`; set `OLLAMA_REVIEW_KEEP_ALIVE=0` when battery conservation matters more.
 
 ## Evaluation
 
