@@ -927,7 +927,7 @@ literal_token_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-smal
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - 凭据泄漏：真实凭据仍存在（<REDACTED>和FY84ZhmB4nGmmUeBKpgJYAXUE87lI9）\\n影响：凭据泄露。\\n修复建议：轮换。\\n验证方式：检查配置。","done":true,"done_reason":"stop"}\n'
+printf '{"response":"P1 src/main/java/com/example/api/client/UnguardedDTO.java:5 - 凭据泄漏：真实凭据仍存在（<REDACTED>和FY84ZhmB4nGmmUeBKpgJYAXUE87lI9）\\n影响：凭据泄露。\\n修复建议：轮换。\\n验证方式：检查配置。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
 natural_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
