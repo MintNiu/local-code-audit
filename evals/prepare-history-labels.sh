@@ -98,6 +98,8 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf '# 先阅读 source_result，再逐条记录模型发现和人工真值。\n'
     printf '# status 只能是 confirmed、false-positive 或 uncertain。\n'
     printf '# confirmed 表示代码/契约支持；false-positive 表示人工确认不成立；uncertain 不计入指标。\n'
+    printf '# verdict	人工填写 clean 或 findings，分别表示整次结果无问题或包含已确认问题。\n'
+    printf '# review_status	人工填写 pending 或 complete；只有 complete 才能进入汇总。\n'
     printf '# finding_id\tseverity\tpath\tline\tstatus\tnotes\n'
   } >"$label_file"
   printf '已创建标签模板: %s\n' "$label_file"
