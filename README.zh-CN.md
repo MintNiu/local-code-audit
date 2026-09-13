@@ -20,6 +20,7 @@
 ## 安装或更新全局命令
 
 ```bash
+./scripts/sync-modelfile.sh
 ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 ./scripts/install-global.sh
 ```
@@ -27,7 +28,7 @@ ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 安装脚本只安装本地命令，不会自动下载模型。
 如果安装后终端提示找不到命令，请将 `export PATH="$HOME/.local/bin:$PATH"` 写入
 `~/.zprofile`（或当前 shell 的启动文件），然后重新打开终端。
-`config/Modelfile` 为直接使用 Ollama 保留核心审计边界；`local-review` 是权威审查链路，会显式发送当前规则并执行确定性的输出门禁。修改希望同步到直接 Ollama 使用的规则后，请重新创建 tuned 模型。
+审计边界以 `bin/local-review.sh` 为来源；`scripts/sync-modelfile.sh` 会把它同步到 `config/Modelfile`，供直接 Ollama 使用。`local-review` 链路还会额外执行确定性的输出门禁。修改规则后，请先同步并重新创建 tuned 模型。
 
 前置条件是 Ollama 服务正在运行、本地已有选定模型、Git、`jq`、`rg`（ripgrep）和 Perl。macOS 通常自带 `curl`、`awk`、`tr`、`sort` 和 `/usr/bin/perl`；可以用 `command -v ollama jq git curl awk tr sort rg perl` 检查。使用 Homebrew 时，缺少工具可执行 `brew install jq ripgrep`。
 
@@ -82,7 +83,7 @@ local-review --repo /path/to/repo
 
 字节预算只约束收集到的 Git diff；项目规则、显式上下文文件、README 和系统提示词还会额外占用上下文。它们较大时，应提高 `OLLAMA_REVIEW_NUM_CTX` 或进一步拆分审查。
 
-输出门禁会拒绝泛化总结：每个问题段都必须包含严重级别，以及能匹配变更文件或显式上下文文件的文件/行号；只有在当前审查集合中唯一时才接受单独的文件名。
+输出门禁会拒绝泛化或不完整总结：每个问题段都必须包含严重级别、能匹配变更文件或显式上下文文件的文件/行号，以及明确的“影响：”“修复建议：”“验证方式：”字段；只有在当前审查集合中唯一时才接受单独的文件名。
 
 默认采样参数为 `top_k=40`、`top_p=0.9`；除非在评测记录中明确记录覆盖值，否则不要随意修改。
 

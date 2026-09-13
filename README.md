@@ -20,6 +20,7 @@ The default model is `devstral-small-2-review-tuned`. It is an Ollama-derived co
 ## Install or update the global command
 
 ```bash
+./scripts/sync-modelfile.sh
 ollama create devstral-small-2-review-tuned:latest -f config/Modelfile
 ./scripts/install-global.sh
 ```
@@ -28,7 +29,7 @@ The installer only installs the local command. It never downloads a model automa
 If your shell cannot find the command after installation, add
 `export PATH="$HOME/.local/bin:$PATH"` to `~/.zprofile` (or your shell's startup
 file) and open a new terminal.
-The audit boundary is kept in `config/Modelfile` for direct Ollama use, while `local-review` is the authoritative path: it sends the current boundary explicitly and applies deterministic output gates. Rebuild the tuned model after changing rules that should also affect direct Ollama use.
+The audit boundary is authored in `bin/local-review.sh`; `scripts/sync-modelfile.sh` copies it into `config/Modelfile` for direct Ollama use. The `local-review` path additionally applies deterministic output gates. Re-run the sync script and rebuild the tuned model after changing rules that should also affect direct Ollama use.
 
 Prerequisites are a running Ollama service, the selected local model, Git, `jq`, `rg` (ripgrep), and Perl for output redaction. macOS already provides `curl`, `awk`, `tr`, `sort`, and `/usr/bin/perl`; check the required tools with `command -v ollama jq git curl awk tr sort rg perl`. On a Homebrew setup, install the missing utilities with `brew install jq ripgrep`.
 
@@ -101,7 +102,7 @@ An individual hunk that still exceeds the byte budget, or a Git combined diff (`
 
 The byte budget applies to collected Git diff material only. Project rules, explicit context files, README content, and the system prompt are additional context; raise `OLLAMA_REVIEW_NUM_CTX` or split the review further when those inputs are large.
 
-The output gate rejects generic summaries: every finding paragraph must include a severity and a file/line location that matches a changed file or an explicitly supplied context file. A basename is accepted only when it is unambiguous in the review set.
+The output gate rejects generic or incomplete summaries: every finding paragraph must include a severity, a file/line location that matches a changed file or an explicitly supplied context file, and explicit `影响：`, `修复建议：`, and `验证方式：` fields. A basename is accepted only when it is unambiguous in the review set.
 
 Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during comparisons unless the evaluation record includes the override.
 

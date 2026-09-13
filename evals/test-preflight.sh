@@ -234,15 +234,20 @@ if ! shard_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2
   echo 'unsupported shard-boundary finding caused review failure' >&2
   exit 1
 fi
-if ! printf '%s\n' "$shard_output" | grep -Fx '未发现阻塞问题' >/dev/null; then
+if printf '%s\n' "$shard_output" | grep -F '文件内容不完整' >/dev/null; then
   echo 'unsupported shard-boundary finding was not filtered' >&2
+  printf '%s\n' "$shard_output" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$shard_output" | grep -F '当前提交快照缺少仓库内类型' >/dev/null; then
+  echo 'deterministic build preflight finding was dropped' >&2
   printf '%s\n' "$shard_output" >&2
   exit 1
 fi
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '{"response":"P1 module-b/src/main/java/com/example/api/dto/ModuleDeletedDTO.java:1 - 文件内容不完整，但当前代码明确把未校验的 tenantId 传入跨租户查询。\\n行号：1\\n影响：可能读取其他租户数据。\\n修复建议：增加 tenantId 约束。","done":true,"done_reason":"stop"}\n'
+printf '{"response":"P1 module-b/src/main/java/com/example/api/dto/ModuleDeletedDTO.java:1 - 文件内容不完整，但当前代码明确把未校验的 tenantId 传入跨租户查询。\\n行号：1\\n影响：可能读取其他租户数据。\\n修复建议：增加 tenantId 约束。\\n验证方式：用两个租户数据执行查询并断言不可越权。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
 mixed_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
@@ -281,7 +286,7 @@ redacted_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-r
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - \\u001b[31mANSI marker\\u001b[0m remains visible","done":true,"done_reason":"stop"}\n'
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - \\u001b[31mANSI marker\\u001b[0m remains visible\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
 safe_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
@@ -297,7 +302,7 @@ fi
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - https://oss.example.test/upload?X-Amz-Credential=AKID_EXAMPLE&X-Amz-Signature=signature-secret-value&X-Amz-Security-Token=session-secret-value","done":true,"done_reason":"stop"}\n'
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - https://oss.example.test/upload?X-Amz-Credential=AKID_EXAMPLE&X-Amz-Signature=signature-secret-value&X-Amz-Security-Token=session-secret-value\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
 url_safe_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
@@ -326,15 +331,20 @@ EOF
 chmod +x "$fake_bin/curl"
 marker_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo" 2>/dev/null)"
-if ! printf '%s\n' "$marker_output" | grep -Fx '未发现阻塞问题' >/dev/null; then
-  echo 'clean marker with punctuation was not normalized' >&2
+if printf '%s\n' "$marker_output" | grep -F '未发现阻塞问题。' >/dev/null; then
+  echo 'clean marker with punctuation was not removed when preflight findings existed' >&2
+  printf '%s\n' "$marker_output" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$marker_output" | grep -F '当前提交快照缺少仓库内类型' >/dev/null; then
+  echo 'preflight finding disappeared when model returned a punctuated clean marker' >&2
   printf '%s\n' "$marker_output" >&2
   exit 1
 fi
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '{"response":"P2 src/main/java/com/example/api/client/Consumer.java:5 - 低严重度示例问题。\\n\\nP0 src/main/java/com/example/api/client/Consumer.java:6 - 高严重度示例问题。","done":true,"done_reason":"stop"}\n'
+printf '{"response":"P2 src/main/java/com/example/api/client/Consumer.java:5 - 低严重度示例问题。\\n影响：低严重度影响。\\n修复建议：低严重度修复。\\n验证方式：低严重度验证。\\nP0 src/main/java/com/example/api/client/Consumer.java:6 - 高严重度示例问题。\\n影响：高严重度影响。\\n修复建议：高严重度修复。\\n验证方式：高严重度验证。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
 single_sorted_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
@@ -379,9 +389,9 @@ for argument in "$@"; do
 done
 prompt="$(jq -r '.prompt' "$request_file")"
 if printf '%s\n' "$prompt" | grep -q '^diff --git a/src/A.java'; then
-  printf '{"response":"P2 src/A.java:1 - 低严重度示例问题。","done":true,"done_reason":"stop"}\n'
+  printf '{"response":"P2 src/A.java:1 - 低严重度示例问题。\\n影响：低严重度影响。\\n修复建议：低严重度修复。\\n验证方式：低严重度验证。","done":true,"done_reason":"stop"}\n'
 else
-  printf '{"response":"P0 src/B.java:1 - 高严重度示例问题。","done":true,"done_reason":"stop"}\n'
+  printf '{"response":"P0 src/B.java:1 - 高严重度示例问题。\\n影响：高严重度影响。\\n修复建议：高严重度修复。\\n验证方式：高严重度验证。","done":true,"done_reason":"stop"}\n'
 fi
 EOF
 chmod +x "$fake_bin/curl"
@@ -394,6 +404,17 @@ p2_line="$(printf '%s\n' "$sorted_output" | grep -n '^P2 ' | head -n1 | cut -d: 
 if [[ -z "$p0_line" || -z "$p2_line" || "$p0_line" -ge "$p2_line" ]]; then
   echo 'aggregated findings were not globally sorted by severity' >&2
   printf '%s\n' "$sorted_output" >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Client.java:5 - 缺少完整审计字段。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'finding without impact/fix/verification fields was incorrectly accepted' >&2
   exit 1
 fi
 
