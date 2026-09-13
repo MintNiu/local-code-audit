@@ -150,6 +150,12 @@ EOF
 cat >"$repo/application-credential-inline.json" <<'EOF'
 {"endpoint":"https://oss.example.invalid","api-key":"INLINE_ApiKey_9f8e7d6c5b4a3210","name":"ordinary-value"}
 EOF
+cat >"$repo/application-credential-weak-default.yml" <<'EOF'
+nacos:
+  server-addr: 192.168.30.241:8848
+  password: ${NACOS_PASSWORD:nacos}
+  safe-password: ${NACOS_SAFE_PASSWORD:}
+EOF
 
 cat >"$repo/src/main/java/com/example/api/client/TokenProxy.java" <<'EOF'
 package com.example.api.client;
@@ -605,6 +611,11 @@ grep -F 'P1 application-credential.json' "$capture" >/dev/null || {
 }
 grep -F 'P1 application-credential-inline.json' "$capture" >/dev/null || {
   echo 'missing inline JSON hardcoded credential preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'P1 application-credential-weak-default.yml' "$capture" >/dev/null || {
+  echo 'missing weak default credential preflight' >&2
   cat "$capture" >&2
   exit 1
 }
