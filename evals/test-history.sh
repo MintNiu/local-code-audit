@@ -7,6 +7,7 @@ fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
 manifest="$fixture_root/manifest.tsv"
 out_dir="$fixture_root/results"
+repeat_out="$fixture_root/repeated-results"
 trap 'rm -rf "$fixture_root"' EXIT
 
 mkdir -p "$fake_bin" "$repo/src"
@@ -49,4 +50,14 @@ PATH="$fake_bin:$PATH" \
 grep -F "跳过重复提交清单行：$commit" "$stderr_file" >/dev/null
 grep -F $'status\tcompleted' "$out_dir/$commit.meta.tsv" >/dev/null
 [[ -s "$out_dir/$commit.txt" ]]
+
+PATH="$fake_bin:$PATH" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  "$repo_root/evals/run-history-repeat.sh" \
+    --runs 2 --repo "$repo" --manifest "$manifest" --out-dir "$repeat_out" \
+    >"$fixture_root/repeat-stdout"
+grep -F 'history repeat stability passed: runs=2, commits=1' "$fixture_root/repeat-stdout" >/dev/null
+cmp -s "$repeat_out/run-1/$commit.txt" "$repeat_out/run-2/$commit.txt"
 printf 'history duplicate regression passed\n'
