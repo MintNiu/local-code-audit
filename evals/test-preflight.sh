@@ -1001,6 +1001,23 @@ natural_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/UnguardedDTO.java:5 - 凭据泄漏：两个值（<REDACTED>和Qz9alpha0123456789BetaGamma）\\n影响：凭据泄露。\\n修复建议：轮换。\\n验证方式：检查配置。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+generic_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+[[ "$generic_credential_output" == *'凭据泄漏：两个值（<REDACTED>和<REDACTED>）'* ]] || {
+  echo 'generic long credential fallback was not redacted' >&2
+  printf '%s\n' "$generic_credential_output" >&2
+  exit 1
+}
+[[ "$generic_credential_output" != *'Qz9alpha0123456789BetaGamma'* ]] || {
+  echo 'generic long credential leaked into output' >&2
+  exit 1
+}
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - \\u001b[31mANSI marker\\u001b[0m remains visible\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"

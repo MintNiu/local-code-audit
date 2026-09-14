@@ -305,6 +305,14 @@ redact_sensitive_text() {
     s~((?:字面量|硬编码|literal|hard[-_ ]coded)[[:space:]]*(?:凭据|令牌|token|secret|password)[[:space:]]+)[A-Za-z0-9][A-Za-z0-9._-]{7,}~$1<REDACTED>~ig;
     s~((?:AccessKey|Secret|凭据|密钥)[^。\n]{0,120}?)([A-Za-z0-9][A-Za-z0-9._+/=-]{15,})~$1<REDACTED>~ig;
     s~\b(?:AKIA|ASIA|LTAI)[A-Za-z0-9_-]{8,}\b~<REDACTED>~g;
+    if (/(?:AccessKey|Secret|credential|password|passwd|token|令牌|凭据|密钥)/i) {
+      # Keep slash-containing repository paths visible; targeted URL/query
+      # rules above already redact credentials in URI values.
+      # Require a digit and exclude dots so repository paths, class names,
+      # URL hosts, and parameter names remain readable. Structured URL values
+      # are already handled by the targeted rules above.
+      s~(?<![A-Za-z0-9])(?=[A-Za-z0-9_+=-]{0,80}[0-9])[A-Za-z0-9][A-Za-z0-9_+=-]{15,}(?![A-Za-z0-9])~<REDACTED>~g;
+    }
   '
 }
 
