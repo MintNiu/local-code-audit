@@ -102,6 +102,20 @@ for ((run = 2; run <= runs; run++)); do
       diff -u "$baseline_file" "$current_file" >&2 || true
       exit 1
     fi
+
+    baseline_meta="${baseline_file%.txt}.meta.tsv"
+    current_meta="${current_file%.txt}.meta.tsv"
+    [[ -f "$baseline_meta" && -f "$current_meta" ]] || {
+      echo "历史评测 metadata 缺失: $relative_file（run-1 vs run-$run）" >&2
+      exit 1
+    }
+    baseline_signature="$(awk -F '\t' '$1 != "elapsed_seconds" && $1 != "result_file" { print }' "$baseline_meta")"
+    current_signature="$(awk -F '\t' '$1 != "elapsed_seconds" && $1 != "result_file" { print }' "$current_meta")"
+    if [[ "$baseline_signature" != "$current_signature" ]]; then
+      echo "历史评测运行配置漂移: ${relative_file%.txt}（run-1 vs run-$run）" >&2
+      diff -u <(printf '%s\n' "$baseline_signature") <(printf '%s\n' "$current_signature") >&2 || true
+      exit 1
+    fi
   done
 done
 

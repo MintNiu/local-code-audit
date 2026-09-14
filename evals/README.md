@@ -17,7 +17,7 @@
 切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
 如果评测的是删除或修改公共契约的提交，可重复传入 `--context <file>`，把下游仓库的调用方、POM 或测试作为只读证据；这些路径会记录在私有 `.meta.tsv` 中。未提供下游 context 时，结果只能按单仓库范围解释。
 
-需要验证真实历史结果的重复稳定性时，使用 `./evals/run-history-repeat.sh --runs 3`。它为每一轮创建独立子目录，并逐提交比较完整 `.txt` 输出；任一提交的结果内容漂移都会以非零状态失败。不同轮次的耗时和工作流哈希写在各自 metadata 中，不参与内容稳定性比较。
+需要验证真实历史结果的重复稳定性时，使用 `./evals/run-history-repeat.sh --runs 3`。它为每一轮创建独立子目录，并逐提交比较完整 `.txt` 输出及模型/SYSTEM/脚本哈希、参数和退出状态；任一结果内容或运行配置漂移都会以非零状态失败。仅耗时和结果文件绝对路径不参与比较。
 
 更新规则或参数后，可用 `./scripts/verify-runtime.sh` 只读检查 Ollama 中的 tuned 模型是否仍与当前 `config/Modelfile` 一致。校验失败时按脚本提示同步并执行 `ollama create`；脚本不会自动重建模型。
 历史评测运行器不会替下游仓库切换 Git ref，也不会替外部文件推断目标版本；请先在下游仓库检出匹配快照，或用 `scripts/extract-context-snapshot.sh` / `git show <ref>:<path>` 提取私有快照后再传入。为避免把主仓库当前工作树误当成历史证据，`run-history.sh` 会拒绝指向主仓库的 context，并在每个提交开始前把外部 context 冻结到临时快照，模型只读取该快照。私有 `.meta.tsv` 会记录原始路径和快照 SHA-256，便于复核版本是否被意外替换。
