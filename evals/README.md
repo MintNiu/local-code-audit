@@ -5,6 +5,7 @@
 ## 初始验收标准
 
 公开的合成回归入口是 `./evals/run-synthetic.sh`，目标、夹具和当前状态记录在 [goal.md](goal.md)。它用于每次调参后的快速回归，但不能替代真实历史提交评测。
+合成门禁默认调用个人高性能 `local-review-local`，与日常本地入口一致并保持模型 5 分钟；需要专门验证保守冷启动路径时，可通过 `SYNTHETIC_REVIEW_SCRIPT=/path/to/local-review.sh` 覆盖。
 
 真实历史提交使用 `./evals/run-history.sh`。它默认调用个人高性能 `local-review-local`，只在本地读取主仓库和显式提供的只读 context，在临时目录展开父提交并应用目标 diff，把原始结果和元数据写入你指定的私有目录；不要把该目录指向本公开仓库。需要对比保守基线时，追加 `--profile baseline`。
 清单中同一提交若重复出现，运行器只处理第一次并明确在 stderr 记录跳过，避免复用临时快照导致补丁二次应用失败；不同评测范围应使用不同输出目录或单独清单。

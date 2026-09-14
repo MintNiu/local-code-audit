@@ -6,6 +6,7 @@ runs="${SYNTHETIC_REVIEW_RUNS:-5}"
 timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-180}"
 model="${OLLAMA_REVIEW_MODEL:-devstral-small-2-review-tuned}"
 require_stable_hash="${SYNTHETIC_REQUIRE_STABLE_HASH:-1}"
+review_script="${SYNTHETIC_REVIEW_SCRIPT:-$repo_root/bin/local-review-local.sh}"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic.XXXXXX")"
 output_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic-results.XXXXXX")"
 trap 'rm -rf "$fixture_root" "$output_root"' EXIT
@@ -75,11 +76,11 @@ run_review() {
       OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
       OLLAMA_REVIEW_TOP_K="${PRESIGNED_REVIEW_TOP_K:-1}" \
       OLLAMA_REVIEW_TOP_P="${PRESIGNED_REVIEW_TOP_P:-1}" \
-        "$repo_root/bin/local-review.sh" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+        "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
     else
       OLLAMA_REVIEW_MODEL="$model" \
       OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
-        "$repo_root/bin/local-review.sh" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+      "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
     fi
     end="$(date +%s)"
 
@@ -101,11 +102,21 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
-    elif [[ "$expected_findings" == "1" ]]; then
-      if ! grep -Eiq 'x-token|token|URL|URI|查询参数|泄漏|暴露' "$output_file"; then
-        echo "$name run $run missed the expected credential-in-URL risk: $output_file" >&2
-        sed -n '1,160p' "$output_file" >&2
-        return 1
+    elif [[ "$expected_findings" == "url" || "$expected_findings" == "query" ]]; then
+      if [[ "$expected_findings" == "url" ]]; then
+        if ! grep -Fq '凭据值被拼接到 URL 查询参数或路径中' "$output_file" || \
+           grep -Fq '认证令牌从 URL 查询参数读取' "$output_file"; then
+          echo "$name run $run did not return exactly the URL-concatenation risk family: $output_file" >&2
+          sed -n '1,160p' "$output_file" >&2
+          return 1
+        fi
+      else
+        if ! grep -Fq '认证令牌从 URL 查询参数读取' "$output_file" || \
+           grep -Fq '凭据值被拼接到 URL 查询参数或路径中' "$output_file"; then
+          echo "$name run $run did not return exactly the query-token risk family: $output_file" >&2
+          sed -n '1,160p' "$output_file" >&2
+          return 1
+        fi
       fi
       finding_count="$(grep -E '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
       if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
@@ -188,8 +199,8 @@ run_review() {
 
 run_review java-divide 2
 run_review java-safe 0
-run_review java-token-url 1
-run_review java-token-query 1
+run_review java-token-url url
+run_review java-token-query query
 run_review java-token-header 0
 run_review java-tenant-leak tenant
 run_review java-tenant-safe 0
@@ -203,7 +214,7 @@ truncation_exit=0
 OLLAMA_REVIEW_MODEL="$model" \
 OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
 OLLAMA_REVIEW_NUM_PREDICT=1 \
-  "$repo_root/bin/local-review.sh" --repo "$fixture_root/java-divide" >"$truncation_output" 2>&1 || truncation_exit=$?
+  "$review_script" --repo "$fixture_root/java-divide" >"$truncation_output" 2>&1 || truncation_exit=$?
 
 if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; then
   echo "截断故障路径未按预期失败：$truncation_output" >&2
