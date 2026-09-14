@@ -257,6 +257,8 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 随后对真实 `63d520b` 和 `a1284658` 做定向复测：两次均以 0 退出，各保留 1 条完整 P1，分别定位到文件客户端和字典客户端的 `getParameter("x-token")` 回退行，没有残缺或重复 finding。它们仍作为待业务确认候选，不直接改写既有人工 scorecard。
 
+在 `dd46734` 增加参数别名预检后，个人 profile 对 `platform-api` 的 20 个历史提交再次全部成功，17 个保持 clean，3 个非 clean 与已有证据一致。对 `63d520b` 和 `a1284658` 各追加两次完整复测，三次输出 SHA-256 分别保持为 `5bb7f0d8c8e90a9abedd9c0e0ed0872dc13cdfec590077f2459548c484b3d207` 和 `c5d1b2f4da7040638ce8b88c7cb0e50368c41e5416db0e1a39a40f76737f1719`；这证明当前路径稳定，但候选是否属于正式问题仍需人工按业务契约确认。
+
 这套边界把模型从“必须记住两个固定答案”改成“负责开放式审计，确定性代码负责不可漏的已知高价值模式”。`evals/test-preflight.sh` 同时覆盖正例、负例、模型重复和字段连续性；每次修改 SYSTEM 规则或重建 tuned 模型后，必须先通过它和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh`。
 
 合成回归现在默认比较同一夹具第一次运行与后续运行的完整输出 SHA-256；任何内容漂移都会让门禁失败，而不是只打印哈希供人工查看。仅在排查模型波动时可临时设置 `SYNTHETIC_REQUIRE_STABLE_HASH=0`，该结果不能作为稳定性验收。
