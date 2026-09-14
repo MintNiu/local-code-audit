@@ -1447,6 +1447,13 @@ merge_preflight_findings() {
   printf 'findings\n' >"$kind_file"
 }
 
+emit_preflight_failure_diagnostic() {
+  local preflight_file="$1"
+  [[ -s "$preflight_file" ]] || return 0
+  echo "本地代码审查未完成；以下是已确定的预检发现（整次审查仍按失败处理，不能视为完整结果）：" >&2
+  cat "$preflight_file" >&2
+}
+
 collect_build_preflight() {
   local imports_file="$1"
   local output_file="$2"
@@ -2114,6 +2121,7 @@ if [[ "$needs_split" != true ]]; then
     exit 0
   fi
   if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 ]]; then
+    emit_preflight_failure_diagnostic "$build_preflight_file"
     exit 1
   fi
 fi
@@ -2121,12 +2129,16 @@ fi
 split_diff_into_chunks "$chunk_input_file" "$chunk_dir" "$max_diff_bytes"
 chunk_count="$(cat "$chunk_dir/count")"
 if [[ "$(cat "$chunk_dir/oversized")" == true ]]; then
+  emit_preflight_failure_diagnostic "$build_preflight_file"
   echo "本地代码审查失败：存在无法在 ${max_diff_bytes} 字节预算内拆分的单个文件/hunk；请缩小 diff、提供上下文或提高 OLLAMA_REVIEW_MAX_DIFF_BYTES 后重试。" >&2
   exit 1
 fi
 if [[ "$chunk_count" -le 1 ]]; then
   if [[ "$needs_split" == true ]]; then
+    emit_preflight_failure_diagnostic "$build_preflight_file"
     echo "本地代码审查失败：差异超过 ${max_diff_bytes} 字节，但无法按文件分片；请使用 --context 或缩小 diff 后重试。" >&2
+  else
+    emit_preflight_failure_diagnostic "$build_preflight_file"
   fi
   exit 1
 fi
@@ -2219,6 +2231,7 @@ $(cat "$changed_paths_file")
   run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_status=$?
   num_predict="$original_num_predict"
   if [[ "$chunk_status" -ne 0 ]]; then
+    emit_preflight_failure_diagnostic "$build_preflight_file"
     echo "本地代码审查失败：以下是已完成分片的原始结果（仅供定位，整次审查不完整，不能视为通过）：" >&2
     for completed_output in "$chunk_output_dir"/*.txt; do
       [[ -f "$completed_output" ]] || continue

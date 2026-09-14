@@ -1274,4 +1274,27 @@ grep -F '行号超出当前文件范围' "$line_range_error" >/dev/null || {
   exit 1
 }
 
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 99
+EOF
+chmod +x "$fake_bin/curl"
+model_failure_error="$fixture_root/model-failure-error"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  OLLAMA_REVIEW_RETRY_ATTEMPTS=0 \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>"$model_failure_error"; then
+  echo 'model failure was incorrectly accepted' >&2
+  exit 1
+fi
+grep -F '以下是已确定的预检发现' "$model_failure_error" >/dev/null || {
+  echo 'deterministic preflight findings were hidden after model failure' >&2
+  cat "$model_failure_error" >&2
+  exit 1
+}
+grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.DeletedDTO' "$model_failure_error" >/dev/null || {
+  echo 'build preflight diagnostic was missing after model failure' >&2
+  cat "$model_failure_error" >&2
+  exit 1
+}
+
 printf 'preflight regression passed\n'
