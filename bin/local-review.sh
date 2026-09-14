@@ -1581,8 +1581,25 @@ collect_security_preflight() {
     function emit_hardcoded_credential(at_line) {
       printf "P1 %s:%d - 配置文件新增了疑似硬编码凭据。\n影响：凭据可能随代码仓库、构建产物或配置分发链泄漏，并被用于访问外部资源。\n修复建议：移除字面量并改用无默认值的环境变量/密钥管理服务，已暴露的凭据应立即轮换。\n验证方式：检查 Git 历史、构建产物和运行时配置，确认不再包含该字面量，并用轮换后的凭据完成连接测试。\n\n", path, at_line
     }
+    function emit_query_token(at_line) {
+      if (!(at_line in query_token_emitted_lines)) {
+        printf "P1 %s:%d - 认证令牌从 URL 查询参数读取，可能进入访问日志、代理历史或 Referer。\n影响：请求参数中的 token 可能在到达下游前被日志或外部引用链持久化，造成会话凭据泄漏。\n修复建议：仅接受受保护的请求头或明确的安全认证通道，不要从 URL 查询参数读取认证令牌。\n验证方式：用带有 x-token 查询参数的请求检查访问日志、代理记录和下游请求，确认令牌不会进入 URL 相关记录。\n\n", path, at_line
+        query_token_emitted_lines[at_line] = 1
+      }
+    }
+    function record_token_parameter_alias(text, assignment, fields, count, name) {
+      if (text !~ /=[[:space:]]*(TOKEN_HEADER|"x-token")[[:space:]]*;?[[:space:]]*$/) return
+      assignment = text
+      sub(/[[:space:]]*=.*/, "", assignment)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", assignment)
+      count = split(assignment, fields, /[[:space:]]+/)
+      name = fields[count]
+      if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) token_parameter_vars[name] = 1
+    }
     function reset_hunk(    name) {
       for (name in url_input_vars) delete url_input_vars[name]
+      for (name in token_parameter_vars) delete token_parameter_vars[name]
+      for (name in query_token_emitted_lines) delete query_token_emitted_lines[name]
       url_guard_line = 0
       url_changed = 0
       for (name in ssrf_emitted_lines) delete ssrf_emitted_lines[name]
@@ -1685,6 +1702,7 @@ collect_security_preflight() {
       trimmed_code = code
       sub(/^[[:space:]]+/, "", trimmed_code)
       if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/ && trimmed_code !~ /^#/) {
+        record_token_parameter_alias(code)
         if (code ~ /https?:\/\// && code !~ /localhost|127\.0\.0\.1|0\.0\.0\.0/) remote_endpoint_seen = 1
         if (code ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/) {
           input_assignment = code
@@ -1791,7 +1809,13 @@ collect_security_preflight() {
           printf "P1 %s:%d - 凭据值被拼接到 URL 查询参数或路径中，可能通过请求目标泄漏。\n影响：token/secret 等敏感值会进入 URL，可能被代理、网关或访问日志持久化。\n修复建议：改用受保护的请求头或安全的内部认证通道，避免把秘密放入 URL。\n验证方式：检查最终请求 URI 和网关/代理日志，确认 URL 不再包含敏感值。\n\n", path, line_no
         }
         if (added ~ /getParameter[[:space:]]*\([^[:alnum:]_]*(x[-_]?token|token|authorization|access[-_]?token|refresh[-_]?token|session[-_]?key|jwt|api[-_]?key|TOKEN_HEADER)/) {
-          printf "P1 %s:%d - 认证令牌从 URL 查询参数读取，可能进入访问日志、代理历史或 Referer。\n影响：请求参数中的 token 可能在到达下游前被日志或外部引用链持久化，造成会话凭据泄漏。\n修复建议：仅接受受保护的请求头或明确的安全认证通道，不要从 URL 查询参数读取认证令牌。\n验证方式：用带有 x-token 查询参数的请求检查访问日志、代理记录和下游请求，确认令牌不会进入 URL 相关记录。\n\n", path, line_no
+          emit_query_token(line_no)
+        }
+        for (input_name in token_parameter_vars) {
+          if (added ~ ("getParameter[[:space:]]*\\([[:space:]]*" input_name "[[:space:]]*\\)")) {
+            emit_query_token(line_no)
+            break
+          }
         }
         line_no++
       } else if (prefix == " ") {

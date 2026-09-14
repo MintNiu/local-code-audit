@@ -253,7 +253,7 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 风险族修复后的真实 `platform-api` 20 提交回归全部完成且无超时/截断；除已知的 `420ae70c` 构建阻断外，`63d520b` 和 `a1284658` 各新增 1 条从 URL 查询参数读取 `x-token` 的 P1 候选。差异中确实存在 header 缺失时回退到 `getParameter("x-token")` 的路径，因此它们不再被静默视为 clean；是否计入正式召回/误报指标仍需结合业务契约人工确认，旧 scorecard 不自动改写。
 
-为防止这类候选在后续重建中回归，合成门禁新增独立的 `java-token-query` 正例，覆盖 `request.getParameter("x-token")`；同时对模型把整份文件标为 `1-9`、预检标为第 `7` 行的重叠范围做了去重回归。修改后 5 轮均稳定命中，且内部 header 对照仍保持 clean。
+为防止这类候选在后续重建中回归，合成门禁新增独立的 `java-token-query` 正例，覆盖 `request.getParameter("x-token")`；确定性预检同时追踪 `TOKEN_HEADER` 先赋给局部变量、再传入 `getParameter` 的常见别名写法，避免简单改名就漏报；同时对模型把整份文件标为 `1-9`、预检标为第 `7` 行的重叠范围做了去重回归。修改后 5 轮均稳定命中，且内部 header 对照仍保持 clean。
 
 随后对真实 `63d520b` 和 `a1284658` 做定向复测：两次均以 0 退出，各保留 1 条完整 P1，分别定位到文件客户端和字典客户端的 `getParameter("x-token")` 回退行，没有残缺或重复 finding。它们仍作为待业务确认候选，不直接改写既有人工 scorecard。
 

@@ -185,6 +185,21 @@ final class QueryTokenProxy {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/QueryTokenParamAlias.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+
+final class QueryTokenParamAlias {
+    private static final String TOKEN_HEADER = "x-token";
+
+    String read(HttpServletRequest request) {
+        String parameterName = TOKEN_HEADER;
+        return request.getParameter(parameterName);
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/QueryTokenAlias.java" <<'EOF'
 package com.example.api.client;
 
@@ -573,6 +588,11 @@ grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO'
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissing' "$capture" >/dev/null
 grep -F '凭据值被拼接到 URL 查询参数或路径中' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/QueryTokenAlias.java' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/QueryTokenParamAlias.java' "$capture" >/dev/null || {
+  echo 'missing query-token parameter alias preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/SsrfPreflight.java' "$capture" >/dev/null
 grep -F '服务端请求伪造' "$capture" >/dev/null
@@ -675,7 +695,7 @@ EOF
 chmod +x "$fake_bin/curl"
 duplicate_security_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo")"
-duplicate_security_count="$(printf '%s\n' "$duplicate_security_output" | grep -F '认证令牌从 URL 查询参数读取' | wc -l | tr -d ' ')"
+duplicate_security_count="$(printf '%s\n' "$duplicate_security_output" | grep -F 'P1 src/main/java/com/example/api/client/QueryTokenProxy.java:7' | wc -l | tr -d ' ')"
 [[ "$duplicate_security_count" == "1" ]] || {
   echo 'security preflight and model duplicate were not collapsed' >&2
   printf '%s\n' "$duplicate_security_output" >&2
