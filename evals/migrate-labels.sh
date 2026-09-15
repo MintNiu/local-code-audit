@@ -22,7 +22,7 @@ usage() {
   --out-labels-dir <dir>   新标签目录；必须不存在，避免覆盖人工标签
 
 只有新旧结果文本 SHA-256 完全一致的 complete 标签才会迁移；内容变化、
-缺少结果或标签不完整的提交会被跳过并要求重新人工复核。
+缺少结果、标签不完整或标签中的确认/误报条目多于结果候选的提交会被跳过并要求重新人工复核。
 EOF
 }
 
@@ -97,6 +97,20 @@ while IFS= read -r label_file; do
   new_hash="$(shasum -a 256 "$new_result" | awk '{print $1}')"
   if [[ "$old_hash" != "$new_hash" ]]; then
     echo "跳过 ${commit}：结果内容已变化，必须重新人工标注" >&2
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  # A byte-identical result is not sufficient when an older label file was
+  # assembled from a different/raw model response. Refuse to migrate labels
+  # that claim more confirmed or false-positive findings than the final
+  # result visibly contains; otherwise a later scorecard could silently pair
+  # clean output with stale findings.
+  candidate_count="$(grep -Ec '^(P[0-3]|信息) ' "$new_result" || true)"
+  confirmed_count="$(awk -F '\t' '$1 !~ /^#/ && NF >= 6 && $5 == "confirmed" { n++ } END { print n + 0 }' "$label_file")"
+  false_positive_count="$(awk -F '\t' '$1 !~ /^#/ && NF >= 6 && $5 == "false-positive" { n++ } END { print n + 0 }' "$label_file")"
+  if (( confirmed_count > candidate_count || false_positive_count > candidate_count )); then
+    echo "跳过 ${commit}：标签条目多于最终结果候选，可能来自不同/原始模型响应；必须重新人工标注" >&2
     skipped=$((skipped + 1))
     continue
   fi
