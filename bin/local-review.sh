@@ -1611,9 +1611,29 @@ collect_security_preflight() {
       name = fields[count]
       if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) token_parameter_vars[name] = 1
     }
+    function record_url_secret_alias(text, assignment, lhs, rhs, fields, count, name) {
+      # Track only a direct assignment from a clearly secret-like variable.
+      # This catches `String queryValue = token` followed by URL assembly
+      # without treating ordinary IDs or arbitrary data as credentials.
+      if (text !~ /=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;?[[:space:]]*$/) return
+      assignment = text
+      lhs = assignment
+      sub(/[[:space:]]*=.*/, "", lhs)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
+      count = split(lhs, fields, /[[:space:]]+/)
+      name = fields[count]
+      if (name !~ /^[A-Za-z_][A-Za-z0-9_]*$/) return
+      rhs = assignment
+      sub(/^.*=[[:space:]]*/, "", rhs)
+      sub(/[;[:space:]]*$/, "", rhs)
+      if (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/) {
+        url_secret_vars[name] = 1
+      }
+    }
     function reset_hunk(    name) {
       for (name in url_input_vars) delete url_input_vars[name]
       for (name in token_parameter_vars) delete token_parameter_vars[name]
+      for (name in url_secret_vars) delete url_secret_vars[name]
       for (name in query_token_emitted_lines) delete query_token_emitted_lines[name]
       url_guard_line = 0
       url_changed = 0
@@ -1718,6 +1738,7 @@ collect_security_preflight() {
       sub(/^[[:space:]]+/, "", trimmed_code)
       if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/ && trimmed_code !~ /^#/) {
         record_token_parameter_alias(code)
+        record_url_secret_alias(code)
         if (code ~ /https?:\/\// && code !~ /localhost|127\.0\.0\.1|0\.0\.0\.0/) remote_endpoint_seen = 1
         if (code ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/) {
           input_assignment = code
@@ -1817,6 +1838,9 @@ collect_security_preflight() {
         builder_secret = added ~ /(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)/
         format_risk = (added ~ /String[[:space:]]*\.[[:space:]]*format[[:space:]]*\(/ && added ~ /https?:\/\/|[?&](token|secret|password|api[_-]?key|auth|sig|credential)/ && builder_secret)
         append_risk = added ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\+=[^;]*(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)/
+        for (secret_name in url_secret_vars) {
+          if (added ~ ("\\+[[:space:]]*" secret_name "([^[:alnum:]_]|$)")) url_risk = 1
+        }
         if ((builder_query && builder_secret) || format_risk || append_risk) {
           url_risk = 1
         }

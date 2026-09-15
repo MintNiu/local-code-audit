@@ -210,6 +210,17 @@ final class QueryTokenAlias {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/UrlSecretAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class UrlSecretAlias {
+    String build(String token) {
+        String queryValue = token;
+        return "https://internal.example/download?x-token=" + queryValue;
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/Divide.java" <<'EOF'
 package com.example.api.client;
 
@@ -601,6 +612,11 @@ grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO'
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.ModuleMissing' "$capture" >/dev/null
 grep -F '凭据值被拼接到 URL 查询参数或路径中' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/QueryTokenAlias.java' "$capture" >/dev/null
+grep -F 'P1 src/main/java/com/example/api/client/UrlSecretAlias.java' "$capture" >/dev/null || {
+  echo 'missing URL credential alias preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F 'P1 src/main/java/com/example/api/client/QueryTokenParamAlias.java' "$capture" >/dev/null || {
   echo 'missing query-token parameter alias preflight' >&2
   cat "$capture" >&2
