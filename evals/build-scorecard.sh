@@ -84,18 +84,25 @@ while IFS= read -r label_file; do
   meta_file="$results_dir/$commit.meta.tsv"
   result_file="$results_dir/$commit.txt"
   source_result="$(awk -F '\t' '$1 == "# source_result" { print $2; exit }' "$label_file")"
-  [[ -n "$source_result" ]] || {
-    echo "标签缺少 source_result，拒绝与结果目录猜测配对: $commit" >&2
+  source_result_sha256="$(awk -F '\t' '$1 == "# source_result_sha256" { print $2; exit }' "$label_file")"
+  [[ -n "$source_result" && -n "$source_result_sha256" ]] || {
+    echo "标签缺少 source_result 或 source_result_sha256，拒绝猜测配对: $commit" >&2
     exit 1
   }
-  [[ "$source_result" == "$result_file" ]] || {
-    echo "标签与结果不匹配，拒绝混用不同评测运行: $commit" >&2
-    echo "  label source_result: $source_result" >&2
-    echo "  requested result:    $result_file" >&2
+  [[ "$source_result_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "标签中的 source_result_sha256 无效: $commit" >&2
     exit 1
   }
   [[ -f "$meta_file" && -f "$result_file" ]] || {
     echo "缺少与标签对应的结果: $commit" >&2
+    exit 1
+  }
+  result_sha256="$(shasum -a 256 "$result_file" | awk '{print $1}')"
+  [[ "$source_result_sha256" == "$result_sha256" ]] || {
+    echo "标签与结果内容不匹配，拒绝混用不同评测运行: $commit" >&2
+    echo "  label source_result: $source_result" >&2
+    echo "  label SHA-256:       $source_result_sha256" >&2
+    echo "  result SHA-256:      $result_sha256" >&2
     exit 1
   }
 

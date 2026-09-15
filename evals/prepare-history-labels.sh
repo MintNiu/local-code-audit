@@ -88,12 +88,25 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     continue
   fi
 
+  source_result_sha256=""
+  if [[ -f "$metadata_file" ]]; then
+    source_result_sha256="$(awk -F '\t' '$1 == "result_sha256" { print $2; exit }' "$metadata_file")"
+  fi
+  if [[ -z "$source_result_sha256" && -f "$result_file" ]]; then
+    source_result_sha256="$(shasum -a 256 "$result_file" | awk '{print $1}')"
+  fi
+  [[ "$source_result_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "结果缺少可记录的 SHA-256，无法创建可迁移标签: $commit" >&2
+    exit 1
+  }
+
   {
     printf '# commit\t%s\n' "$commit"
     printf '# parent\t%s\n' "$parent"
     printf '# date\t%s\n' "$date"
     printf '# subject\t%s\n' "$subject"
     printf '# source_result\t%s\n' "$result_file"
+    printf '# source_result_sha256\t%s\n' "$source_result_sha256"
     printf '#\n'
     printf '# 先阅读 source_result，再逐条记录模型发现和人工真值。\n'
     printf '# status 只能是 confirmed、false-positive 或 uncertain。\n'

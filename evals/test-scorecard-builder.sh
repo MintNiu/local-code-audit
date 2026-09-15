@@ -13,6 +13,7 @@ result_file="$results_dir/$commit.txt"
 cat >"$labels_dir/$commit.labels.tsv" <<EOF
 # commit	$commit
 # source_result	$result_file
+# source_result_sha256	PLACEHOLDER
 # review_status	complete
 # verdict	findings
 # finding_id	severity	path	line	status	notes
@@ -40,6 +41,8 @@ status	completed
 exit_code	0
 elapsed_seconds	12
 EOF
+result_sha256="$(shasum -a 256 "$result_file" | awk '{print $1}')"
+perl -0pi -e "s/PLACEHOLDER/$result_sha256/" "$labels_dir/$commit.labels.tsv"
 
 output="$tmp_dir/scorecard.tsv"
 "$repo_root/evals/build-scorecard.sh" --labels-dir "$labels_dir" --results-dir "$results_dir" --out "$output" >/dev/null
@@ -49,7 +52,7 @@ grep -F "$commit" "$output" | grep -F $'\t1\t1\t2\t1\ttrue\t12' >/dev/null
 "$repo_root/evals/summarize-scorecard.sh" "$output" | grep -F 'p0_p1_recall=100.0%' >/dev/null
 
 stale_output="$tmp_dir/stale.tsv"
-perl -0pi -e 's{# source_result\t[^\n]+}{# source_result\t/tmp/stale-result.txt}' "$labels_dir/$commit.labels.tsv"
+perl -0pi -e 's{# source_result_sha256\t[^\n]+}{# source_result_sha256\t0000000000000000000000000000000000000000000000000000000000000000}' "$labels_dir/$commit.labels.tsv"
 if "$repo_root/evals/build-scorecard.sh" --labels-dir "$labels_dir" --results-dir "$results_dir" --out "$stale_output" >/dev/null 2>&1; then
   echo 'scorecard builder accepted a stale label/result pairing' >&2
   exit 1

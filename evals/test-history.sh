@@ -8,6 +8,7 @@ repo="$fixture_root/repo"
 manifest="$fixture_root/manifest.tsv"
 out_dir="$fixture_root/results"
 repeat_out="$fixture_root/repeated-results"
+labels_out="$fixture_root/labels"
 trap 'rm -rf "$fixture_root"' EXIT
 
 mkdir -p "$fake_bin" "$repo/src"
@@ -50,6 +51,11 @@ PATH="$fake_bin:$PATH" \
 grep -F "跳过重复提交清单行：$commit" "$stderr_file" >/dev/null
 grep -F $'status\tcompleted' "$out_dir/$commit.meta.tsv" >/dev/null
 [[ -s "$out_dir/$commit.txt" ]]
+
+"$repo_root/evals/prepare-history-labels.sh" \
+  --manifest "$manifest" --results "$out_dir" --labels-dir "$labels_out" >/dev/null
+result_sha256="$(shasum -a 256 "$out_dir/$commit.txt" | awk '{print $1}')"
+grep -F $"# source_result_sha256\t$result_sha256" "$labels_out/$commit.labels.tsv" >/dev/null
 
 PATH="$fake_bin:$PATH" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
