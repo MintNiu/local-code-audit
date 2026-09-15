@@ -75,6 +75,7 @@
 - 对这 4 个补充提交使用个人 profile 做两轮完整重复审查，`run-history-repeat.sh` 通过，4 个提交的最终文本和运行配置签名均无漂移；稳定性证据保存在私有目录 `platform-api-results-supplemental-repeat-20260915`，不提交到公开仓库。
 - 2026-09-15 开始引入 `platform-file` 独立安全 holdout（OSS 明文凭据、默认 Nacos 凭据和多配置变更）。复核 `d984778` 时发现其新增 JDBC/Redis 远端地址下的默认密码未被旧预检识别；已将远端 endpoint 识别扩展到 `jdbc://`、`server-addr` 和非本机 `host/endpoint`，并加入 `application-credential-remote-default.yml` 回归。该修复后的 holdout 结果必须重新运行后才能计入正式 scorecard，旧运行结果不复用。
 - 当前规则版本已重新运行 `platform-file` 的 3 个较快 holdout：`273887de`、`7b626716`、`5a9a19b` 共 17 个 confirmed P1，17 个全部命中、0 误报；两轮完整重复审查的文本和运行签名均稳定。独立 holdout scorecard 保存在私有目录 `platform-file-holdout-scorecard-20260915.tsv`，不与 `platform-api` 的 7 个根因混合计算。`d984778` 因大差异耗时约 10 分钟且刚触发新规则，仍待修复后重跑。
+- 对真实 `d984778` 提交快照做无模型预检验证后，当前规则稳定补出 4 条确定性 P1：`platform-file-dev.yml:11`、`:23` 的远端数据库/Redis 默认密码，以及 `platform-file-localhost.yml:65-66` 的 OSS 明文凭据；该输出只验证预检，不计入模型 scorecard，完整模型重跑仍需单独完成。
 - `dd46734`（查询令牌参数别名预检）之后，个人 profile 对 `platform-api-20.tsv` 的 20 个历史提交再次全部成功，无超时或截断；17 个结果为 clean，非 clean 仅为 `420ae70c` 的 5 个缺失 DTO 引用、`63d520b` 和 `a1284658` 各 1 个查询令牌候选。对后两提交各追加 2 次复测，三次完整输出 SHA-256 均分别稳定为 `5bb7f0d8c8e90a9abedd9c0e0ed0872dc13cdfec590077f2459548c484b3d207` 和 `c5d1b2f4da7040638ce8b88c7cb0e50368c41e5416db0e1a39a40f76737f1719`；这些结果仍不能替代人工真值或证明 90% 生产召回率。
 
 ## 失败处理原则
