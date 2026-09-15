@@ -77,6 +77,8 @@
 - 当前规则版本已重新运行 `platform-file` 的 3 个较快 holdout：`273887de`、`7b626716`、`5a9a19b` 共 17 个 confirmed P1，17 个全部命中、0 误报；两轮完整重复审查的文本和运行签名均稳定。独立 holdout scorecard 保存在私有目录 `platform-file-holdout-scorecard-20260915.tsv`，不与 `platform-api` 的 7 个根因混合计算。`d984778` 因大差异耗时约 10 分钟且刚触发新规则，仍待修复后重跑。
 - 对真实 `d984778` 提交快照做无模型预检验证后，当前规则稳定补出 4 条确定性 P1：`platform-file-dev.yml:11`、`:23` 的远端数据库/Redis 默认密码，以及 `platform-file-localhost.yml:65-66` 的 OSS 明文凭据；该输出只验证预检，不计入模型 scorecard，完整模型重跑仍需单独完成。
 - `dd46734`（查询令牌参数别名预检）之后，个人 profile 对 `platform-api-20.tsv` 的 20 个历史提交再次全部成功，无超时或截断；17 个结果为 clean，非 clean 仅为 `420ae70c` 的 5 个缺失 DTO 引用、`63d520b` 和 `a1284658` 各 1 个查询令牌候选。对后两提交各追加 2 次复测，三次完整输出 SHA-256 均分别稳定为 `5bb7f0d8c8e90a9abedd9c0e0ed0872dc13cdfec590077f2459548c484b3d207` 和 `c5d1b2f4da7040638ce8b88c7cb0e50368c41e5416db0e1a39a40f76737f1719`；这些结果仍不能替代人工真值或证明 90% 生产召回率。
+- 2026-09-15 对 `platform-file:d984778` 先尝试 `num_ctx=32768`、9000 字节大分片；三次 Ollama 请求均在 180 秒内没有返回任何字节，整次耗时 587 秒并按失败处理。该结果证明单纯增大上下文和分片会降低可用性，不能作为默认优化方向。
+- 同一提交随后用 `num_ctx=16384`、3000 字节分片、`chunk_num_predict=4096` 完整完成，耗时 627 秒，结果 SHA-256 为 `8f31da2aa9bda2e90bd0d7ceba78b9c0b7f798dc444423fd7c38fab1d7d5736a`，与此前同配置运行的结果逐字节一致。当前完整结果保留 4 条确定性预检凭据问题（dev 数据库密码、dev Redis 密码、localhost OSS AccessKey 和 Secret），模型另输出 1 条覆盖 `localhost.yml:40-52` 的 OSS 汇总；该汇总根因基本一致但行号范围未覆盖真实新增凭据行，尚未进入人工真值或 scorecard。大提交的推荐路径仍是较小分片和 16384 上下文，不能把 32768 失败运行或半截输出计入指标。
 
 ## 失败处理原则
 
