@@ -65,6 +65,20 @@ fi
   exit 1
 }
 
+mismatch_labels="$tmp_dir/mismatch-labels"
+mkdir -p "$mismatch_labels"
+cp "$labels_dir/$commit.labels.tsv" "$mismatch_labels/$commit.labels.tsv"
+perl -0pi -e 's{false-positive-1\tP2\tsrc/Example\.java\t20}{false-positive-1\tP2\tsrc/Missing.java\t20}' "$mismatch_labels/$commit.labels.tsv"
+mismatch_output="$tmp_dir/mismatch.tsv"
+if "$repo_root/evals/build-scorecard.sh" --labels-dir "$mismatch_labels" --results-dir "$results_dir" --out "$mismatch_output" >/dev/null 2>&1; then
+  echo 'scorecard builder accepted a label location absent from the result' >&2
+  exit 1
+fi
+[[ ! -e "$mismatch_output" ]] || {
+  echo 'scorecard builder left partial output after location mismatch' >&2
+  exit 1
+}
+
 stale_output="$tmp_dir/stale.tsv"
 perl -0pi -e 's{# source_result_sha256\t[^\n]+}{# source_result_sha256\t0000000000000000000000000000000000000000000000000000000000000000}' "$labels_dir/$commit.labels.tsv"
 if "$repo_root/evals/build-scorecard.sh" --labels-dir "$labels_dir" --results-dir "$results_dir" --out "$stale_output" >/dev/null 2>&1; then

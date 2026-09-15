@@ -114,6 +114,36 @@ while IFS= read -r label_file; do
     skipped=$((skipped + 1))
     continue
   fi
+  location_mismatch=false
+  while IFS=$'\t' read -r finding_id finding_severity finding_path finding_line finding_status finding_notes _; do
+    [[ -n "$finding_id" && "$finding_id" != \#* ]] || continue
+    case "$finding_status" in
+      confirmed|false-positive) ;;
+      *) continue ;;
+    esac
+    if ! awk -v want_path="$finding_path" -v want_line="$finding_line" '
+      function range_start(value, fields) { split(value, fields, "-"); return fields[1] + 0 }
+      function range_end(value, fields) { split(value, fields, "-"); return (fields[2] == "" ? fields[1] : fields[2]) + 0 }
+      /^(P[0-3]|信息) / {
+        location = $2
+        candidate_path = location
+        sub(/:[0-9]+(-[0-9]+)?$/, "", candidate_path)
+        candidate_line = location
+        sub(/^.*:/, "", candidate_line)
+        if (candidate_path != want_path) next
+        if (range_end(candidate_line) >= range_start(want_line) && range_end(want_line) >= range_start(candidate_line)) found = 1
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$new_result"; then
+      location_mismatch=true
+      break
+    fi
+  done <"$label_file"
+  if [[ "$location_mismatch" == true ]]; then
+    echo "跳过 ${commit}：标签定位不在最终结果候选中，可能来自不同/原始模型响应；必须重新人工标注" >&2
+    skipped=$((skipped + 1))
+    continue
+  fi
 
   destination="$output_dir/$(basename "$label_file")"
   awk -F '\t' -v result="$new_result" -v hash="$new_hash" '

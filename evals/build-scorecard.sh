@@ -136,6 +136,36 @@ while IFS= read -r label_file; do
     echo "人工标记的误报多于结果中的模型候选数: ${commit}；标签与结果可能不匹配" >&2
     exit 1
   fi
+  # Candidate counts alone do not prove that the label was made from this
+  # result. Require every confirmed/false-positive location to overlap a
+  # visible finding in the selected result, otherwise a same-sized stale
+  # label could still enter the scorecard.
+  while IFS=$'\t' read -r finding_id finding_severity finding_path finding_line finding_status finding_notes _; do
+    [[ -n "$finding_id" && "$finding_id" != \#* ]] || continue
+    case "$finding_status" in
+      confirmed|false-positive) ;;
+      *) continue ;;
+    esac
+    if ! awk -v want_path="$finding_path" -v want_line="$finding_line" '
+      function range_start(value, fields) { split(value, fields, "-"); return fields[1] + 0 }
+      function range_end(value, fields) { split(value, fields, "-"); return (fields[2] == "" ? fields[1] : fields[2]) + 0 }
+      /^(P[0-3]|信息) / {
+        location = $2
+        candidate_path = location
+        sub(/:[0-9]+(-[0-9]+)?$/, "", candidate_path)
+        candidate_line = location
+        sub(/^.*:/, "", candidate_line)
+        if (candidate_path != want_path) next
+        if (range_end(candidate_line) >= range_start(want_line) && range_end(want_line) >= range_start(candidate_line)) {
+          found = 1
+        }
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$result_file"; then
+      echo "标签定位不在结果候选中，拒绝汇总: $commit $finding_path:$finding_line" >&2
+      exit 1
+    fi
+  done <"$label_file"
   emit "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\ttrue\t%s' \
     "$commit" "$model" "$temperature" "$seed" "$num_ctx" "$gold" "$found" \
     "$candidates" "$false_positives" "$elapsed")"
