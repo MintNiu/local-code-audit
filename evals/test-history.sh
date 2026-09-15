@@ -55,7 +55,7 @@ grep -F $'status\tcompleted' "$out_dir/$commit.meta.tsv" >/dev/null
 "$repo_root/evals/prepare-history-labels.sh" \
   --manifest "$manifest" --results "$out_dir" --labels-dir "$labels_out" >/dev/null
 result_sha256="$(shasum -a 256 "$out_dir/$commit.txt" | awk '{print $1}')"
-grep -F $"# source_result_sha256\t$result_sha256" "$labels_out/$commit.labels.tsv" >/dev/null
+grep -F $'# source_result_sha256\t'"$result_sha256" "$labels_out/$commit.labels.tsv" >/dev/null
 
 PATH="$fake_bin:$PATH" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
