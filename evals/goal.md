@@ -73,6 +73,7 @@
 - 在同日完成这 6 份重新绑定后的人工复核：`2f6c3934`、`91bff253`、`39955c8` 标为 clean，`420ae70c` 确认 5 条缺失 DTO 的 P1 编译阻断，`63d520b` 与 `a1284658` 各确认 1 条从查询参数读取 `x-token` 的 P1。私有标签集 `platform-api-labels-final-20260915` 生成 20 行 scorecard：7 个 confirmed P0/P1、7 个命中、0 个误报，当前为 7/7（100%）；分母仍只有 7 个真实高优先级根因，且未分离 holdout，因此这只是阶段 1 的当前证据，不是生产级验收结论。
 - 同日补充评测了仓库中原 20 提交清单之外的 4 个非合并业务提交：`b4ea10fc`、`12a1aeb0`、`6dc87ecf` 标为 clean，`89ea7d8d` 对工作流事件 claim/ack 未显式携带租户上下文标为 uncertain，等待服务端实现复核。扩展私有标签/结果集 `platform-api-labels-final-extended-20260915` 共 24 个提交，scorecard 仍为 7/7（100%）、0 误报、1 个 uncertain 未计入；新增样本增加了 clean 覆盖，但尚未增加已确认 P0/P1 分母。
 - 对这 4 个补充提交使用个人 profile 做两轮完整重复审查，`run-history-repeat.sh` 通过，4 个提交的最终文本和运行配置签名均无漂移；稳定性证据保存在私有目录 `platform-api-results-supplemental-repeat-20260915`，不提交到公开仓库。
+- 2026-09-15 开始引入 `platform-file` 独立安全 holdout（OSS 明文凭据、默认 Nacos 凭据和多配置变更）。复核 `d984778` 时发现其新增 JDBC/Redis 远端地址下的默认密码未被旧预检识别；已将远端 endpoint 识别扩展到 `jdbc://`、`server-addr` 和非本机 `host/endpoint`，并加入 `application-credential-remote-default.yml` 回归。该修复后的 holdout 结果必须重新运行后才能计入正式 scorecard，旧运行结果不复用。
 - `dd46734`（查询令牌参数别名预检）之后，个人 profile 对 `platform-api-20.tsv` 的 20 个历史提交再次全部成功，无超时或截断；17 个结果为 clean，非 clean 仅为 `420ae70c` 的 5 个缺失 DTO 引用、`63d520b` 和 `a1284658` 各 1 个查询令牌候选。对后两提交各追加 2 次复测，三次完整输出 SHA-256 均分别稳定为 `5bb7f0d8c8e90a9abedd9c0e0ed0872dc13cdfec590077f2459548c484b3d207` 和 `c5d1b2f4da7040638ce8b88c7cb0e50368c41e5416db0e1a39a40f76737f1719`；这些结果仍不能替代人工真值或证明 90% 生产召回率。
 
 ## 失败处理原则
