@@ -1957,12 +1957,46 @@ collect_java_division_preflight() {
         if (text ~ pattern && (!(name in zero_guards) || line < zero_guards[name])) zero_guards[name] = line
       }
     }
+    function find_division_slash(text,    i, ch, next_ch, previous_ch, quote, escaped, single_quote) {
+      # Find an operator slash outside Java string/character literals and
+      # line comments. A literal such as "a/b" may precede the real
+      # expression on the same changed line; using index(text, "/") would
+      # incorrectly parse that literal and miss the division risk.
+      quote = ""
+      escaped = 0
+      single_quote = sprintf("%c", 39)
+      for (i = 1; i <= length(text); i++) {
+        ch = substr(text, i, 1)
+        if (quote != "") {
+          if (escaped) {
+            escaped = 0
+          } else if (ch == "\\") {
+            escaped = 1
+          } else if (ch == quote) {
+            quote = ""
+          }
+          continue
+        }
+        if (ch == "\"" || ch == single_quote) {
+          quote = ch
+          continue
+        }
+        if (ch == "/") {
+          next_ch = substr(text, i + 1, 1)
+          previous_ch = (i > 1 ? substr(text, i - 1, 1) : "")
+          if (next_ch == "/") break
+          if (next_ch == "*") continue
+          if (previous_ch == "/" || previous_ch == "*") continue
+          if (substr(text, i + 1) ~ /^[[:space:]]*[A-Za-z0-9_()+-]/) return i
+        }
+      }
+      return 0
+    }
     function record_division(text,    expression, slash, left_text, right_text, left, right, trimmed) {
       trimmed = text
       sub(/^[[:space:]]+/, "", trimmed)
       if (trimmed ~ /^\/\// || trimmed ~ /^\/\*|^\*/) return
-      if (text !~ /\/[[:space:]]*[A-Za-z0-9_()+-]/) return
-      slash = index(text, "/")
+      slash = find_division_slash(text)
       if (slash == 0) return
       left_text = substr(text, 1, slash - 1)
       right_text = substr(text, slash + 1)

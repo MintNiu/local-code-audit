@@ -215,7 +215,7 @@ package com.example.api.client;
 
 final class Divide {
     int divide(Integer a, Integer b) {
-        return a / b;
+        return "a/b=" + (a / b);
     }
 }
 EOF
