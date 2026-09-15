@@ -62,6 +62,19 @@
 模板是私有 TSV。逐条阅读 `source_result` 后填写 `finding_id`、严重级别、仓库相对路径、行号、`confirmed`/`false-positive`/`uncertain` 和备注；脚本不会覆盖已有人工标签。
 模板中的 `# verdict` 还需要填写为 `clean` 或 `findings`：前者表示整次提交人工确认无问题，后者表示至少有一个已确认问题。`# review_status` 填写为 `pending` 或 `complete`；只有标为 `complete` 的提交才应进入汇总。若一次提交有多个模型发现，先逐条记录，再在汇总表中按根因去重为一行，避免把同一问题重复计算。
 
+标签完成后，可用 `build-scorecard.sh` 从 `.labels.tsv`、`.meta.tsv` 和结果文本自动生成汇总 TSV，避免手工抄录运行参数和候选数量：
+
+```bash
+./evals/build-scorecard.sh \
+  --labels-dir ~/.local/share/local-review/evals/platform-api-labels \
+  --results-dir ~/.local/share/local-review/evals/platform-api-results \
+  --out ~/.local/share/local-review/evals/platform-api-scorecard.tsv
+./evals/summarize-scorecard.sh \
+  ~/.local/share/local-review/evals/platform-api-scorecard.tsv
+```
+
+构建器只输出 `review_status=complete` 且运行成功的提交；`uncertain` 不计入指标，缺少结果、元数据或字段不完整会 fail-closed。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
+
 1. 固定至少 20 个真实历史提交作为评测集，并按提交切分训练示例和留出评测集。
    不要随机打散相邻提交；优先按功能簇（例如同一接口迁移、同一安全修复链）整体分配到 train/dev/holdout，避免相邻提交泄漏。
 2. P0/P1 真实问题召回率目标不低于 90%；如果样本不足，记录实际样本数，不得用主观印象替代指标。
