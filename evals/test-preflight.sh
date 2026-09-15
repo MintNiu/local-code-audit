@@ -247,6 +247,19 @@ package com.example.api.client;
 final class CommentOnly {}
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/BlockCommentOnly.java" <<'EOF'
+package com.example.api.client;
+
+final class BlockCommentOnly {
+    int divide(Integer a, Integer b) {
+        /*
+         * Example expression: a / b
+         */
+        return 1;
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/SsrfPreflight.java" <<'EOF'
 package com.example.api.client;
 
@@ -671,6 +684,10 @@ if grep -F 'P1 src/main/java/com/example/api/client/UnrelatedDivide.java' "$capt
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/CommentOnly.java' "$capture" >/dev/null; then
   echo 'security preflight reported a comment-only token reference' >&2
+  exit 1
+fi
+if grep -F 'P1 src/main/java/com/example/api/client/BlockCommentOnly.java' "$capture" >/dev/null; then
+  echo 'Java division preflight reported a block-comment-only expression' >&2
   exit 1
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/SsrfSafe.java' "$capture" >/dev/null || \

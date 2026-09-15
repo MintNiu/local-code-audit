@@ -1912,6 +1912,7 @@ collect_java_division_preflight() {
     }
     function reset_hunk() {
       has_division = 0
+      block_comment = 0
       has_integer_parameter = 0
       integer_line = 0
       division_line = 0
@@ -1977,6 +1978,13 @@ collect_java_division_preflight() {
           }
           continue
         }
+        if (block_comment) {
+          if (ch == "*" && substr(text, i + 1, 1) == "/") {
+            block_comment = 0
+            i++
+          }
+          continue
+        }
         if (ch == "\"" || ch == single_quote) {
           quote = ch
           continue
@@ -1985,7 +1993,11 @@ collect_java_division_preflight() {
           next_ch = substr(text, i + 1, 1)
           previous_ch = (i > 1 ? substr(text, i - 1, 1) : "")
           if (next_ch == "/") break
-          if (next_ch == "*") continue
+          if (next_ch == "*") {
+            block_comment = 1
+            i++
+            continue
+          }
           if (previous_ch == "/" || previous_ch == "*") continue
           if (substr(text, i + 1) ~ /^[[:space:]]*[A-Za-z0-9_()+-]/) return i
         }
