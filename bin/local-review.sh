@@ -1739,7 +1739,13 @@ collect_security_preflight() {
       if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/ && trimmed_code !~ /^#/) {
         record_token_parameter_alias(code)
         record_url_secret_alias(code)
-        if (code ~ /https?:\/\// && code !~ /localhost|127\.0\.0\.1|0\.0\.0\.0/) remote_endpoint_seen = 1
+        # Configuration may point at a remote database or service without an
+        # HTTP URL (for example jdbc:mysql://192.168.x.x or server-addr).
+        # Treat those endpoints as remote evidence too, while keeping local
+        # loopback values out of the generic password/token rule.
+        if ((code ~ /https?:\/\// || code ~ /jdbc:[A-Za-z0-9+.-]+:\/\// ||
+             code ~ /(server-addr|host|hostname|endpoint)[[:space:]]*:/) &&
+            code !~ /localhost|127\.0\.0\.1|0\.0\.0\.0/) remote_endpoint_seen = 1
         if (code ~ /getParameter[[:space:]]*\([^)]*(url|uri|target|callback|redirect|endpoint|destination|webhook|nextUrl|resourceUrl|remoteUrl)[^)]*\)/) {
           input_assignment = code
           sub(/[[:space:]]*=.*/, "", input_assignment)

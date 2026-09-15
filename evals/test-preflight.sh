@@ -162,6 +162,16 @@ operation-log:
   internal-token: ${GATEWAY_INTERNAL_TOKEN:platform-dev-shared-internal-token}
   safe-token: ${SAFE_TOKEN:short-example}
 EOF
+cat >"$repo/application-credential-remote-default.yml" <<'EOF'
+spring:
+  datasource:
+    url: jdbc:mysql://${DB_HOST:192.168.30.241}:${DB_PORT:3306}/platform_file
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:wanzhiTestPlatform}
+cache:
+  host: ${REDIS_HOST:192.168.30.241}
+  password: ${REDIS_PASSWORD:wanzhiTestRedisPlatform}
+EOF
 
 cat >"$repo/src/main/java/com/example/api/client/TokenProxy.java" <<'EOF'
 package com.example.api.client;
@@ -676,6 +686,11 @@ grep -F 'P1 application-credential-weak-default.yml' "$capture" >/dev/null || {
 }
 grep -F 'P1 application-credential-long-default.yml' "$capture" >/dev/null || {
   echo 'missing long default credential preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'P1 application-credential-remote-default.yml' "$capture" >/dev/null || {
+  echo 'missing remote JDBC/service default credential preflight' >&2
   cat "$capture" >&2
   exit 1
 }
