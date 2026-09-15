@@ -132,6 +132,10 @@ while IFS= read -r label_file; do
     echo "人工确认 P0/P1 多于模型候选数: $commit" >&2
     exit 1
   fi
+  if [[ "$false_positives" -gt "$candidates" ]]; then
+    echo "人工标记的误报多于结果中的模型候选数: ${commit}；标签与结果可能不匹配" >&2
+    exit 1
+  fi
   emit "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\ttrue\t%s' \
     "$commit" "$model" "$temperature" "$seed" "$num_ctx" "$gold" "$found" \
     "$candidates" "$false_positives" "$elapsed")"

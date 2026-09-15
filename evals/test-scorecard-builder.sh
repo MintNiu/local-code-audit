@@ -51,6 +51,20 @@ grep -Fx "$expected_header" "$output" >/dev/null
 grep -F "$commit" "$output" | grep -F $'\t1\t1\t2\t1\ttrue\t12' >/dev/null
 "$repo_root/evals/summarize-scorecard.sh" "$output" | grep -F 'p0_p1_recall=100.0%' >/dev/null
 
+overcount_labels="$tmp_dir/overcount-labels"
+mkdir -p "$overcount_labels"
+cp "$labels_dir/$commit.labels.tsv" "$overcount_labels/$commit.labels.tsv"
+printf 'false-positive-2\tP2\tsrc/Other.java\t20\tfalse-positive\t重复候选\nfalse-positive-3\tP2\tsrc/Other.java\t21\tfalse-positive\t重复候选\n' >>"$overcount_labels/$commit.labels.tsv"
+overcount_output="$tmp_dir/overcount.tsv"
+if "$repo_root/evals/build-scorecard.sh" --labels-dir "$overcount_labels" --results-dir "$results_dir" --out "$overcount_output" >/dev/null 2>&1; then
+  echo 'scorecard builder accepted more false positives than result candidates' >&2
+  exit 1
+fi
+[[ ! -e "$overcount_output" ]] || {
+  echo 'scorecard builder left partial output after candidate-count failure' >&2
+  exit 1
+}
+
 stale_output="$tmp_dir/stale.tsv"
 perl -0pi -e 's{# source_result_sha256\t[^\n]+}{# source_result_sha256\t0000000000000000000000000000000000000000000000000000000000000000}' "$labels_dir/$commit.labels.tsv"
 if "$repo_root/evals/build-scorecard.sh" --labels-dir "$labels_dir" --results-dir "$results_dir" --out "$stale_output" >/dev/null 2>&1; then
