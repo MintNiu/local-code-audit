@@ -73,7 +73,7 @@
   ~/.local/share/local-review/evals/platform-api-scorecard.tsv
 ```
 
-构建器只输出 `review_status=complete` 且运行成功的提交；`uncertain` 不计入指标，缺少结果、元数据或字段不完整会 fail-closed。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
+构建器只输出 `review_status=complete` 且运行成功的提交；它还会要求标签中的 `# source_result` 与所选结果文件精确匹配，拒绝把旧 profile/旧运行的标签套到新结果上。`uncertain` 不计入指标，缺少结果、元数据或字段不完整会 fail-closed；失败时不会留下半成品输出。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
 
 1. 固定至少 20 个真实历史提交作为评测集，并按提交切分训练示例和留出评测集。
    不要随机打散相邻提交；优先按功能簇（例如同一接口迁移、同一安全修复链）整体分配到 train/dev/holdout，避免相邻提交泄漏。
@@ -103,6 +103,12 @@ scorecard 汇总器也有独立的输入校验回归：
 
 ```bash
 ./evals/test-scorecard.sh
+```
+
+标签到 scorecard 的构建器也有回归测试：
+
+```bash
+./evals/test-scorecard-builder.sh
 ```
 
 运行态规则校验也有独立回归测试：

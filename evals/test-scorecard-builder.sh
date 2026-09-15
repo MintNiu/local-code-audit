@@ -9,8 +9,10 @@ results_dir="$tmp_dir/results"
 mkdir -p "$labels_dir" "$results_dir"
 
 commit="0123456789abcdef0123456789abcdef01234567"
+result_file="$results_dir/$commit.txt"
 cat >"$labels_dir/$commit.labels.tsv" <<EOF
 # commit	$commit
+# source_result	$result_file
 # review_status	complete
 # verdict	findings
 # finding_id	severity	path	line	status	notes
@@ -45,5 +47,16 @@ expected_header=$'commit\tmodel\ttemperature\tseed\tnum_ctx\tgold_p0_p1\tp0_p1_f
 grep -Fx "$expected_header" "$output" >/dev/null
 grep -F "$commit" "$output" | grep -F $'\t1\t1\t2\t1\ttrue\t12' >/dev/null
 "$repo_root/evals/summarize-scorecard.sh" "$output" | grep -F 'p0_p1_recall=100.0%' >/dev/null
+
+stale_output="$tmp_dir/stale.tsv"
+perl -0pi -e 's{# source_result\t[^\n]+}{# source_result\t/tmp/stale-result.txt}' "$labels_dir/$commit.labels.tsv"
+if "$repo_root/evals/build-scorecard.sh" --labels-dir "$labels_dir" --results-dir "$results_dir" --out "$stale_output" >/dev/null 2>&1; then
+  echo 'scorecard builder accepted a stale label/result pairing' >&2
+  exit 1
+fi
+[[ ! -e "$stale_output" ]] || {
+  echo 'scorecard builder left a partial output after stale pairing failure' >&2
+  exit 1
+}
 
 echo 'scorecard builder regression passed'

@@ -55,17 +55,20 @@ done
 [[ -d "$labels_dir" ]] || { echo "标签目录不存在: $labels_dir" >&2; exit 2; }
 [[ -d "$results_dir" ]] || { echo "结果目录不存在: $results_dir" >&2; exit 2; }
 
+temporary_output=""
+if [[ -n "$output_file" ]]; then
+  temporary_output="$(mktemp "${TMPDIR:-/tmp}/local-review-scorecard.XXXXXX")"
+  trap 'rm -f "$temporary_output"' EXIT
+fi
+
 emit() {
-  if [[ -n "$output_file" ]]; then
-    printf '%s\n' "$1" >>"$output_file"
+  if [[ -n "$temporary_output" ]]; then
+    printf '%s\n' "$1" >>"$temporary_output"
   else
     printf '%s\n' "$1"
   fi
 }
 
-if [[ -n "$output_file" ]]; then
-  : >"$output_file"
-fi
 emit $'commit\tmodel\ttemperature\tseed\tnum_ctx\tgold_p0_p1\tp0_p1_found\tpredicted_candidates\tfalse_positive_count\toutput_complete\telapsed_seconds'
 
 label_count=0
@@ -80,6 +83,17 @@ while IFS= read -r label_file; do
   }
   meta_file="$results_dir/$commit.meta.tsv"
   result_file="$results_dir/$commit.txt"
+  source_result="$(awk -F '\t' '$1 == "# source_result" { print $2; exit }' "$label_file")"
+  [[ -n "$source_result" ]] || {
+    echo "标签缺少 source_result，拒绝与结果目录猜测配对: $commit" >&2
+    exit 1
+  }
+  [[ "$source_result" == "$result_file" ]] || {
+    echo "标签与结果不匹配，拒绝混用不同评测运行: $commit" >&2
+    echo "  label source_result: $source_result" >&2
+    echo "  requested result:    $result_file" >&2
+    exit 1
+  }
   [[ -f "$meta_file" && -f "$result_file" ]] || {
     echo "缺少与标签对应的结果: $commit" >&2
     exit 1
@@ -118,4 +132,8 @@ while IFS= read -r label_file; do
 done < <(find "$labels_dir" -type f -name '*.labels.tsv' -print | LC_ALL=C sort)
 
 (( label_count > 0 )) || { echo "没有找到 review_status=complete 的标签" >&2; exit 1; }
+if [[ -n "$temporary_output" ]]; then
+  mv "$temporary_output" "$output_file"
+  temporary_output=""
+fi
 printf 'scorecard rows built: %d\n' "$label_count" >&2
