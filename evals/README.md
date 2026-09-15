@@ -61,6 +61,7 @@
 
 模板是私有 TSV。逐条阅读 `source_result` 后填写 `finding_id`、严重级别、仓库相对路径、行号、`confirmed`/`false-positive`/`uncertain` 和备注；脚本不会覆盖已有人工标签。
 模板同时记录 `source_result_sha256`；如果结果目录搬迁，只要内容哈希完全一致即可安全复用，结果内容改变则必须重新人工复核。
+旧版本模板没有该字段时，构建器会拒绝汇总；应重新运行模板生成器，不要手工猜测或补写哈希。
 模板中的 `# verdict` 还需要填写为 `clean` 或 `findings`：前者表示整次提交人工确认无问题，后者表示至少有一个已确认问题。`# review_status` 填写为 `pending` 或 `complete`；只有标为 `complete` 的提交才应进入汇总。若一次提交有多个模型发现，先逐条记录，再在汇总表中按根因去重为一行，避免把同一问题重复计算。
 
 标签完成后，可用 `build-scorecard.sh` 从 `.labels.tsv`、`.meta.tsv` 和结果文本自动生成汇总 TSV，避免手工抄录运行参数和候选数量：
