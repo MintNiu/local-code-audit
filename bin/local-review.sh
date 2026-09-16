@@ -1310,6 +1310,7 @@ split_diff_into_chunks() {
   local current_bytes=0
   local chunk_count=0
   local oversized=false
+  local oversized_details=""
   local unit_file unit_bytes
 
   mkdir -p "$unit_dir"
@@ -1353,7 +1354,11 @@ split_diff_into_chunks() {
       suffix = hunk_header
       sub(/^.*@@/, "", suffix)
       prefix = (first_section ? preamble : "")
-      limit = max_bytes - length(prefix) - length(header) - length(hunk_header) - 1
+      # The regenerated range can be longer than the original (for example,
+      # when a one-digit count becomes a ten-digit count). Reserve enough
+      # bytes for that header growth so the shell-side unit check never turns
+      # an otherwise splittable hunk into a false oversized failure.
+      limit = max_bytes - length(prefix) - length(header) - 64
       body = ""
       for (i = 2; i <= n; i++) {
         line = lines[i] "\n"
@@ -1433,6 +1438,7 @@ split_diff_into_chunks() {
     unit_bytes="$(wc -c <"$unit_file" | tr -d ' ')"
     if (( unit_bytes > chunk_bytes )); then
       oversized=true
+      oversized_details="${oversized_details}${unit_file}=${unit_bytes};"
     fi
     if [[ -z "$current_chunk" || ( "$current_bytes" -gt 0 && $((current_bytes + unit_bytes)) -gt chunk_bytes ) ]]; then
       chunk_count=$((chunk_count + 1))
@@ -1447,8 +1453,10 @@ split_diff_into_chunks() {
   printf '%s\n' "$chunk_count" >"$chunk_dir/count"
   if [[ "$oversized" == true ]]; then
     printf 'true\n' >"$chunk_dir/oversized"
+    printf '%s\n' "$oversized_details" >"$chunk_dir/oversized-details"
   else
     printf 'false\n' >"$chunk_dir/oversized"
+    : >"$chunk_dir/oversized-details"
   fi
 }
 
@@ -2407,6 +2415,9 @@ chunk_count="$(cat "$chunk_dir/count")"
 if [[ "$(cat "$chunk_dir/oversized")" == true ]]; then
   emit_preflight_failure_diagnostic "$build_preflight_file"
   echo "本地代码审查失败：存在无法在 ${effective_max_diff_bytes} 字节预算内拆分的单个文件/hunk；请缩小 diff、提供上下文或提高 OLLAMA_REVIEW_MAX_DIFF_BYTES 后重试。" >&2
+  if [[ -s "$chunk_dir/oversized-details" ]]; then
+    echo "无法拆分的分片单元（仅诊断）: $(cat "$chunk_dir/oversized-details")" >&2
+  fi
   exit 1
 fi
 if [[ "$chunk_count" -le 1 ]]; then

@@ -44,10 +44,10 @@ PATH="$fake_bin:$PATH" \
   "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
 
 expected="$(printf '%s\n' \
-  '@@ -1,86 +1,0 @@' \
-  '@@ -87,34 +1,40 @@' \
-  '@@ -121,0 +41,66 @@' \
-  '@@ -121,0 +107,14 @@' | sort)"
+  '@@ -1,81 +1,0 @@' \
+  '@@ -82,39 +1,32 @@' \
+  '@@ -121,0 +33,62 @@' \
+  '@@ -121,0 +95,26 @@' | sort)"
 actual="$(grep -o '@@ -[0-9,]* +[0-9,]* @@' "$capture" | sort -u)"
 [[ "$actual" == "$expected" ]] || {
   echo 'oversized hunk coordinates changed unexpectedly' >&2
