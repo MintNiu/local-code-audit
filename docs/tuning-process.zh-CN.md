@@ -245,7 +245,7 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 针对 `platform-file` 历史中反复出现的 OSS 凭据回退，又增加了配置预检：新增 YAML/Properties/INI/ENV/JSON/TOML 行中的 AccessKey、Secret、API key、密码和 Token 字面量会在本地先报告 P1；同文件可见的非本机 endpoint 会让普通密码/Token 键也纳入检查。空环境变量、示例占位符和 `#` 注释不触发，finding 只保留文件与行号，绝不回显凭据值。该规则仍是窄模式，不能替代密钥扫描器或运行时配置审计。
 
-2026-09-16 对 `platform-file:a9a1d4a` 的独立留出评测发现，模型将“删除数据库记录但同时移除对象存储清理”的真实 P1 漏报为 clean。该模式现已加入确定性预检：同一变更 hunk 中若保留 `fileRepository.delete(...)`、却删除 `fileStorageService.delete(...)`，运行器会在模型请求前报告对象生命周期/孤儿对象风险。评测标签链路同时支持 `missed` 状态，用于记录人工确认但模型没有输出的 P0/P1 根因；该提交的私有 scorecard 为 1 个 gold、0 个命中，召回率 0%，不会再被 clean 结果掩盖。
+2026-09-16 对 `platform-file:a9a1d4a` 的独立留出评测先发现模型将“删除数据库记录但同时移除对象存储清理”的真实 P1 漏报为 clean。该模式随后加入确定性预检：同一变更 hunk 中若保留 `fileRepository.delete(...)`、却删除 `fileStorageService.delete(...)`，运行器会在模型请求前报告对象生命周期/孤儿对象风险。评测标签链路同时支持 `missed` 状态，用于记录人工确认但模型没有输出的 P0/P1 根因；修复后重跑将单删和批删聚合为一个 `99-108` 行根因，私有 scorecard 恢复为 1/1 命中、0 误报。原始 0/1 漏报结果仍保留在私有目录，作为规则修复前的对照证据。
 
 随后补充了可预测默认凭据边界：新增配置中的 `${...:nacos}`、`${...:admin}`、`${...:password}`、`${...:root}`、`${...:123456}` 或 `${...:changeme}` 不再因为值较短而绕过预检；凭据键中长度至少 16 的非空默认值也会被识别，即使 endpoint 是 localhost。空默认值、短本地占位符和示例占位符仍保持 clean。该规则只作用于当前 diff 新增的凭据键，避免把未改动的历史配置伪装成当前提交问题。
 

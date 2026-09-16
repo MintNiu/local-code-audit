@@ -2191,7 +2191,15 @@ collect_storage_delete_preflight() {
   awk '
     function emit_hunk() {
       if (path != "" && removed_storage_delete && added_repository_delete) {
-        printf "P1 %s:%d - 删除文件元数据时移除了对象存储清理，可能留下可继续访问的孤儿对象。\n影响：数据库记录已删除但 OSS/本地对象仍长期占用空间并可能残留敏感内容，重试或批量删除会持续累积。\n修复建议：在删除元数据的同一事务流程中保留对象删除，或提交可靠的异步回收/补偿机制，并处理对象删除失败。\n验证方式：删除单个和批量文件后检查数据库记录及对象存储对象均不可访问，模拟对象删除失败并确认补偿任务最终完成。\n\n", path, repository_delete_line
+        if (!(path in lifecycle_paths)) {
+          lifecycle_paths[path] = 1
+          lifecycle_order[++lifecycle_count] = path
+          lifecycle_first[path] = repository_delete_line
+          lifecycle_last[path] = repository_delete_line
+        } else {
+          if (repository_delete_line < lifecycle_first[path]) lifecycle_first[path] = repository_delete_line
+          if (repository_delete_line > lifecycle_last[path]) lifecycle_last[path] = repository_delete_line
+        }
       }
     }
     function reset_hunk() {
@@ -2228,7 +2236,15 @@ collect_storage_delete_preflight() {
       if (prefix == "+") line_no++
       else if (prefix == " ") line_no++
     }
-    END { emit_hunk() }
+    END {
+      emit_hunk()
+      for (i = 1; i <= lifecycle_count; i++) {
+        path = lifecycle_order[i]
+        range = lifecycle_first[path]
+        if (lifecycle_last[path] != lifecycle_first[path]) range = range "-" lifecycle_last[path]
+        printf "P1 %s:%s - 删除文件元数据时移除了对象存储清理，可能留下可继续访问的孤儿对象。\n影响：数据库记录已删除但 OSS/本地对象仍长期占用空间并可能残留敏感内容，重试或批量删除会持续累积。\n修复建议：在删除元数据的同一事务流程中保留对象删除，或提交可靠的异步回收/补偿机制，并处理对象删除失败。\n验证方式：删除单个和批量文件后检查数据库记录及对象存储对象均不可访问，模拟对象删除失败并确认补偿任务最终完成。\n\n", path, range
+      }
+    }
   ' "$diff_file" >>"$output_file"
   dedup_preflight_blocks "$output_file"
 }
