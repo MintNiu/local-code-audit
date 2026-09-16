@@ -1487,7 +1487,6 @@ write_chunk_budget_metadata() {
 
 resolve_chunk_budget() {
   local configured_bytes="$1"
-  local diff_size="$2"
   local available_tokens probe_tokens remaining_tokens budget_bytes
   local probe_prompt adjusted=false
 
@@ -1495,34 +1494,35 @@ resolve_chunk_budget() {
   available_tokens=$(( num_ctx - num_predict - input_reserve_tokens ))
   probe_tokens=0
 
-  if (( diff_size > configured_bytes )); then
-    # Build the largest fixed part of a shard prompt (all changed paths and
-    # all deterministic preflight evidence). A real shard can only be
-    # smaller, so the resulting byte cap is conservative and deterministic.
-    sed 's/^/ M /' "$changed_paths_file" >"$chunk_budget_status_file"
-    probe_prompt="$(build_prompt '--- 当前审查分片：chunk-0001 ---' without-examples "$chunk_budget_status_file" "$build_preflight_file")"
-    probe_prompt="$probe_prompt
+  # Build the largest fixed part of a shard prompt (all project context,
+  # changed paths and deterministic preflight evidence). A real shard can
+  # only be smaller, so the resulting byte cap is conservative and
+  # deterministic. This probe is also needed for a small diff paired with a
+  # large README/context; otherwise the initial unsplit request could exceed
+  # the budget before the runner has a chance to fall back to shards.
+  sed 's/^/ M /' "$changed_paths_file" >"$chunk_budget_status_file"
+  probe_prompt="$(build_prompt '--- 当前审查分片：chunk-0001 ---' without-examples "$chunk_budget_status_file" "$build_preflight_file")"
+  probe_prompt="$probe_prompt
 --- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
 $(cat "$changed_paths_file")
 --- 变更路径元数据结束；未出现在当前分片的文件均视为未知，不得据此报告缺失 ---"
-    probe_tokens="$(estimate_prompt_tokens "$probe_prompt")"
-    if (( probe_tokens > available_tokens )); then
-      echo "本地代码审查失败：分片固定提示词估算需要 ${probe_tokens} 个输入 token，超过可用预算 ${available_tokens}；为避免静默截断，本次请求未发送。" >&2
-      write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
-      return 13
-    fi
-    remaining_tokens=$((available_tokens - probe_tokens))
-    budget_bytes=$((remaining_tokens * 3))
-    if (( budget_bytes < 1000 )); then
-      echo "本地代码审查失败：分片固定提示词仅剩 ${remaining_tokens} 个输入 token，不足以容纳最小 1000 字节分片；为避免静默截断，本次请求未发送。" >&2
-      write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
-      return 13
-    fi
-    if (( effective_max_diff_bytes > budget_bytes )); then
-      effective_max_diff_bytes="$budget_bytes"
-      adjusted=true
-      echo "本地代码审查：固定提示词占用 ${probe_tokens}/${available_tokens} 个输入 token，将分片预算从 ${configured_bytes} 调整为 ${effective_max_diff_bytes} 字节。" >&2
-    fi
+  probe_tokens="$(estimate_prompt_tokens "$probe_prompt")"
+  if (( probe_tokens > available_tokens )); then
+    echo "本地代码审查失败：分片固定提示词估算需要 ${probe_tokens} 个输入 token，超过可用预算 ${available_tokens}；为避免静默截断，本次请求未发送。" >&2
+    write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
+    return 13
+  fi
+  remaining_tokens=$((available_tokens - probe_tokens))
+  budget_bytes=$((remaining_tokens * 3))
+  if (( budget_bytes < 1000 )); then
+    echo "本地代码审查失败：分片固定提示词仅剩 ${remaining_tokens} 个输入 token，不足以容纳最小 1000 字节分片；为避免静默截断，本次请求未发送。" >&2
+    write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
+    return 13
+  fi
+  if (( effective_max_diff_bytes > budget_bytes )); then
+    effective_max_diff_bytes="$budget_bytes"
+    adjusted=true
+    echo "本地代码审查：固定提示词占用 ${probe_tokens}/${available_tokens} 个输入 token，将分片预算从 ${configured_bytes} 调整为 ${effective_max_diff_bytes} 字节。" >&2
   fi
 
   write_chunk_budget_metadata "$configured_bytes" "$effective_max_diff_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
@@ -2266,12 +2266,12 @@ if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   exit 1
 fi
 diff_bytes="$(wc -c <"$chunk_input_file" | tr -d ' ')"
-if ! resolve_chunk_budget "$max_diff_bytes" "$diff_bytes"; then
+if ! resolve_chunk_budget "$max_diff_bytes"; then
   emit_preflight_failure_diagnostic "$build_preflight_file"
   exit 1
 fi
 needs_split=false
-if (( diff_bytes > max_diff_bytes )); then
+if (( diff_bytes > effective_max_diff_bytes )); then
   needs_split=true
 fi
 
@@ -2283,7 +2283,7 @@ if [[ "$needs_split" != true ]]; then
     cat "$response_output_file"
     exit 0
   fi
-  if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 ]]; then
+  if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 && "$initial_status" -ne 13 ]]; then
     emit_preflight_failure_diagnostic "$build_preflight_file"
     exit 1
   fi
@@ -2299,7 +2299,7 @@ fi
 if [[ "$chunk_count" -le 1 ]]; then
   if [[ "$needs_split" == true ]]; then
     emit_preflight_failure_diagnostic "$build_preflight_file"
-    echo "本地代码审查失败：差异超过 ${max_diff_bytes} 字节，但无法按文件分片；请使用 --context 或缩小 diff 后重试。" >&2
+    echo "本地代码审查失败：差异超过 ${effective_max_diff_bytes} 字节，但无法按文件分片；请使用 --context 或缩小 diff 后重试。" >&2
   else
     emit_preflight_failure_diagnostic "$build_preflight_file"
   fi
