@@ -145,8 +145,41 @@ while IFS= read -r label_file; do
     [[ -n "$finding_id" && "$finding_id" != \#* ]] || continue
     case "$finding_status" in
       confirmed|false-positive) ;;
-      missed) continue ;;
-      *) continue ;;
+      missed)
+        [[ "$finding_severity" =~ ^P[01]$ ]] || {
+          echo "missed 标签只能记录 P0/P1 根因: $commit $finding_id" >&2
+          exit 1
+        }
+        [[ "$finding_path" =~ ^[^[:space:]]+$ && "$finding_line" =~ ^[1-9][0-9]*(-[1-9][0-9]*)?$ && -n "$finding_notes" ]] || {
+          echo "missed 标签缺少有效路径、行号或证据备注: $commit $finding_id" >&2
+          exit 1
+        }
+        # A missed row is an explicit false negative. If its location overlaps
+        # any visible candidate, the label contradicts the selected result and
+        # must be corrected before it can affect recall metrics.
+        if awk -v want_path="$finding_path" -v want_line="$finding_line" '
+          function range_start(value, fields) { split(value, fields, "-"); return fields[1] + 0 }
+          function range_end(value, fields) { split(value, fields, "-"); return (fields[2] == "" ? fields[1] : fields[2]) + 0 }
+          /^(P[0-3]|信息) / {
+            location = $2
+            candidate_path = location
+            sub(/:[0-9]+(-[0-9]+)?$/, "", candidate_path)
+            candidate_line = location
+            sub(/^.*:/, "", candidate_line)
+            if (candidate_path == want_path && range_end(candidate_line) >= range_start(want_line) && range_end(want_line) >= range_start(candidate_line)) found = 1
+          }
+          END { exit(found ? 0 : 1) }
+        ' "$result_file"; then
+          echo "missed 标签与结果候选重叠，拒绝把矛盾标签计入召回: $commit $finding_path:$finding_line" >&2
+          exit 1
+        fi
+        continue
+        ;;
+      uncertain) continue ;;
+      *)
+        echo "标签包含未知 finding status: $commit $finding_id" >&2
+        exit 1
+        ;;
     esac
     if ! awk -v want_path="$finding_path" -v want_line="$finding_line" '
       function range_start(value, fields) { split(value, fields, "-"); return fields[1] + 0 }

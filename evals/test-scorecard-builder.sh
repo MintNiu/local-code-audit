@@ -60,6 +60,34 @@ missed_output="$tmp_dir/missed.tsv"
 grep -F "$commit" "$missed_output" | grep -F $'\t2\t1\t2\t1\ttrue\t12' >/dev/null
 "$repo_root/evals/summarize-scorecard.sh" "$missed_output" | grep -F 'p0_p1_recall=50.0%' >/dev/null
 
+missed_overlap_labels="$tmp_dir/missed-overlap-labels"
+mkdir -p "$missed_overlap_labels"
+cp "$labels_dir/$commit.labels.tsv" "$missed_overlap_labels/$commit.labels.tsv"
+printf 'missed-overlap\tP1\tsrc/Example.java\t10\tmissed\t与结果候选重叠，必须拒绝\n' >>"$missed_overlap_labels/$commit.labels.tsv"
+missed_overlap_output="$tmp_dir/missed-overlap.tsv"
+if "$repo_root/evals/build-scorecard.sh" --labels-dir "$missed_overlap_labels" --results-dir "$results_dir" --out "$missed_overlap_output" >/dev/null 2>&1; then
+  echo 'scorecard builder accepted a missed label overlapping a visible candidate' >&2
+  exit 1
+fi
+[[ ! -e "$missed_overlap_output" ]] || {
+  echo 'scorecard builder left partial output after missed overlap failure' >&2
+  exit 1
+}
+
+missed_malformed_labels="$tmp_dir/missed-malformed-labels"
+mkdir -p "$missed_malformed_labels"
+cp "$labels_dir/$commit.labels.tsv" "$missed_malformed_labels/$commit.labels.tsv"
+printf 'missed-malformed\tP2\tsrc/Missed.java\t0\tmissed\t没有有效行号\n' >>"$missed_malformed_labels/$commit.labels.tsv"
+missed_malformed_output="$tmp_dir/missed-malformed.tsv"
+if "$repo_root/evals/build-scorecard.sh" --labels-dir "$missed_malformed_labels" --results-dir "$results_dir" --out "$missed_malformed_output" >/dev/null 2>&1; then
+  echo 'scorecard builder accepted malformed missed metadata' >&2
+  exit 1
+fi
+[[ ! -e "$missed_malformed_output" ]] || {
+  echo 'scorecard builder left partial output after malformed missed failure' >&2
+  exit 1
+}
+
 overcount_labels="$tmp_dir/overcount-labels"
 mkdir -p "$overcount_labels"
 cp "$labels_dir/$commit.labels.tsv" "$overcount_labels/$commit.labels.tsv"
