@@ -61,6 +61,7 @@ input_reserve_tokens="${OLLAMA_REVIEW_INPUT_RESERVE_TOKENS:-1024}"
 # Optional evaluation-only sidecar.  The normal CLI leaves no metadata files;
 # run-history.sh sets this to record any budget-aware effective shard size.
 resolved_chunk_bytes_file="${OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE:-}"
+chunk_budget_preflight_reserve_tokens=512
 active_request_body_file=""
 current_evidence_file=""
 
@@ -86,7 +87,7 @@ usage() {
 当差异超过 OLLAMA_REVIEW_MAX_DIFF_BYTES（默认 3000）时，会按文件再按 unified diff hunk 分片审查；任一分片失败，整次审查失败。
 分片前会按当前系统规则、项目上下文和确定性预检估算输入预算；若配置的分片过大，会自动收窄到可验证的字节上限，并在历史评测元数据中记录实际值。
 分片默认使用 OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180 和 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048，避免单个分片长时间占用服务；可按项目需要覆盖。
-整次审查默认受 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 限制（未设置时沿用单次超时），防止多个分片串行等待过久。
+整次审查默认受 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 限制；个人高性能入口默认 2400 秒，以覆盖多个分片串行审查，显式设置该变量仍可 fail-fast。
 Ollama 瞬时传输失败默认最多重试 2 次；可用 OLLAMA_REVIEW_RETRY_ATTEMPTS 覆盖，重试仍受整次审查总超时约束。
 请求会预留 OLLAMA_REVIEW_INPUT_RESERVE_TOKENS（默认 1024）个上下文 token，并把系统规则与用户材料一起估算；超出可用输入预算时会在请求前失败，不会返回可能被截断的审查结果。
 EOF
@@ -1326,29 +1327,57 @@ split_diff_into_chunks() {
       for (i = start; i <= end; i++) text = text lines[i] "\n"
       return text
     }
-    function write_hunk(header, hunk,    lines, n, i, hunk_header, body, line, limit, prefix, text) {
+    function write_hunk(header, hunk,    lines, n, i, hunk_header, body, line, limit, prefix, text,
+                         old_part, new_part, old_fields, new_fields, old_start, new_start,
+                         old_seen, new_seen, old_window, new_window, old_count, new_count,
+                         suffix, marker, emit_header) {
       # A single unified-diff hunk can be larger than the model budget (for
       # example, a newly added 600-line class). Keep every original line, but
-      # split the hunk body into ordered line windows. Repeating the file and
-      # hunk headers preserves the changed path and original line coordinates
-      # for each independent review request.
+      # split the hunk body into ordered line windows. Repeating the file
+      # header is safe, but each window must get a new @@ range: otherwise the
+      # model sees later lines at the first window coordinates.
       n = split(hunk, lines, "\n")
-      hunk_header = lines[1] "\n"
+      hunk_header = lines[1]
+      marker = hunk_header
+      sub(/^@@[[:space:]]+-/, "", marker)
+      split(marker, marker_parts, /[[:space:]]+\+/)
+      old_part = marker_parts[1]
+      new_part = marker_parts[2]
+      sub(/[[:space:]]+@@.*$/, "", new_part)
+      split(old_part, old_fields, ",")
+      split(new_part, new_fields, ",")
+      old_start = old_fields[1] + 0
+      new_start = new_fields[1] + 0
+      old_seen = 0
+      new_seen = 0
+      suffix = hunk_header
+      sub(/^.*@@/, "", suffix)
       prefix = (first_section ? preamble : "")
-      limit = max_bytes - length(prefix) - length(header) - length(hunk_header)
+      limit = max_bytes - length(prefix) - length(header) - length(hunk_header) - 1
       body = ""
       for (i = 2; i <= n; i++) {
         line = lines[i] "\n"
         if (body != "" && length(body) + length(line) > limit) {
-          text = header hunk_header body
+          old_count = old_window
+          new_count = new_window
+          emit_header = sprintf("@@ -%d,%d +%d,%d @@%s\n", old_start + old_seen, old_count, new_start + new_seen, new_count, suffix)
+          text = header emit_header body
           write_unit((first_section ? preamble : "") text)
           first_section = 0
+          old_seen += old_window
+          new_seen += new_window
           body = ""
+          old_window = 0
+          new_window = 0
         }
         body = body line
+        if (line ~ /^-/ && line !~ /^---/) old_window++
+        else if (line ~ /^\+/ && line !~ /^\+\+\+/) new_window++
+        else if (line ~ /^ /) { old_window++; new_window++ }
       }
       if (body != "") {
-        text = header hunk_header body
+        emit_header = sprintf("@@ -%d,%d +%d,%d @@%s\n", old_start + old_seen, old_window, new_start + new_seen, new_window, suffix)
+        text = header emit_header body
         write_unit((first_section ? preamble : "") text)
         first_section = 0
       }
@@ -1478,6 +1507,7 @@ write_chunk_budget_metadata() {
     printf 'effective_max_diff_bytes\t%s\n' "$effective_bytes"
     printf 'chunk_budget_probe_tokens\t%s\n' "$probe_tokens"
     printf 'chunk_budget_available_tokens\t%s\n' "$available_tokens"
+    printf 'chunk_budget_preflight_reserve_tokens\t%s\n' "$chunk_budget_preflight_reserve_tokens"
     printf 'chunk_budget_adjusted\t%s\n' "$adjusted"
   } >"$resolved_chunk_bytes_file"; then
     echo "本地代码审查失败：无法写入分片预算元数据文件: $resolved_chunk_bytes_file" >&2
@@ -1491,17 +1521,27 @@ resolve_chunk_budget() {
   local probe_prompt adjusted=false
 
   effective_max_diff_bytes="$configured_bytes"
-  available_tokens=$(( num_ctx - num_predict - input_reserve_tokens ))
+  # Shards use their own output budget.  Size the shard cap against that
+  # budget rather than the (usually larger) initial-request budget; the
+  # initial request still goes through check_prompt_budget independently.
+  available_tokens=$(( num_ctx - chunk_num_predict - input_reserve_tokens ))
   probe_tokens=0
 
-  # Build the largest fixed part of a shard prompt (all project context,
-  # changed paths and deterministic preflight evidence). A real shard can
-  # only be smaller, so the resulting byte cap is conservative and
-  # deterministic. This probe is also needed for a small diff paired with a
+  # Build the fixed part of a shard prompt (all project context and the full
+  # changed-path inventory). A real shard can only add its own file list and
+  # routed preflight evidence, so the reserve below keeps that variable part
+  # fail-closed. This probe is also needed for a small diff paired with a
   # large README/context; otherwise the initial unsplit request could exceed
   # the budget before the runner has a chance to fall back to shards.
   sed 's/^/ M /' "$changed_paths_file" >"$chunk_budget_status_file"
-  probe_prompt="$(build_prompt '--- 当前审查分片：chunk-0001 ---' without-examples "$chunk_budget_status_file" "$build_preflight_file")"
+  # Preflight findings are routed per shard later. Do not put the entire
+  # repository-wide finding list into this probe, or one large config diff can
+  # reject the whole review even though each shard would fit independently.
+  # The complete changed-path inventory below is scope metadata and must be
+  # retained, but it already covers every path.  Do not also put the complete
+  # inventory into the "current shard" status section: that duplicate used to
+  # reject large commits before the real, smaller shard prompts were built.
+  probe_prompt="$(build_prompt '--- 当前审查分片：chunk-0001 ---' without-examples "" /dev/null)"
   probe_prompt="$probe_prompt
 --- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
 $(cat "$changed_paths_file")
@@ -1512,7 +1552,9 @@ $(cat "$changed_paths_file")
     write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
     return 13
   fi
-  remaining_tokens=$((available_tokens - probe_tokens))
+  # Leave room for the shard-local preflight evidence and a small amount of
+  # prompt-shape variance. The actual request still passes check_prompt_budget.
+  remaining_tokens=$((available_tokens - probe_tokens - chunk_budget_preflight_reserve_tokens))
   budget_bytes=$((remaining_tokens * 3))
   if (( budget_bytes < 1000 )); then
     echo "本地代码审查失败：分片固定提示词仅剩 ${remaining_tokens} 个输入 token，不足以容纳最小 1000 字节分片；为避免静默截断，本次请求未发送。" >&2

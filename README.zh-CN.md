@@ -83,7 +83,7 @@ local-review --repo /path/to/repo
 
 字节预算只约束收集到的 Git diff；项目规则、显式上下文文件、README 和系统提示词还会额外占用上下文。它们较大时，应提高 `OLLAMA_REVIEW_NUM_CTX` 或进一步拆分审查。
 
-Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最多重试 2 次；可用 `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` 关闭，或按本机稳定性调整。脚本还会按保守字节估算检查系统规则、上下文和 diff 的输入预算；可用 `OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` 调整预留空间。
+Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最多重试 2 次；个人高性能入口默认给多分片串行审查预留 2400 秒，也可显式设置 `OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS` 让它更快失败。可用 `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` 关闭重试，或按本机稳定性调整。脚本还会按保守字节估算检查系统规则、上下文和 diff 的输入预算；可用 `OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` 调整预留空间。
 
 输出门禁会拒绝泛化或不完整总结：每个问题段都必须包含严重级别、能匹配变更文件或显式上下文文件的文件/行号，以及明确的“影响：”“修复建议：”“验证方式：”字段；只有在当前审查集合中唯一时才接受单独的文件名。
 
