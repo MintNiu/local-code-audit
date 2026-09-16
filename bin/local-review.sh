@@ -84,6 +84,7 @@ usage() {
 默认读取 ~/.local/share/local-review/examples.md 作为人工确认的 few-shot 示例。
 模型探测默认最多等待 10 秒，可用 OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS 覆盖；请求地址遵循 OLLAMA_HOST（默认 http://127.0.0.1:11434）。
 当差异超过 OLLAMA_REVIEW_MAX_DIFF_BYTES（默认 3000）时，会按文件再按 unified diff hunk 分片审查；任一分片失败，整次审查失败。
+分片前会按当前系统规则、项目上下文和确定性预检估算输入预算；若配置的分片过大，会自动收窄到可验证的字节上限，并在历史评测元数据中记录实际值。
 分片默认使用 OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180 和 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048，避免单个分片长时间占用服务；可按项目需要覆盖。
 整次审查默认受 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 限制（未设置时沿用单次超时），防止多个分片串行等待过久。
 Ollama 瞬时传输失败默认最多重试 2 次；可用 OLLAMA_REVIEW_RETRY_ATTEMPTS 覆盖，重试仍受整次审查总超时约束。
