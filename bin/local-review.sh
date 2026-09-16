@@ -2179,6 +2179,60 @@ collect_java_division_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_storage_delete_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # A metadata delete paired with the removal of the corresponding object
+  # delete is a high-confidence lifecycle regression. Keep this deliberately
+  # narrow: only the same changed hunk, with an explicit repository delete
+  # (added or unchanged context) and an explicit removed
+  # fileStorageService.delete call, is reported.
+  awk '
+    function emit_hunk() {
+      if (path != "" && removed_storage_delete && added_repository_delete) {
+        printf "P1 %s:%d - 删除文件元数据时移除了对象存储清理，可能留下可继续访问的孤儿对象。\n影响：数据库记录已删除但 OSS/本地对象仍长期占用空间并可能残留敏感内容，重试或批量删除会持续累积。\n修复建议：在删除元数据的同一事务流程中保留对象删除，或提交可靠的异步回收/补偿机制，并处理对象删除失败。\n验证方式：删除单个和批量文件后检查数据库记录及对象存储对象均不可访问，模拟对象删除失败并确认补偿任务最终完成。\n\n", path, repository_delete_line
+      }
+    }
+    function reset_hunk() {
+      removed_storage_delete = 0
+      added_repository_delete = 0
+      repository_delete_line = 0
+    }
+    /^diff --git / {
+      emit_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      reset_hunk()
+      next
+    }
+    /^@@ / {
+      emit_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      reset_hunk()
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" || prefix == "-" ? substr($0, 2) : $0)
+      if (prefix == "-" && text ~ /fileStorageService[[:space:]]*\.[[:space:]]*delete[[:space:]]*\(/) {
+        removed_storage_delete = 1
+      }
+      if ((prefix == "+" || prefix == " ") && text ~ /fileRepository[[:space:]]*\.[[:space:]]*delete[[:space:]]*\(/) {
+        added_repository_delete = 1
+        if (repository_delete_line == 0) repository_delete_line = line_no
+      }
+      if (prefix == "+") line_no++
+      else if (prefix == " ") line_no++
+    }
+    END { emit_hunk() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
@@ -2252,6 +2306,7 @@ fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
+collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames

@@ -51,6 +51,15 @@ grep -Fx "$expected_header" "$output" >/dev/null
 grep -F "$commit" "$output" | grep -F $'\t1\t1\t2\t1\ttrue\t12' >/dev/null
 "$repo_root/evals/summarize-scorecard.sh" "$output" | grep -F 'p0_p1_recall=100.0%' >/dev/null
 
+missed_labels="$tmp_dir/missed-labels"
+mkdir -p "$missed_labels"
+cp "$labels_dir/$commit.labels.tsv" "$missed_labels/$commit.labels.tsv"
+printf 'missed-1\tP1\tsrc/Missed.java\t42\tmissed\t人工复核确认，模型结果未输出\n' >>"$missed_labels/$commit.labels.tsv"
+missed_output="$tmp_dir/missed.tsv"
+"$repo_root/evals/build-scorecard.sh" --labels-dir "$missed_labels" --results-dir "$results_dir" --out "$missed_output" >/dev/null
+grep -F "$commit" "$missed_output" | grep -F $'\t2\t1\t2\t1\ttrue\t12' >/dev/null
+"$repo_root/evals/summarize-scorecard.sh" "$missed_output" | grep -F 'p0_p1_recall=50.0%' >/dev/null
+
 overcount_labels="$tmp_dir/overcount-labels"
 mkdir -p "$overcount_labels"
 cp "$labels_dir/$commit.labels.tsv" "$overcount_labels/$commit.labels.tsv"

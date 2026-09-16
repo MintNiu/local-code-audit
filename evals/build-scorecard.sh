@@ -123,13 +123,14 @@ while IFS= read -r label_file; do
     [[ -n "$value" ]] || { echo "metadata 缺少 $value_name: $commit" >&2; exit 1; }
   done
 
-  gold="$(awk -F '\t' '$1 !~ /^#/ && NF >= 6 && ($5 == "confirmed") && ($2 == "P0" || $2 == "P1") { n++ } END { print n + 0 }' "$label_file")"
-  found="$gold"
+  gold="$(awk -F '\t' '$1 !~ /^#/ && NF >= 6 && ($5 == "confirmed" || $5 == "missed") && ($2 == "P0" || $2 == "P1") { n++ } END { print n + 0 }' "$label_file")"
+  found="$(awk -F '\t' '$1 !~ /^#/ && NF >= 6 && $5 == "confirmed" && ($2 == "P0" || $2 == "P1") { n++ } END { print n + 0 }' "$label_file")"
   false_positives="$(awk -F '\t' '$1 !~ /^#/ && NF >= 6 && $5 == "false-positive" { n++ } END { print n + 0 }' "$label_file")"
   candidates="$(grep -Ec '^(P[0-3]|信息) ' "$result_file" || true)"
   [[ "$candidates" =~ ^[0-9]+$ ]] || { echo "无法统计候选数: $commit" >&2; exit 1; }
-  if [[ "$gold" -gt "$candidates" ]]; then
-    echo "人工确认 P0/P1 多于模型候选数: $commit" >&2
+  confirmed_count="$(awk -F '\t' '$1 !~ /^#/ && NF >= 6 && $5 == "confirmed" && ($2 == "P0" || $2 == "P1") { n++ } END { print n + 0 }' "$label_file")"
+  if [[ "$confirmed_count" -gt "$candidates" ]]; then
+    echo "模型命中的 P0/P1 多于结果候选数: $commit" >&2
     exit 1
   fi
   if [[ "$false_positives" -gt "$candidates" ]]; then
@@ -138,12 +139,13 @@ while IFS= read -r label_file; do
   fi
   # Candidate counts alone do not prove that the label was made from this
   # result. Require every confirmed/false-positive location to overlap a
-  # visible finding in the selected result, otherwise a same-sized stale
-  # label could still enter the scorecard.
+  # visible finding in the selected result. A `missed` row is the explicit
+  # human-recorded false negative and therefore must not overlap the result.
   while IFS=$'\t' read -r finding_id finding_severity finding_path finding_line finding_status finding_notes _; do
     [[ -n "$finding_id" && "$finding_id" != \#* ]] || continue
     case "$finding_status" in
       confirmed|false-positive) ;;
+      missed) continue ;;
       *) continue ;;
     esac
     if ! awk -v want_path="$finding_path" -v want_line="$finding_line" '

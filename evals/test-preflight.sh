@@ -1362,4 +1362,33 @@ grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.DeletedDTO'
   exit 1
 }
 
+cat >"$repo/src/main/java/com/example/api/client/StorageDelete.java" <<'EOF'
+package com.example.api.client;
+
+final class StorageDelete {
+    private final FileRepository fileRepository;
+    private final FileStorageService fileStorageService;
+
+    void delete(Long id) {
+        SysFile file = fileRepository.getRequired(id);
+        fileRepository.delete(id);
+        fileStorageService.delete(file.getObjectKey());
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/StorageDelete.java
+git -C "$repo" commit -qm storage-delete-base
+sed -i '' '/fileStorageService.delete(file.getObjectKey());/d' "$repo/src/main/java/com/example/api/client/StorageDelete.java"
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+storage_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$storage_output" | grep -F '删除文件元数据时移除了对象存储清理' >/dev/null || {
+  echo 'missing storage-delete lifecycle preflight' >&2
+  printf '%s\n' "$storage_output" >&2
+  exit 1
+}
+
 printf 'preflight regression passed\n'

@@ -245,6 +245,8 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 针对 `platform-file` 历史中反复出现的 OSS 凭据回退，又增加了配置预检：新增 YAML/Properties/INI/ENV/JSON/TOML 行中的 AccessKey、Secret、API key、密码和 Token 字面量会在本地先报告 P1；同文件可见的非本机 endpoint 会让普通密码/Token 键也纳入检查。空环境变量、示例占位符和 `#` 注释不触发，finding 只保留文件与行号，绝不回显凭据值。该规则仍是窄模式，不能替代密钥扫描器或运行时配置审计。
 
+2026-09-16 对 `platform-file:a9a1d4a` 的独立留出评测发现，模型将“删除数据库记录但同时移除对象存储清理”的真实 P1 漏报为 clean。该模式现已加入确定性预检：同一变更 hunk 中若保留 `fileRepository.delete(...)`、却删除 `fileStorageService.delete(...)`，运行器会在模型请求前报告对象生命周期/孤儿对象风险。评测标签链路同时支持 `missed` 状态，用于记录人工确认但模型没有输出的 P0/P1 根因；该提交的私有 scorecard 为 1 个 gold、0 个命中，召回率 0%，不会再被 clean 结果掩盖。
+
 随后补充了可预测默认凭据边界：新增配置中的 `${...:nacos}`、`${...:admin}`、`${...:password}`、`${...:root}`、`${...:123456}` 或 `${...:changeme}` 不再因为值较短而绕过预检；凭据键中长度至少 16 的非空默认值也会被识别，即使 endpoint 是 localhost。空默认值、短本地占位符和示例占位符仍保持 clean。该规则只作用于当前 diff 新增的凭据键，避免把未改动的历史配置伪装成当前提交问题。
 
 对真实 `platform-file:7b62671` 的两次复测还验证了分片聚合修复：三份配置中的 6 个凭据行均被完整保留，结果文件 SHA-256 两次相同，且没有只有首行的残缺段落。该证据只证明这一个历史样本的确定性路径，不代表所有配置格式或模型发现都已达到 100% 召回。

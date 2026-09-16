@@ -12,7 +12,7 @@
 该行为由 `./evals/test-history.sh` 做无模型回归验证。
 准备历史 diff 时同样会禁用仓库配置的 `textconv` 和 fsmonitor，确保评测过程不会执行目标仓库的可配置 Git 命令。
 每个提交的 `.meta.tsv` 会记录 profile、配置的模型选择、实际解析到的 `resolved_model`、temperature、seed、top-k/top-p、上下文/输出预算、diff 字节预算、`keep_alive`，以及 `diff_sha256`、`result_sha256`、workflow/脚本/SYSTEM 哈希，避免个人版与基线结果混用并支持严格复现。确定性构建预检命中时，结果会直接合并到最终问题清单，不依赖模型是否复述；该来源仍只覆盖脚本能证明的同仓库/显式 context 类型引用。
-当前还会对新增代码中把 token/secret 直接拼进 URL 查询参数或路径的明确模式、通过 `TOKEN_HEADER`（含先赋给局部变量的别名）从 URL 查询参数读取令牌的模式，以及新增配置中的硬编码凭据（含指向非本机 endpoint 的高置信配置项）做确定性预检；凭据值不会写入 finding。模型若重复报告同一位置的该问题，合并阶段会只保留一条。对同一位置的多个独立根因，只有覆盖多个根因的总括条目与拆分条目同时存在时才去掉总括条目。
+当前还会对新增代码中把 token/secret 直接拼进 URL 查询参数或路径的明确模式、通过 `TOKEN_HEADER`（含先赋给局部变量的别名）从 URL 查询参数读取令牌的模式、新增配置中的硬编码凭据（含指向非本机 endpoint 的高置信配置项），以及同一 hunk 中移除 `fileStorageService.delete(...)` 但仍删除 `fileRepository` 元数据的对象生命周期回归做确定性预检；凭据值不会写入 finding。模型若重复报告同一位置的该问题，合并阶段会只保留一条。对同一位置的多个独立根因，只有覆盖多个根因的总括条目与拆分条目同时存在时才去掉总括条目。
 对于同一提交中可直接证明的 Java `Integer` 除法空值拆箱和分母为零模式，也会执行窄范围确定性预检；普通 `int` 运算和带可见保护的代码不在该规则内。这样 `java-divide` 与 `java-token-url` 不再依赖模型某次采样是否恰好命中，模型仍负责发现其它上下文相关问题。
 切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
 如果评测的是删除或修改公共契约的提交，可重复传入 `--context <file>`，把下游仓库的调用方、POM 或测试作为只读证据；这些路径会记录在私有 `.meta.tsv` 中。未提供下游 context 时，结果只能按单仓库范围解释。
@@ -59,7 +59,7 @@
   --labels-dir ~/.local/share/local-review/evals/platform-api-labels
 ```
 
-模板是私有 TSV。逐条阅读 `source_result` 后填写 `finding_id`、严重级别、仓库相对路径、行号、`confirmed`/`false-positive`/`uncertain` 和备注；脚本不会覆盖已有人工标签。
+模板是私有 TSV。逐条阅读 `source_result` 后填写 `finding_id`、严重级别、仓库相对路径、行号、`confirmed`/`missed`/`false-positive`/`uncertain` 和备注；`missed` 用于记录人工确认但模型没有输出的 P0/P1 根因，脚本不会覆盖已有人工标签。
 模板同时记录 `source_result_sha256`；如果结果目录搬迁，只要内容哈希完全一致即可安全复用，结果内容改变则必须重新人工复核。
 旧版本模板没有该字段时，构建器会拒绝汇总；应重新运行模板生成器，不要手工猜测或补写哈希。
 
@@ -85,7 +85,7 @@
   ~/.local/share/local-review/evals/platform-api-scorecard.tsv
 ```
 
-构建器只输出 `review_status=complete` 且运行成功的提交；它会校验标签中的 `# source_result_sha256` 与所选结果文件内容完全一致，并逐条校验 confirmed/false-positive 的文件和行号与结果候选重叠，允许安全搬迁同一结果，拒绝把旧 profile/旧运行的标签套到不同结果上。`uncertain` 不计入指标，缺少结果、元数据或字段不完整会 fail-closed；失败时不会留下半成品输出。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
+构建器只输出 `review_status=complete` 且运行成功的提交；它会校验标签中的 `# source_result_sha256` 与所选结果文件内容完全一致，并逐条校验 confirmed/false-positive 的文件和行号与结果候选重叠，允许安全搬迁同一结果，拒绝把旧 profile/旧运行的标签套到不同结果上。`missed` 是人工记录的 false negative，不要求与结果候选重叠，但必须填写真实路径、行号和证据备注；`uncertain` 不计入指标。缺少结果、元数据或字段不完整会 fail-closed；失败时不会留下半成品输出。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
 
 1. 固定至少 20 个真实历史提交作为评测集，并按提交切分训练示例和留出评测集。
    不要随机打散相邻提交；优先按功能簇（例如同一接口迁移、同一安全修复链）整体分配到 train/dev/holdout，避免相邻提交泄漏。

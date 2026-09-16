@@ -119,6 +119,7 @@ while IFS= read -r label_file; do
     [[ -n "$finding_id" && "$finding_id" != \#* ]] || continue
     case "$finding_status" in
       confirmed|false-positive) ;;
+      missed) continue ;;
       *) continue ;;
     esac
     if ! awk -v want_path="$finding_path" -v want_line="$finding_line" '

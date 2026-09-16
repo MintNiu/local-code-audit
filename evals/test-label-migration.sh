@@ -23,6 +23,7 @@ for commit in "$equal_commit" "$changed_commit"; do
 # verdict	findings
 # finding_id	severity	path	line	status	notes
 confirmed-1	P1	src/Example.java	10	confirmed	代码证据
+missed-1	P1	src/Missed.java	42	missed	人工确认但模型未输出
 EOF
 done
 printf '未发现阻塞问题\n' >"$from_dir/$inconsistent_commit.txt"
