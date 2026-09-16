@@ -58,6 +58,9 @@ retry_attempts="${OLLAMA_REVIEW_RETRY_ATTEMPTS:-2}"
 # over-budget request before it reaches Ollama instead of allowing the model
 # to silently truncate the system rules or diff.
 input_reserve_tokens="${OLLAMA_REVIEW_INPUT_RESERVE_TOKENS:-1024}"
+# Optional evaluation-only sidecar.  The normal CLI leaves no metadata files;
+# run-history.sh sets this to record any budget-aware effective shard size.
+resolved_chunk_bytes_file="${OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE:-}"
 active_request_body_file=""
 current_evidence_file=""
 
@@ -983,11 +986,10 @@ build_prompt() {
   printf '\n--- 以上材料结束；审查规则已作为系统指令发送 ---\n'
 }
 
-check_prompt_budget() {
+estimate_prompt_tokens() {
   local prompt="$1"
   local system_bytes prompt_bytes system_ascii_bytes prompt_ascii_bytes
-  local system_nonascii_bytes prompt_nonascii_bytes estimated_input_tokens available_input_tokens
-
+  local system_nonascii_bytes prompt_nonascii_bytes
   # Ollama's context limit is token based while this script deliberately does
   # not depend on a model-specific tokenizer.  Estimate ASCII and non-ASCII
   # UTF-8 at roughly three bytes per token.  This is conservative
@@ -1002,7 +1004,14 @@ check_prompt_budget() {
   prompt_ascii_bytes="$(printf '%s' "$prompt" | LC_ALL=C tr -cd '\001-\177' | wc -c | tr -d ' ')"
   system_nonascii_bytes=$((system_bytes - system_ascii_bytes))
   prompt_nonascii_bytes=$((prompt_bytes - prompt_ascii_bytes))
-  estimated_input_tokens=$(( (system_ascii_bytes + 2) / 3 + (prompt_ascii_bytes + 2) / 3 + (system_nonascii_bytes + 2) / 3 + (prompt_nonascii_bytes + 2) / 3 ))
+  printf '%s\n' "$(( (system_ascii_bytes + 2) / 3 + (prompt_ascii_bytes + 2) / 3 + (system_nonascii_bytes + 2) / 3 + (prompt_nonascii_bytes + 2) / 3 ))"
+}
+
+check_prompt_budget() {
+  local prompt="$1"
+  local estimated_input_tokens available_input_tokens
+
+  estimated_input_tokens="$(estimate_prompt_tokens "$prompt")"
   available_input_tokens=$(( num_ctx - num_predict - input_reserve_tokens ))
 
   if (( estimated_input_tokens > available_input_tokens )); then
@@ -1453,6 +1462,70 @@ merge_preflight_findings() {
   cat "$merged_file" >"$output_file"
   rm -f "$merged_file"
   printf 'findings\n' >"$kind_file"
+}
+
+write_chunk_budget_metadata() {
+  local configured_bytes="$1"
+  local effective_bytes="$2"
+  local probe_tokens="$3"
+  local available_tokens="$4"
+  local adjusted="$5"
+
+  [[ -n "$resolved_chunk_bytes_file" ]] || return 0
+  if ! {
+    printf 'configured_max_diff_bytes\t%s\n' "$configured_bytes"
+    printf 'effective_max_diff_bytes\t%s\n' "$effective_bytes"
+    printf 'chunk_budget_probe_tokens\t%s\n' "$probe_tokens"
+    printf 'chunk_budget_available_tokens\t%s\n' "$available_tokens"
+    printf 'chunk_budget_adjusted\t%s\n' "$adjusted"
+  } >"$resolved_chunk_bytes_file"; then
+    echo "本地代码审查失败：无法写入分片预算元数据文件: $resolved_chunk_bytes_file" >&2
+    return 11
+  fi
+}
+
+resolve_chunk_budget() {
+  local configured_bytes="$1"
+  local diff_size="$2"
+  local available_tokens probe_tokens remaining_tokens budget_bytes
+  local probe_prompt adjusted=false
+
+  effective_max_diff_bytes="$configured_bytes"
+  available_tokens=$(( num_ctx - num_predict - input_reserve_tokens ))
+  probe_tokens=0
+
+  if (( diff_size > configured_bytes )); then
+    # Build the largest fixed part of a shard prompt (all changed paths and
+    # all deterministic preflight evidence). A real shard can only be
+    # smaller, so the resulting byte cap is conservative and deterministic.
+    sed 's/^/ M /' "$changed_paths_file" >"$chunk_budget_status_file"
+    probe_prompt="$(build_prompt '--- 当前审查分片：chunk-0001 ---' without-examples "$chunk_budget_status_file" "$build_preflight_file")"
+    probe_prompt="$probe_prompt
+--- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
+$(cat "$changed_paths_file")
+--- 变更路径元数据结束；未出现在当前分片的文件均视为未知，不得据此报告缺失 ---"
+    probe_tokens="$(estimate_prompt_tokens "$probe_prompt")"
+    if (( probe_tokens > available_tokens )); then
+      echo "本地代码审查失败：分片固定提示词估算需要 ${probe_tokens} 个输入 token，超过可用预算 ${available_tokens}；为避免静默截断，本次请求未发送。" >&2
+      write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
+      return 13
+    fi
+    remaining_tokens=$((available_tokens - probe_tokens))
+    budget_bytes=$((remaining_tokens * 3))
+    if (( budget_bytes < 1000 )); then
+      echo "本地代码审查失败：分片固定提示词仅剩 ${remaining_tokens} 个输入 token，不足以容纳最小 1000 字节分片；为避免静默截断，本次请求未发送。" >&2
+      write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
+      return 13
+    fi
+    if (( effective_max_diff_bytes > budget_bytes )); then
+      effective_max_diff_bytes="$budget_bytes"
+      adjusted=true
+      echo "本地代码审查：固定提示词占用 ${probe_tokens}/${available_tokens} 个输入 token，将分片预算从 ${configured_bytes} 调整为 ${effective_max_diff_bytes} 字节。" >&2
+    fi
+  fi
+
+  write_chunk_budget_metadata "$configured_bytes" "$effective_max_diff_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
+  return 0
 }
 
 emit_preflight_failure_diagnostic() {
@@ -2116,8 +2189,9 @@ build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXX
 preflight_emitted_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-emitted.XXXXXX")"
 java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
+chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$java_main_source_index"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -2191,6 +2265,10 @@ if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   exit 1
 fi
 diff_bytes="$(wc -c <"$chunk_input_file" | tr -d ' ')"
+if ! resolve_chunk_budget "$max_diff_bytes" "$diff_bytes"; then
+  emit_preflight_failure_diagnostic "$build_preflight_file"
+  exit 1
+fi
 needs_split=false
 if (( diff_bytes > max_diff_bytes )); then
   needs_split=true
@@ -2210,11 +2288,11 @@ if [[ "$needs_split" != true ]]; then
   fi
 fi
 
-split_diff_into_chunks "$chunk_input_file" "$chunk_dir" "$max_diff_bytes"
+split_diff_into_chunks "$chunk_input_file" "$chunk_dir" "$effective_max_diff_bytes"
 chunk_count="$(cat "$chunk_dir/count")"
 if [[ "$(cat "$chunk_dir/oversized")" == true ]]; then
   emit_preflight_failure_diagnostic "$build_preflight_file"
-  echo "本地代码审查失败：存在无法在 ${max_diff_bytes} 字节预算内拆分的单个文件/hunk；请缩小 diff、提供上下文或提高 OLLAMA_REVIEW_MAX_DIFF_BYTES 后重试。" >&2
+  echo "本地代码审查失败：存在无法在 ${effective_max_diff_bytes} 字节预算内拆分的单个文件/hunk；请缩小 diff、提供上下文或提高 OLLAMA_REVIEW_MAX_DIFF_BYTES 后重试。" >&2
   exit 1
 fi
 if [[ "$chunk_count" -le 1 ]]; then
@@ -2230,7 +2308,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$java_main_source_index" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"

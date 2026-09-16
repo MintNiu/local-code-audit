@@ -50,6 +50,8 @@ PATH="$fake_bin:$PATH" \
 
 grep -F "跳过重复提交清单行：$commit" "$stderr_file" >/dev/null
 grep -F $'status\tcompleted' "$out_dir/$commit.meta.tsv" >/dev/null
+grep -F $'configured_max_diff_bytes\t60000' "$out_dir/$commit.meta.tsv" >/dev/null
+grep -F $'effective_max_diff_bytes\t60000' "$out_dir/$commit.meta.tsv" >/dev/null
 [[ -s "$out_dir/$commit.txt" ]]
 
 "$repo_root/evals/prepare-history-labels.sh" \
