@@ -1930,7 +1930,43 @@ collect_security_preflight() {
         query_token_emitted_lines[at_line] = 1
       }
     }
+    function known_query_token_arg(text, scope) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", text)
+      sub(/[),;[:space:]]+$/, "", text)
+      if (tolower(text) ~ /^["\047](x[-_]?token|token|authorization|access[-_]?token|refresh[-_]?token|session[-_]?key|jwt|api[-_]?key)["\047]$/) return 1
+      if (text == "TOKEN_HEADER") return 1
+      return known_token_alias(text, scope)
+    }
     function record_token_parameter_alias(text, at_line, assignment, fields, count, name, scope, rhs) {
+      if (pending_token_name != "") {
+        rhs = text
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
+        sub(/[;[:space:]]*$/, "", rhs)
+        if (rhs ~ /^(TOKEN_HEADER|"x-token"|[A-Za-z_][A-Za-z0-9_]*)$/) {
+          if (rhs == "TOKEN_HEADER" || rhs == "\"x-token\"" || known_token_alias(rhs, pending_token_scope)) {
+            token_parameter_vars[pending_token_name SUBSEP pending_token_scope] = 1
+          }
+          pending_token_name = ""
+          pending_token_scope = ""
+          return
+        }
+        pending_token_name = ""
+        pending_token_scope = ""
+      }
+      if (text ~ /=[[:space:]]*$/) {
+        assignment = text
+        sub(/[[:space:]]*=[[:space:]]*$/, "", assignment)
+        if (assignment ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_<>?, \[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/ ||
+            assignment ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
+          count = split(assignment, fields, /[[:space:]]+/)
+          name = fields[count]
+          if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            pending_token_name = name
+            pending_token_scope = scope_for_line(at_line)
+          }
+        }
+        return
+      }
       if (text !~ /=[[:space:]]*(TOKEN_HEADER|"x-token"|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;?[[:space:]]*$/) return
       assignment = text
       sub(/[[:space:]]*=.*/, "", assignment)
@@ -1951,6 +1987,35 @@ collect_security_preflight() {
       # Track only a direct assignment from a clearly secret-like variable.
       # This catches `String queryValue = token` followed by URL assembly
       # without treating ordinary IDs or arbitrary data as credentials.
+      if (pending_url_secret_name != "") {
+        rhs = text
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
+        sub(/[;[:space:]]*$/, "", rhs)
+        if (rhs ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+          if (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/ || known_url_secret_alias(rhs, pending_url_secret_scope)) {
+            url_secret_vars[pending_url_secret_name SUBSEP pending_url_secret_scope] = 1
+          }
+          pending_url_secret_name = ""
+          pending_url_secret_scope = ""
+          return
+        }
+        pending_url_secret_name = ""
+        pending_url_secret_scope = ""
+      }
+      if (text ~ /=[[:space:]]*$/) {
+        lhs = text
+        sub(/[[:space:]]*=[[:space:]]*$/, "", lhs)
+        if (lhs ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_<>?, \[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/ ||
+            lhs ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
+          count = split(lhs, fields, /[[:space:]]+/)
+          name = fields[count]
+          if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            pending_url_secret_name = name
+            pending_url_secret_scope = scope_for_line(at_line)
+          }
+        }
+        return
+      }
       if (text !~ /=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;?[[:space:]]*$/) return
       assignment = text
       lhs = assignment
@@ -1980,6 +2045,13 @@ collect_security_preflight() {
       path_guard = 0
       path_emitted = 0
       for (name in path_candidate_vars) delete path_candidate_vars[name]
+      pending_token_name = ""
+      pending_token_scope = ""
+      pending_url_secret_name = ""
+      pending_url_secret_scope = ""
+      pending_query_call = 0
+      pending_query_added = 0
+      pending_query_scope = ""
     }
     function reset_file(    name) {
       for (name in token_parameter_vars) delete token_parameter_vars[name]
@@ -2120,6 +2192,28 @@ collect_security_preflight() {
         record_path_candidate(code, prefix == "+", line_no)
         record_path_access(code, prefix == "+")
         if (code ~ /\.normalize[[:space:]]*\(|\.toRealPath[[:space:]]*\(|\.getCanonicalPath[[:space:]]*\(|\.startsWith[[:space:]]*\(/) path_guard = 1
+      }
+      # Java calls are often formatted over three lines. Keep a tiny state
+      # machine so `getParameter(\n  queryName\n)` receives the same
+      # deterministic token check as its one-line form. Only a changed
+      # argument or a changed call starts a report.
+      if ((prefix == "+" || prefix == " ") && pending_query_call) {
+        pending_query_arg = code
+        if (known_query_token_arg(pending_query_arg, pending_query_scope)) {
+          if (pending_query_added || prefix == "+") emit_query_token(line_no)
+          pending_query_call = 0
+          pending_query_added = 0
+          pending_query_scope = ""
+        } else if (pending_query_arg !~ /^[[:space:]]*$/) {
+          pending_query_call = 0
+          pending_query_added = 0
+          pending_query_scope = ""
+        }
+      }
+      if ((prefix == "+" || prefix == " ") && code ~ /getParameter[[:space:]]*\([[:space:]]*$/) {
+        pending_query_call = 1
+        pending_query_added = (prefix == "+")
+        pending_query_scope = scope_for_line(line_no)
       }
       if (prefix == "+") {
         added = substr($0, 2)

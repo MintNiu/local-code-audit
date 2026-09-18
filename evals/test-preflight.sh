@@ -204,9 +204,13 @@ final class QueryTokenParamAlias {
     private static final String TOKEN_HEADER = "x-token";
 
     String read(HttpServletRequest request) {
-        String parameterName = TOKEN_HEADER;
-        String queryName = parameterName;
-        return request.getParameter(queryName);
+        String parameterName =
+                TOKEN_HEADER;
+        String queryName =
+                parameterName;
+        return request.getParameter(
+                queryName
+        );
     }
 }
 EOF
@@ -226,8 +230,10 @@ package com.example.api.client;
 
 final class UrlSecretAlias {
     String build(String token) {
-        String queryValue = token;
-        String finalValue = queryValue;
+        String queryValue =
+                token;
+        String finalValue =
+                queryValue;
         return "https://internal.example/download?x-token=" + finalValue;
     }
 }
