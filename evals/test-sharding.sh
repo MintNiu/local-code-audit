@@ -9,6 +9,7 @@ trap 'rm -rf "$fixture_root"' EXIT
 repo="$fixture_root/repo"
 fake_bin="$fixture_root/bin"
 capture="$fixture_root/requests"
+trace_file="$fixture_root/trace.tsv"
 mkdir -p "$repo" "$fake_bin"
 git -C "$repo" init -q
 git -C "$repo" config user.email test@example.invalid
@@ -44,6 +45,7 @@ chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
 sharded_output="$(PATH="$fake_bin:$PATH" \
   LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_TRACE_FILE="$trace_file" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review \
   OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
   OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
@@ -68,5 +70,18 @@ shard_finding_count="$(printf '%s\n' "$sharded_output" | grep -c '^P1 A.txt:1' |
   printf '%s\n' "$sharded_output" >&2
   exit 1
 }
+
+grep -E '^chunk_count[[:space:]]+[2-9][0-9]*$' "$trace_file" >/dev/null || {
+  echo 'sharding trace did not record the generated chunk count' >&2
+  cat "$trace_file" >&2
+  exit 1
+}
+if awk -F '\t' '$1 == "chunk_status" && ($3 != 0 || $4 !~ /^[0-9]+$/) { bad = 1 } END { exit(bad ? 1 : 0) }' "$trace_file"; then
+  :
+else
+  echo 'sharding trace recorded a failed or malformed chunk status' >&2
+  cat "$trace_file" >&2
+  exit 1
+fi
 
 echo 'diff sharding regression passed'

@@ -250,6 +250,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   exit_code=0
   resolved_model_file="$temp_root/$commit.resolved-model"
   resolved_chunk_bytes_file="$temp_root/$commit.chunk-budget"
+  resolved_trace_file="$temp_root/$commit.trace"
   resolved_model="unresolved"
   review_context_files=()
   context_hashes=()
@@ -286,6 +287,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   else
     LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_file" \
     OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE="$resolved_chunk_bytes_file" \
+    OLLAMA_REVIEW_TRACE_FILE="$resolved_trace_file" \
       "$review_script" "${review_args[@]}" >"$result_file" 2>&1 || exit_code=$?
   fi
   end="$(date +%s)"
@@ -333,6 +335,12 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
         [[ -n "$budget_key" && -n "$budget_value" ]] || continue
         printf '%s\t%s\n' "$budget_key" "$budget_value"
       done <"$resolved_chunk_bytes_file"
+    fi
+    if [[ -s "$resolved_trace_file" ]]; then
+      while IFS= read -r trace_line; do
+        [[ -n "$trace_line" ]] || continue
+        printf '%s\n' "$trace_line"
+      done <"$resolved_trace_file"
     fi
     printf 'keep_alive\t%s\n' "$profile_keep_alive"
     if (( ${#context_origins[@]} > 0 )); then

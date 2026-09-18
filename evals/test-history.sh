@@ -51,6 +51,7 @@ PATH="$fake_bin:$PATH" \
 grep -F "跳过重复提交清单行：$commit" "$stderr_file" >/dev/null
 grep -F $'status\tcompleted' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'configured_max_diff_bytes\t60000' "$out_dir/$commit.meta.tsv" >/dev/null
+grep -F $'chunk_count\t1' "$out_dir/$commit.meta.tsv" >/dev/null
 awk -F '\t' '$1 == "effective_max_diff_bytes" && $2 ~ /^[0-9]+$/ && $2 <= 60000 { found = 1 } END { exit(found ? 0 : 1) }' \
   "$out_dir/$commit.meta.tsv"
 [[ -s "$out_dir/$commit.txt" ]]

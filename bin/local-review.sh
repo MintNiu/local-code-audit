@@ -61,9 +61,17 @@ input_reserve_tokens="${OLLAMA_REVIEW_INPUT_RESERVE_TOKENS:-1024}"
 # Optional evaluation-only sidecar.  The normal CLI leaves no metadata files;
 # run-history.sh sets this to record any budget-aware effective shard size.
 resolved_chunk_bytes_file="${OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE:-}"
+review_trace_file="${OLLAMA_REVIEW_TRACE_FILE:-}"
 chunk_budget_preflight_reserve_tokens=512
 active_request_body_file=""
 current_evidence_file=""
+
+write_review_trace() {
+  [[ -n "$review_trace_file" ]] || return 0
+  # Trace data is diagnostic only. A failed sidecar must never turn a valid
+  # review into a false failure, so intentionally ignore write errors here.
+  printf '%s\n' "$*" >>"$review_trace_file" 2>/dev/null || true
+}
 
 usage() {
   cat <<'EOF'
@@ -3112,8 +3120,12 @@ fi
 
 if [[ "$needs_split" != true ]]; then
   initial_status=0
+  initial_start="$(date +%s)"
   run_one_prompt "$(build_prompt "$diff_material")" "$response_file" "$response_output_file" "$response_kind_file" "$changed_paths_file" "$timeout_seconds" || initial_status=$?
+  printf -v trace_line 'initial_status\t%s\t%s' "$initial_status" "$(( $(date +%s) - initial_start ))"
+  write_review_trace "$trace_line"
   if [[ "$initial_status" -eq 0 ]]; then
+    write_review_trace $'chunk_count\t1'
     merge_preflight_findings "$response_output_file" "$response_kind_file" "$build_preflight_file"
     cat "$response_output_file"
     exit 0
@@ -3126,6 +3138,8 @@ fi
 
 split_diff_into_chunks "$chunk_input_file" "$chunk_dir" "$effective_max_diff_bytes"
 chunk_count="$(cat "$chunk_dir/count")"
+printf -v trace_line 'chunk_count\t%s' "$chunk_count"
+write_review_trace "$trace_line"
 if [[ "$(cat "$chunk_dir/oversized")" == true ]]; then
   emit_preflight_failure_diagnostic "$build_preflight_file"
   echo "本地代码审查失败：存在无法在 ${effective_max_diff_bytes} 字节预算内拆分的单个文件/hunk；请缩小 diff、提供上下文或提高 OLLAMA_REVIEW_MAX_DIFF_BYTES 后重试。" >&2
@@ -3231,7 +3245,10 @@ $(cat "$changed_paths_file")
   chunk_status=0
   original_num_predict="$num_predict"
   num_predict="$chunk_num_predict"
+  chunk_start="$(date +%s)"
   run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_status=$?
+  printf -v trace_line 'chunk_status\t%s\t%s\t%s' "$chunk_name" "$chunk_status" "$(( $(date +%s) - chunk_start ))"
+  write_review_trace "$trace_line"
   num_predict="$original_num_predict"
   if [[ "$chunk_status" -ne 0 ]]; then
     emit_preflight_failure_diagnostic "$build_preflight_file"
