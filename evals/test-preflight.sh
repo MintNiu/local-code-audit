@@ -966,6 +966,45 @@ if grep -F 'AKID_9f8e7d6c5b4a3210' "$review_output" >/dev/null || \
   echo 'hardcoded credential value leaked into review output' >&2
   exit 1
 fi
+
+# Removing insecure defaults and requiring runtime environment variables is
+# intentional fail-closed behavior. A model must not turn the absence of a
+# deployment variable into a speculative startup/connectivity P1; concrete
+# credential, tenancy, or compatibility evidence must still remain visible.
+cat >"$repo/application-fail-closed.yml" <<'EOF'
+spring:
+  cloud:
+    nacos:
+      username: ${NACOS_USERNAME}
+      password: ${NACOS_PASSWORD}
+  datasource:
+    username: ${PLATFORM_DB_USERNAME}
+    password: ${PLATFORM_DB_PASSWORD}
+EOF
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 application-fail-closed.yml:4-5 - 默认值被移除，缺少环境变量时服务无法启动。影响：配置缺失可能导致连接失败。修复建议：保留默认值或增加回退。验证方式：不设置环境变量启动服务。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+fail_closed_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if printf '%s\n' "$fail_closed_output" | grep -F 'application-fail-closed.yml:' >/dev/null; then
+  echo 'fail-closed configuration removal was incorrectly reported as a finding' >&2
+  printf '%s\n' "$fail_closed_output" >&2
+  exit 1
+fi
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 application-fail-closed.yml:4-5 - 默认值被移除，同时跨租户配置被错误共享。影响：租户边界可能被绕过。修复建议：按租户隔离配置并继续要求运行时凭据。验证方式：用两个租户分别启动并核对配置。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+fail_closed_independent_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$fail_closed_independent_output" | grep -F 'P1 application-fail-closed.yml:' >/dev/null || {
+  echo 'fail-closed filter hid an independent tenant finding' >&2
+  printf '%s\n' "$fail_closed_independent_output" >&2
+  exit 1
+}
 grep -F 'P1 src/main/java/com/example/api/client/SingleDivide.java' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/LongMethodDivide.java' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/LongDivide.java' "$capture" >/dev/null

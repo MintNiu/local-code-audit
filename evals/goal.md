@@ -101,6 +101,7 @@
 - 随后用该解析器版本重新定向复核真实 `platform-api` 提交 `63d520b` 与 `a1284658`：两次均 exit=0、输出完整且各只保留唯一一条 `getParameter("x-token")` P1，分别定位到文件客户端第 58 行和字典客户端第 81 行；结果仍使用 `devstral-small-2-review-tuned` 与固定 SYSTEM SHA-256。
 - 同日对 `platform-file:a9a1d4a` 做独立安全留出：初始模型返回 clean，人工复核确认单删和批量删除都移除了 `fileStorageService.delete(...)`，导致 OSS/本地对象残留；初始私有 scorecard 为 0/1，作为真实漏报对照。新增对象生命周期确定性预检、同文件同根因聚合和 `missed` 人工标签状态后重跑，单删/批删合并为 `99-108` 行一条 P1，scorecard 恢复为 1/1、0 误报；原始与修复后结果均保留在私有目录。
 - 2026-09-18 对补充提交 `89ea7d8` 的 workflow claim/ack 做服务端上下文复核：服务端事件表含 `tenantId`，claim/ack 使用 `ignoreTenant` 且查询/更新未携带租户条件；个人 tuned 模型即使收到三份显式 context 仍返回 clean。新增严格 opt-in 的跨上下文租户预检，只有内部客户端新增 claim/ack 方法携带 `X-Gateway-Token`、缺少 `X-Tenant-Id`，且 context 同时证明事件租户字段与 `ignoreTenant` 时才报告 P1；claim/ack 双正例和无绕过证据负例已加入 `test-preflight.sh`。
+- 2026-09-18 对 `platform-workflow-service:65de399` 复核时，模型把移除本地默认凭据、改为必须注入运行时环境变量误报成启动/连接失败 P1。新增严格的 fail-closed 配置误报过滤，并用“同一配置变更 + 独立跨租户根因”回归确认只过滤前者；逗号分隔行号的证据解析也已覆盖。真实提交复跑为 clean，独立安全根因仍保持可见。
 
 ## 失败处理原则
 

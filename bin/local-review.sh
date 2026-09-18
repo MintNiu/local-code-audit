@@ -350,7 +350,10 @@ filter_unsupported_shard_findings() {
       sub(/[\r\n].*$/, "", header)
       sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
       sub(/[[:space:]]+-.*$/, "", header)
-      sub(/:[0-9]+(-[0-9]+)?[[:space:]]*$/, "", header)
+      # Model locations may contain comma-separated ranges such as
+      # `config.yml:26-29,37-40,47-50`; remove the complete location suffix so
+      # evidence lookup still reaches the repository-relative path.
+      sub(/:[0-9][0-9, -]*$/, "", header)
       sub(/^[.][\/]/, "", header)
       sub(/^a[\/]/, "", header)
       sub(/^b[\/]/, "", header)
@@ -366,6 +369,20 @@ filter_unsupported_shard_findings() {
         if (line == "") continue
         if (line !~ /^(影响|修复建议|验证方式)[：:][[:space:]]*(无法确定代码是否符合项目规则|提供完整的文件内容|补充完整文件内容|请提供完整代码)[。.!！]?$/) return 0
       }
+      return 1
+    }
+    function fail_closed_config_only(text, evidence, path) {
+      # Removing an insecure configuration fallback and requiring an explicit
+      # environment variable is intentional fail-closed behavior. Models
+      # often turn the absence of that variable into a speculative startup or
+      # connectivity P1. Filter only this narrow shape when the diff visibly
+      # adds an un-defaulted `${ENV_NAME}` placeholder; concrete security,
+      # tenancy, compatibility, migration, or concurrency claims remain.
+      if (path !~ /\.(ya?ml|properties|conf|ini|env|toml|json)$/) return 0
+      if (text !~ /默认值|默认凭据/ || text !~ /移除|删除|取消/) return 0
+      if (text !~ /环境变量|未配置|缺少|无法启动|无法连接/) return 0
+      if (text ~ /硬编码|明文|泄漏|公开|弱密码|默认密码|URL|URI|查询参数|租户|越权|权限|SSRF|注入|迁移|并发|竞态|重放/) return 0
+      if (evidence !~ /\+[^\n]*\$\{[A-Za-z_][A-Za-z0-9_]*\}/) return 0
       return 1
     }
     function flush(    invalid, path_evidence) {
@@ -417,6 +434,7 @@ filter_unsupported_shard_findings() {
       # Missing logging/monitoring by itself is explicitly outside the audit
       # contract; concrete secret logging remains reportable by its evidence.
       if (block ~ /缺少.*日志|没有.*日志|日志记录/ && block !~ /秘密|Secret|password|密码/) invalid = 1
+      if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (!invalid) {
         if (printed) printf "\n"
         printf "%s", block
