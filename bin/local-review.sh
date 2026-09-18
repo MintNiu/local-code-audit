@@ -1848,7 +1848,11 @@ collect_security_preflight() {
       candidate_lines = 0
       while ((getline value < source_path) > 0) {
         source_line++
+        source_lines[path, source_line] = value
+        source_text_block_before[path SUBSEP source_line] = text_block
+        source_block_comment_before[path SUBSEP source_line] = block_comment
         clean = clean_java_source_line(value)
+        source_clean_lines[path, source_line] = clean
         # Accept both one-line and wrapped Java method signatures. Exclude
         # control-flow/call expressions so a local `if (...) {` cannot become
         # a false method boundary.
@@ -1880,6 +1884,7 @@ collect_security_preflight() {
         if (active_depth > 0 && depth < active_depth) active_depth = 0
       }
       close(source_path)
+      source_line_count[path] = source_line
     }
     function scope_for_line(at_line) {
       load_method_scopes()
@@ -1908,6 +1913,67 @@ collect_security_preflight() {
       if ((alias_name SUBSEP "__file__") in url_secret_vars &&
           alias_scope_matches(alias_name, "__file__", current_scope)) return 1
       return 0
+    }
+    function remember_source_alias(name, rhs, scope,    token_root, secret_root) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
+      sub(/[;[:space:]]*$/, "", rhs)
+      token_root = (rhs == "TOKEN_HEADER" || rhs == "\"x-token\"" || known_token_alias(rhs, scope))
+      secret_root = (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/ || known_url_secret_alias(rhs, scope))
+      if (token_root) token_parameter_vars[name SUBSEP scope] = 1
+      if (secret_root) url_secret_vars[name SUBSEP scope] = 1
+    }
+    function load_source_aliases(target_path,    i, key, code, clean, alias_code, scope, lhs, rhs, fields, count, name) {
+      if (source_aliases_loaded[target_path] || target_path !~ /\.java$/) return
+      source_aliases_loaded[target_path] = 1
+      load_method_scopes()
+      source_pending_name = ""
+      source_pending_scope = ""
+      for (i = 1; i <= source_line_count[target_path]; i++) {
+        key = target_path SUBSEP i
+        code = source_lines[target_path, i]
+        clean = source_clean_lines[target_path, i]
+        if (source_text_block_before[key] || (source_block_comment_before[key] && clean == "")) continue
+        alias_code = code
+        sub(/[[:space:]]*\/\/.*$/, "", alias_code)
+        sub(/\/\*.*\*\//, "", alias_code)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", alias_code)
+        scope = scope_for_line(i)
+        if (source_pending_name != "") {
+          rhs = alias_code
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
+          if (rhs ~ /^[A-Za-z_][A-Za-z0-9_]*;?$/ || rhs ~ /^"x-token";?$/) {
+            remember_source_alias(source_pending_name, rhs, source_pending_scope)
+            source_pending_name = ""
+            source_pending_scope = ""
+            continue
+          }
+          source_pending_name = ""
+          source_pending_scope = ""
+        }
+        if (alias_code ~ /=[[:space:]]*$/) {
+          lhs = alias_code
+          sub(/[[:space:]]*=[[:space:]]*$/, "", lhs)
+          count = split(lhs, fields, /[[:space:]]+/)
+          name = fields[count]
+          if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            source_pending_name = name
+            source_pending_scope = scope
+          }
+          continue
+        }
+        if (alias_code !~ /=[[:space:]]*(TOKEN_HEADER|"x-token"|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;?[[:space:]]*$/) continue
+        lhs = alias_code
+        sub(/[[:space:]]*=.*/, "", lhs)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
+        count = split(lhs, fields, /[[:space:]]+/)
+        name = fields[count]
+        if (name !~ /^[A-Za-z_][A-Za-z0-9_]*$/) continue
+        rhs = alias_code
+        sub(/^.*=[[:space:]]*/, "", rhs)
+        remember_source_alias(name, rhs, scope)
+      }
+      source_pending_name = ""
+      source_pending_scope = ""
     }
     function emit_ssrf(at_line) {
       if (!(at_line in ssrf_emitted_lines)) {
@@ -2134,6 +2200,7 @@ collect_security_preflight() {
     /^\+\+\+ b\// {
       path = substr($0, 7)
       sub(/[[:space:]]+$/, "", path)
+      load_source_aliases(path)
       next
     }
     /^@@ / {

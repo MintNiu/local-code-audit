@@ -89,6 +89,7 @@
 - 同日继续收紧除法词法边界：新增行位于 Java text block 内容时，即使所在方法有 `Integer` 参数也不再把文本中的 `/` 误报为 `java-divide`；上下文行只用于推进 text block/块注释状态，不会被归因为本次新增问题。
 - 同日补齐跨 hunk 词法状态：除法预检从当前源码快照恢复每个 hunk 起始行之前的 text block/块注释状态，新增 `SplitTextBlockDivide` 和 `SplitBlockCommentDivide` 负例验证分隔符不在当前上下文时仍不误报。
 - 同日补齐 token/url 别名中的行内注释边界：`TOKEN_HEADER` 或凭据变量赋值行带 `//`/`/*...*/` 注释时，别名仍能跨行传播并进入预检；对应普通参数负例继续保持 clean。
+- 同日补齐源码快照别名恢复：别名赋值未改动且位于 diff 上下文之外时，新增 `getParameter(alias)` 或 URL 拼接仍能按当前 Java 方法作用域命中；新增 `PreExistingQueryTokenAlias`、`PreExistingUrlSecretAlias`，并保持同名局部变量不跨方法串线。
 - 同日用当前 tuned 运行态对 `platform-api` 的真实提交 `63d520b`、`a1284658` 和 `39955c8` 做定向复核：前两个提交各只保留一个对应文件/行号的 `x-token` 查询参数 P1，后一个提交为 clean，三次均完成且 exit=0；这说明前两个是不同业务位置的真实重复模式，不是同一次分片聚合重复制造的 finding。
 - 同日继续收紧 `java-divide`：源码签名恢复改为按当前方法花括号范围前向解析，新增“前一方法为 `Integer`、当前方法为 `int`”负例；复杂三元分母不再被截断成第一个变量，新增安全负例，原有方法调用表达式和链式除法正例仍通过。
 - 同日补充 token/url 多行语法回归：跨行直接别名赋值、两级 URL 凭据别名以及跨行 `getParameter(...)` 参数现在都会进入同一确定性预检；普通 ID、内部请求头和未完成别名仍保持 clean。

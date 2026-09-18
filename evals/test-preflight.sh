@@ -1186,6 +1186,66 @@ if printf '%s\n' "$preexisting_query_token_output" | grep -F 'PreExistingQueryTo
   exit 1
 fi
 
+# An unchanged alias can be outside the diff context.  The current source
+# snapshot must still resolve it when the newly added query read uses it.
+cat >"$repo/src/main/java/com/example/api/client/PreExistingQueryTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class PreExistingQueryTokenAlias {
+    private static final String TOKEN_HEADER = "x-token";
+
+    String read(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = TOKEN_HEADER;
+        int one = 1;
+        int two = 2;
+        int three = 3;
+        int four = 4;
+        int five = 5;
+        return request.getParameter("safe");
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/PreExistingQueryTokenAlias.java
+git -C "$repo" commit -qm pre-existing-query-token-alias-base
+sed -i '' 's/return request.getParameter("safe");/return request.getParameter(parameterName);/' \
+  "$repo/src/main/java/com/example/api/client/PreExistingQueryTokenAlias.java"
+preexisting_query_token_alias_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$preexisting_query_token_alias_output" | grep -F 'P1 src/main/java/com/example/api/client/PreExistingQueryTokenAlias.java:' >/dev/null || {
+  echo 'source snapshot did not recover an unchanged query-token alias' >&2
+  printf '%s\n' "$preexisting_query_token_alias_output" >&2
+  exit 1
+}
+
+cat >"$repo/src/main/java/com/example/api/client/PreExistingUrlSecretAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class PreExistingUrlSecretAlias {
+    String build(String token) {
+        String queryValue = token;
+        int one = 1;
+        int two = 2;
+        int three = 3;
+        int four = 4;
+        int five = 5;
+        return "https://internal.example/download?id=resource";
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/PreExistingUrlSecretAlias.java
+git -C "$repo" commit -qm pre-existing-url-secret-alias-base
+sed -i '' 's/return "https:\/\/internal.example\/download?id=resource";/return "https:\/\/internal.example\/download?x-token=" + queryValue;/' \
+  "$repo/src/main/java/com/example/api/client/PreExistingUrlSecretAlias.java"
+preexisting_url_secret_alias_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$preexisting_url_secret_alias_output" | grep -F 'P1 src/main/java/com/example/api/client/PreExistingUrlSecretAlias.java:' >/dev/null || {
+  echo 'source snapshot did not recover an unchanged URL secret alias' >&2
+  printf '%s\n' "$preexisting_url_secret_alias_output" >&2
+  exit 1
+}
+
 # Alias state must survive separate unified-diff hunks in one file: the
 # constant/parameter alias can be changed in one hunk while the query read is
 # changed much farther away.  This is the shape that previously made
