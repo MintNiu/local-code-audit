@@ -54,6 +54,8 @@ local-review --repo /path/to/platform-api \
 
 This is required for cross-repository compatibility coverage in the personal high-performance workflow. Context files are evidence-only inputs and are never modified.
 
+When downstream service context explicitly shows tenant-bearing event data and `ignoreTenant`/`supplyWithIgnoreTenant`, a newly added internal claim/ack client that carries only `X-Gateway-Token` receives an additional narrow tenant-isolation preflight. Without those server-side facts, the runner does not infer a tenant vulnerability from a client signature alone.
+
 For your personal high-performance profile, install and run:
 
 ```bash

@@ -1779,6 +1779,96 @@ collect_deleted_context_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_context_tenant_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local context_file context_path
+  local context_has_ignore=false
+  local context_has_tenant=false
+  local context_has_event=false
+
+  # This check is deliberately opt-in: a client signature alone is not
+  # evidence of a tenant bug.  Require explicit Java context showing both a
+  # tenant-bearing event record and an implementation that bypasses the
+  # normal tenant filter.  The changed client must also be an event claim/ack
+  # endpoint that carries the gateway token but no tenant header.
+  (( ${#context_files[@]} > 0 )) || return 0
+  for context_file in "${context_files[@]}"; do
+    context_path="$context_file"
+    [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
+    [[ -f "$context_path" && "$context_path" == *.java ]] || continue
+    if rg -qi -- 'ignoreTenant|supplyWithIgnoreTenant' "$context_path"; then
+      context_has_ignore=true
+    fi
+    if rg -qi -- '(^|[^[:alnum:]_])(tenantId|tenant_id)([^[:alnum:]_]|$)' "$context_path"; then
+      context_has_tenant=true
+    fi
+    if rg -qi -- 'outbox|event|claim|ack' "$context_path"; then
+      context_has_event=true
+    fi
+  done
+  [[ "$context_has_ignore" == true && "$context_has_tenant" == true && "$context_has_event" == true ]] || return 0
+
+  awk '
+    function emit_candidate() {
+      if (candidate && gateway && !tenant && candidate_path != "" && candidate_kind != "") {
+        printf "P1 %s:%d - 内部事件客户端的 %s 操作只携带 X-Gateway-Token，未携带 X-Tenant-Id；显式 context 同时显示事件数据含 tenantId 且服务端使用 ignoreTenant 绕过租户过滤，可能领取或确认其他租户的事件。\n影响：共享 applicationCode 或 eventId 场景下，消费者可能读取、锁定或确认不属于当前租户的工作流事件，造成跨租户数据泄漏或状态篡改。\n修复建议：让 claim/ack 接口显式携带并校验 X-Tenant-Id，且在查询和更新条件中保留 tenant_id 约束；如果该操作确实是全局后台任务，应在服务端绑定可信的租户范围而不是仅依赖网关令牌。\n验证方式：创建两个租户的同名 applicationCode 及事件，分别执行 claim/ack，确认每个客户端只能领取和确认本租户事件，并检查 SQL 条件包含 tenant_id。\n\n", candidate_path, candidate_line, candidate_kind
+      }
+      candidate = 0
+      gateway = 0
+      tenant = 0
+      candidate_path = ""
+      candidate_line = 0
+      candidate_kind = ""
+    }
+    /^diff --git / {
+      emit_candidate()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      emit_candidate()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      emit_candidate()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+") {
+        if (!candidate && text ~ /@(PostExchange|PostMapping)[[:space:]]*\(/ && text ~ /([Cc]laim|[Aa]ck)/) {
+          candidate = 1
+          candidate_path = path
+          candidate_line = line_no
+          if (text ~ /[Cc]laim/) candidate_kind = "claim"
+          else candidate_kind = "ack"
+        }
+        if (candidate) {
+          if (text ~ /X-Gateway-Token/) gateway = 1
+          if (text ~ /X-Tenant-Id/) tenant = 1
+          # Client method declarations end at the parameter-list close.  A
+          # method can span several added lines, so retain state until then.
+          if (text ~ /\)[[:space:]]*;/ || text ~ /\)[[:space:]]*\{/) emit_candidate()
+        }
+        line_no++
+      } else if (prefix == " ") {
+        line_no++
+      }
+    }
+    END { emit_candidate() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_security_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -2984,6 +3074,7 @@ collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
   fi
 } | awk '$1 == "D" { print $2 }' | LC_ALL=C sort -u >"$deleted_types_file"
 collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"
+collect_context_tenant_preflight "$chunk_input_file" "$build_preflight_file"
 review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   echo "本地代码审查失败：检测到 combined diff（diff --cc/diff --combined），当前分片器不会猜测合并冲突语义；请先展开为普通文件 diff 后重试。" >&2

@@ -53,6 +53,8 @@ local-review --repo /path/to/platform-api \
 
 这是个人高性能审查中检查跨仓库兼容性的必要步骤；上下文文件只作为证据输入，不会被修改。
 
+当下游服务上下文明确展示事件数据的 `tenantId`、`ignoreTenant`/`supplyWithIgnoreTenant`，而新增内部 claim/ack 客户端只带 `X-Gateway-Token` 时，运行器会额外执行严格的跨上下文租户预检；没有这些服务端证据时不会仅凭客户端签名报告租户问题。
+
 个人高性能模式使用单独命令：
 
 ```bash

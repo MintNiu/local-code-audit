@@ -1641,6 +1641,110 @@ PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
   "$repo_root/bin/local-review.sh" --repo "$repo" --context "$module_context" >/dev/null
 grep -F '当前提交删除类型 com.example.api.dto.ModuleDeletedDTO' "$capture" >/dev/null
 
+# An explicit downstream service context can prove a tenant boundary even
+# when the main repository only contains a declarative internal client.  The
+# deterministic preflight must report claim/ack methods that omit the tenant
+# header when the context shows tenant-bearing outbox data and ignoreTenant
+# access.  A context without the bypass evidence must remain clean.
+workflow_context_dir="$fixture_root/downstream/workflow"
+mkdir -p "$workflow_context_dir"
+cat >"$repo/src/main/java/com/example/api/client/WorkflowClient.java" <<'EOF'
+package com.example.api.client;
+
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.service.annotation.HttpExchange;
+import org.springframework.web.service.annotation.PostExchange;
+
+@HttpExchange("/workflow/v1/internal")
+interface WorkflowClient {
+    @PostExchange("/events/claims")
+    Object claimEvents(@RequestHeader("X-Gateway-Token") String token,
+                       @RequestBody Object request);
+
+    @PostExchange("/events/{eventId}/ack")
+    Object acknowledge(@RequestHeader("X-Gateway-Token") String token,
+                       @PathVariable Long eventId,
+                       @RequestBody Object request);
+}
+EOF
+cat >"$workflow_context_dir/WorkflowController.java" <<'EOF'
+package downstream.workflow;
+
+final class WorkflowController {
+    Object claim(String token, Object request) { return service.claim(request); }
+    Object ack(String token, Long eventId, Object request) { return service.ack(eventId, request); }
+    private final WorkflowService service = new WorkflowService();
+}
+EOF
+cat >"$workflow_context_dir/WorkflowService.java" <<'EOF'
+package downstream.workflow;
+
+final class WorkflowService {
+    Object claim(Object request) {
+        return ignoreTenant(() -> outbox.selectByApplicationCode(request));
+    }
+    Object ack(Long eventId, Object request) {
+        return ignoreTenant(() -> outbox.updateById(eventId, request));
+    }
+    private <T> T ignoreTenant(java.util.function.Supplier<T> action) { return action.get(); }
+    private final WorkflowOutbox outbox = new WorkflowOutbox();
+}
+EOF
+cat >"$workflow_context_dir/WorkflowOutbox.java" <<'EOF'
+package downstream.workflow;
+
+final class WorkflowOutbox {
+    Long tenantId;
+    Object selectByApplicationCode(Object request) { return null; }
+    Object updateById(Long eventId, Object request) { return null; }
+}
+EOF
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+workflow_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" \
+  --context "$workflow_context_dir/WorkflowController.java" \
+  --context "$workflow_context_dir/WorkflowService.java" \
+  --context "$workflow_context_dir/WorkflowOutbox.java")"
+workflow_count="$(printf '%s\n' "$workflow_output" | grep -c 'WorkflowClient.java:' || true)"
+[[ "$workflow_count" == "2" ]] || {
+  echo 'context tenant preflight missed claim/ack methods without tenant header' >&2
+  printf '%s\n' "$workflow_output" >&2
+  exit 1
+}
+cat >"$workflow_context_dir/WorkflowSafeService.java" <<'EOF'
+package downstream.workflow;
+
+final class WorkflowSafeService {
+    Long tenantId;
+    Object claim(Object request) { return outbox.selectByTenant(tenantId, request); }
+    private final WorkflowOutbox outbox = new WorkflowOutbox();
+}
+EOF
+safe_workflow_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" \
+  --context "$workflow_context_dir/WorkflowSafeService.java")"
+if printf '%s\n' "$safe_workflow_output" | grep -F 'WorkflowClient.java:' >/dev/null; then
+  echo 'context tenant preflight reported a client without ignoreTenant evidence' >&2
+  printf '%s\n' "$safe_workflow_output" >&2
+  exit 1
+fi
+no_context_workflow_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if printf '%s\n' "$no_context_workflow_output" | grep -F 'WorkflowClient.java:' >/dev/null; then
+  echo 'context tenant preflight ran without explicit downstream context' >&2
+  printf '%s\n' "$no_context_workflow_output" >&2
+  exit 1
+fi
+
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '{"response":"P0 src/main/java/com/example/api/client/Client.java:1-93 - 文件内容不完整，缺少类声明和字段定义，导致无法验证代码逻辑是否正确。\\n\\n影响：无法确定代码是否符合项目规则。\\n\\n修复建议：提供完整的文件内容。","done":true,"done_reason":"stop"}\n'
