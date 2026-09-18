@@ -91,6 +91,7 @@
 - 同日补齐 token/url 别名中的行内注释边界：`TOKEN_HEADER` 或凭据变量赋值行带 `//`/`/*...*/` 注释时，别名仍能跨行传播并进入预检；对应普通参数负例继续保持 clean。
 - 同日补齐源码快照别名恢复：别名赋值未改动且位于 diff 上下文之外时，新增 `getParameter(alias)` 或 URL 拼接仍能按当前 Java 方法作用域命中；新增 `PreExistingQueryTokenAlias`、`PreExistingUrlSecretAlias`，并保持同名局部变量不跨方法串线。
 - 同日统一 token 别名的 header 大小写语义：源码快照和 diff 内的 `"x-token"`/`"X-Token"` 直接别名均进入同一查询参数风险规则，新增大写别名回归通过。
+- 同日用当前运行器和 `devstral-small-2-review-tuned` 复核真实 `platform-api` 提交 `91bff253`、`63d520b`、`a1284658`：三次均 exit=0；前者保持 clean，后两者各保留唯一的 `getParameter("x-token")` P1（58、81 行），结果字段完整且 SYSTEM SHA-256 为 `5ca0a78b...`。
 - 同日用当前 tuned 运行态对 `platform-api` 的真实提交 `63d520b`、`a1284658` 和 `39955c8` 做定向复核：前两个提交各只保留一个对应文件/行号的 `x-token` 查询参数 P1，后一个提交为 clean，三次均完成且 exit=0；这说明前两个是不同业务位置的真实重复模式，不是同一次分片聚合重复制造的 finding。
 - 同日继续收紧 `java-divide`：源码签名恢复改为按当前方法花括号范围前向解析，新增“前一方法为 `Integer`、当前方法为 `int`”负例；复杂三元分母不再被截断成第一个变量，新增安全负例，原有方法调用表达式和链式除法正例仍通过。
 - 同日补充 token/url 多行语法回归：跨行直接别名赋值、两级 URL 凭据别名以及跨行 `getParameter(...)` 参数现在都会进入同一确定性预检；普通 ID、内部请求头和未完成别名仍保持 clean。
