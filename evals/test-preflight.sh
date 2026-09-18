@@ -9,7 +9,7 @@ export OLLAMA_REVIEW_MAX_DIFF_BYTES=60000
 # The fixture intentionally contains several independent division cases; keep
 # the fake review request above the normal 16k budget so this test exercises
 # preflight output rather than the input-budget rejection path.
-export OLLAMA_REVIEW_NUM_CTX=32768
+export OLLAMA_REVIEW_NUM_CTX=65536
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-preflight-test.XXXXXX")"
 fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
@@ -794,6 +794,34 @@ git -C "$repo" commit -qm qualified-return-divide-base
 sed -i '' 's/return 10 \/ b;/return 20 \/ b;/' \
   "$repo/src/main/java/com/example/api/client/QualifiedReturnDivide.java"
 
+cat >"$repo/src/main/java/com/example/api/client/InlineAnnotatedDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class InlineAnnotatedDivide {
+    @Deprecated(since = "fixture") java.lang.Integer divide(Integer a, Integer b) {
+        return 10 / b;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/InlineAnnotatedDivide.java
+git -C "$repo" commit -qm inline-annotated-divide-base
+sed -i '' 's/return 10 \/ b;/return 20 \/ b;/' \
+  "$repo/src/main/java/com/example/api/client/InlineAnnotatedDivide.java"
+
+cat >"$repo/src/main/java/com/example/api/client/InlineArrayAnnotatedDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class InlineArrayAnnotatedDivide {
+    @SuppressWarnings({"unused", "fixture"}) java.lang.Integer divide(Integer a, Integer b) {
+        return 10 / b;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/InlineArrayAnnotatedDivide.java
+git -C "$repo" commit -qm inline-array-annotated-divide-base
+sed -i '' 's/return 10 \/ b;/return 20 \/ b;/' \
+  "$repo/src/main/java/com/example/api/client/InlineArrayAnnotatedDivide.java"
+
 # Complex denominators are intentionally left to the model.  Reducing a
 # ternary expression to its first identifier would report a false zero-risk
 # even though the changed code explicitly substitutes a non-zero value.
@@ -1113,6 +1141,16 @@ if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example
 fi
 printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/QualifiedReturnDivide.java:' >/dev/null || {
   echo 'Java division preflight missed a fully-qualified return type signature' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
+printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/InlineAnnotatedDivide.java:' >/dev/null || {
+  echo 'Java division preflight missed an inline-annotated method signature' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
+printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/InlineArrayAnnotatedDivide.java:' >/dev/null || {
+  echo 'Java division preflight missed an inline array-annotated method signature' >&2
   printf '%s\n' "$java_division_output" >&2
   exit 1
 }

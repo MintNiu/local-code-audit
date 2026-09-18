@@ -2566,11 +2566,51 @@ collect_java_division_preflight() {
       for (name in null_guards) delete null_guards[name]
       for (name in zero_guards) delete zero_guards[name]
     }
-    function record_integer_parameters(text,    signature, params, count, i, fields, field_count, j, candidate) {
+    function record_integer_parameters(text,    signature, params, count, i, fields, field_count, j, candidate, paren_depth, open_at, close_at, last_open, last_close, selected_open, selected_close, suffix, ch) {
       if (text !~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/ || text !~ /\(/) return
+      # An annotation can legally share the declaration line, for example
+      # `@Deprecated(...) Integer divide(Integer a, Integer b) {`.  Taking
+      # everything between the first pair of parentheses would inspect the
+      # annotation instead of the method parameters.  Select the last
+      # top-level pair before the method body; nested annotation arguments
+      # stay inside the method pair and do not change the selected range.
       signature = text
-      sub(/^[^(]*\(/, "", signature)
-      sub(/\).*/, "", signature)
+      paren_depth = 0
+      last_open = 0
+      last_close = 0
+      selected_open = 0
+      selected_close = 0
+      open_at = 0
+      for (i = 1; i <= length(signature); i++) {
+        ch = substr(signature, i, 1)
+        if (ch == "(") {
+          if (paren_depth == 0) open_at = i
+          paren_depth++
+        } else if (ch == ")" && paren_depth > 0) {
+          paren_depth--
+          if (paren_depth == 0) {
+            last_open = open_at
+            last_close = i
+            suffix = substr(signature, i + 1)
+            # Prefer the pair whose closing parenthesis is immediately
+            # followed by the declaration body (optionally after throws).
+            # This skips braces in annotation arrays such as
+            # `@RequestMapping({"/a"})` without treating a body call as the
+            # method parameter list.
+            if (suffix ~ /^[[:space:]]*(throws[[:space:]][^{}]*)?[[:space:]]*\{/) {
+              selected_open = open_at
+              selected_close = i
+              break
+            }
+          }
+        }
+      }
+      if (selected_open == 0) {
+        selected_open = last_open
+        selected_close = last_close
+      }
+      if (selected_open == 0 || selected_close <= selected_open) return
+      signature = substr(signature, selected_open + 1, selected_close - selected_open - 1)
       count = split(signature, params, ",")
       for (i = 1; i <= count; i++) {
         if (params[i] !~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/) continue
