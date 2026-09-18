@@ -1917,7 +1917,7 @@ collect_security_preflight() {
     function remember_source_alias(name, rhs, scope,    token_root, secret_root) {
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
       sub(/[;[:space:]]*$/, "", rhs)
-      token_root = (rhs == "TOKEN_HEADER" || rhs == "\"x-token\"" || known_token_alias(rhs, scope))
+      token_root = (rhs == "TOKEN_HEADER" || tolower(rhs) == "\"x-token\"" || known_token_alias(rhs, scope))
       secret_root = (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/ || known_url_secret_alias(rhs, scope))
       if (token_root) token_parameter_vars[name SUBSEP scope] = 1
       if (secret_root) url_secret_vars[name SUBSEP scope] = 1
@@ -1941,7 +1941,7 @@ collect_security_preflight() {
         if (source_pending_name != "") {
           rhs = alias_code
           gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
-          if (rhs ~ /^[A-Za-z_][A-Za-z0-9_]*;?$/ || rhs ~ /^"x-token";?$/) {
+          if (rhs ~ /^[A-Za-z_][A-Za-z0-9_]*;?$/ || tolower(rhs) ~ /^"x-token";?$/) {
             remember_source_alias(source_pending_name, rhs, source_pending_scope)
             source_pending_name = ""
             source_pending_scope = ""
@@ -1961,7 +1961,7 @@ collect_security_preflight() {
           }
           continue
         }
-        if (alias_code !~ /=[[:space:]]*(TOKEN_HEADER|"x-token"|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;?[[:space:]]*$/) continue
+      if (alias_code !~ /=[[:space:]]*(TOKEN_HEADER|"[Xx]-[Tt][Oo][Kk][Ee][Nn]"|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;?[[:space:]]*$/) continue
         lhs = alias_code
         sub(/[[:space:]]*=.*/, "", lhs)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
@@ -2014,8 +2014,8 @@ collect_security_preflight() {
         rhs = text
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
         sub(/[;[:space:]]*$/, "", rhs)
-        if (rhs ~ /^(TOKEN_HEADER|"x-token"|[A-Za-z_][A-Za-z0-9_]*)$/) {
-          if (rhs == "TOKEN_HEADER" || rhs == "\"x-token\"" || known_token_alias(rhs, pending_token_scope)) {
+        if (rhs ~ /^(TOKEN_HEADER|"[Xx]-[Tt][Oo][Kk][Ee][Nn]"|[A-Za-z_][A-Za-z0-9_]*)$/) {
+          if (rhs == "TOKEN_HEADER" || tolower(rhs) == "\"x-token\"" || known_token_alias(rhs, pending_token_scope)) {
             token_parameter_vars[pending_token_name SUBSEP pending_token_scope] = 1
           }
           pending_token_name = ""
@@ -2039,7 +2039,7 @@ collect_security_preflight() {
         }
         return
       }
-      if (text !~ /=[[:space:]]*(TOKEN_HEADER|"x-token"|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;?[[:space:]]*$/) return
+      if (text !~ /=[[:space:]]*(TOKEN_HEADER|"[Xx]-[Tt][Oo][Kk][Ee][Nn]"|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;?[[:space:]]*$/) return
       assignment = text
       sub(/[[:space:]]*=.*/, "", assignment)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", assignment)
@@ -2050,7 +2050,7 @@ collect_security_preflight() {
         sub(/^.*=[[:space:]]*/, "", rhs)
         sub(/[;[:space:]]*$/, "", rhs)
         scope = scope_for_line(at_line)
-        if (rhs == "TOKEN_HEADER" || rhs == "\"x-token\"" || known_token_alias(rhs, scope)) {
+        if (rhs == "TOKEN_HEADER" || tolower(rhs) == "\"x-token\"" || known_token_alias(rhs, scope)) {
           token_parameter_vars[name SUBSEP scope] = 1
         }
       }

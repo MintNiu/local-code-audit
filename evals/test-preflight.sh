@@ -1218,6 +1218,36 @@ printf '%s\n' "$preexisting_query_token_alias_output" | grep -F 'P1 src/main/jav
   exit 1
 }
 
+cat >"$repo/src/main/java/com/example/api/client/PreExistingUppercaseQueryTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class PreExistingUppercaseQueryTokenAlias {
+    private static final String TOKEN_HEADER = "X-Token";
+
+    String read(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = TOKEN_HEADER;
+        int one = 1;
+        int two = 2;
+        int three = 3;
+        int four = 4;
+        int five = 5;
+        return request.getParameter("safe");
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/PreExistingUppercaseQueryTokenAlias.java
+git -C "$repo" commit -qm pre-existing-uppercase-query-token-alias-base
+sed -i '' 's/return request.getParameter("safe");/return request.getParameter(parameterName);/' \
+  "$repo/src/main/java/com/example/api/client/PreExistingUppercaseQueryTokenAlias.java"
+preexisting_uppercase_query_token_alias_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$preexisting_uppercase_query_token_alias_output" | grep -F 'P1 src/main/java/com/example/api/client/PreExistingUppercaseQueryTokenAlias.java:' >/dev/null || {
+  echo 'source snapshot missed an uppercase X-Token alias' >&2
+  printf '%s\n' "$preexisting_uppercase_query_token_alias_output" >&2
+  exit 1
+}
+
 cat >"$repo/src/main/java/com/example/api/client/PreExistingUrlSecretAlias.java" <<'EOF'
 package com.example.api.client;
 
