@@ -2236,38 +2236,108 @@ collect_java_division_preflight() {
   # checked-out source is consulted by path/line to recover that signature;
   # this keeps the preflight narrow without widening the model prompt.
   awk -v repo_root="$source_root" '
-    function source_method_parameters(    source_path, i, j, candidate, signature, depth, k, value) {
+    function clean_source_line(raw, text, pos, prefix, tail, close_pos) {
+      text = raw
+      if (source_text_block) {
+        pos = index(text, "\"\"\"")
+        if (pos == 0) return ""
+        text = substr(text, pos + 3)
+        source_text_block = 0
+      }
+      while ((pos = index(text, "\"\"\"")) > 0) {
+        prefix = substr(text, 1, pos - 1)
+        tail = substr(text, pos + 3)
+        close_pos = index(tail, "\"\"\"")
+        if (close_pos == 0) {
+          text = prefix
+          source_text_block = 1
+          break
+        }
+        text = prefix substr(tail, close_pos + 3)
+      }
+      gsub(/"([^"\\]|\\.)*"/, "", text)
+      gsub(/\047([^\047\\]|\\.)*\047/, "", text)
+      if (source_block_comment) {
+        if (text !~ /\*\//) return ""
+        sub(/^.*\*\//, "", text)
+        source_block_comment = 0
+      }
+      while (text ~ /\/\*/) {
+        if (text ~ /\/\*.*\*\//) sub(/\/\*.*\*\//, "", text)
+        else {
+          sub(/\/\*.*$/, "", text)
+          source_block_comment = 1
+          break
+        }
+      }
+      sub(/\/\/.*$/, "", text)
+      return text
+    }
+    function source_method_parameters(    source_path, i, method_start, method_depth, active_method, depth, opens, closes, signature, candidate, candidate_start, candidate_lines, value, k, clean) {
       if (repo_root == "" || path == "" || division_line == 0) return
       source_path = repo_root "/" path
-      if (source_loaded[path]) return
-      source_loaded[path] = 1
-      source_count[path] = 0
-      while ((getline value < source_path) > 0) {
-        source_count[path]++
-        source_lines[path, source_count[path]] = value
-      }
-      close(source_path)
-      if (source_count[path] == 0) return
-      # Look backward only within the containing method practical prefix.
-      # Reject control-flow/call expressions so a nearby Integer-typed call
-      # cannot be mistaken for a declaration.
-      for (i = division_line; i >= 1 && i >= division_line - 256; i--) {
-        candidate = source_lines[path, i]
-        if (candidate !~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/ || candidate !~ /\(/) continue
-        if (candidate ~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|return)[[:space:]]*\(/) continue
-        signature = candidate
-        j = i
-        while (signature !~ /\)/ && j < source_count[path] && j < i + 12) {
-          j++
-          signature = signature " " source_lines[path, j]
+      if (!source_loaded[path]) {
+        source_loaded[path] = 1
+        source_count[path] = 0
+        source_block_comment = 0
+        source_text_block = 0
+        while ((getline value < source_path) > 0) {
+          source_count[path]++
+          source_lines[path, source_count[path]] = value
+          source_clean_lines[path, source_count[path]] = clean_source_line(value)
         }
-        if (signature !~ /\)/) continue
-        record_integer_parameters(signature)
-        if (has_integer_parameter) {
-          if (integer_line == 0) integer_line = i
-          for (k = i; k <= division_line && k <= source_count[path]; k++) record_guards(source_lines[path, k], k)
+        close(source_path)
+      }
+      if (source_count[path] == 0) return
+      depth = 0
+      active_method = 0
+      method_depth = 0
+      method_start = 0
+      signature = ""
+      candidate = ""
+      candidate_start = 0
+      candidate_lines = 0
+      # Walk forward to the changed line so the recovered signature must be
+      # the method whose brace range actually contains the division. A blind
+      # backward search can borrow an Integer signature from a previous
+      # method and report a primitive `int` division as a boxed-Integer defect.
+      for (i = 1; i <= division_line && i <= source_count[path]; i++) {
+        clean = source_clean_lines[path, i]
+        if (candidate == "" &&
+            clean ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_<>, ?\[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/ &&
+            clean !~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|synchronized|new)[[:space:]]*\(/) {
+          candidate = clean
+          candidate_start = i
+          candidate_lines = 1
+        } else if (candidate != "") {
+          candidate = candidate " " clean
+          candidate_lines++
+        }
+        if (candidate != "" && candidate ~ /\{/) {
+          method_start = candidate_start
+          method_depth = depth + 1
+          signature = candidate
+          active_method = 1
+          candidate = ""
+          candidate_start = 0
+          candidate_lines = 0
+        } else if (candidate != "" && (candidate ~ /;/ || candidate_lines > 12)) {
+          candidate = ""
+          candidate_start = 0
+          candidate_lines = 0
+        }
+        if (active_method && i == division_line) {
+          record_integer_parameters(signature)
+          if (has_integer_parameter) {
+            if (integer_line == 0) integer_line = method_start
+            for (k = method_start; k <= division_line && k <= source_count[path]; k++) record_guards(source_lines[path, k], k)
+          }
           return
         }
+        opens = gsub(/\{/, "{", clean)
+        closes = gsub(/\}/, "}", clean)
+        depth += opens - closes
+        if (active_method && depth < method_depth) active_method = 0
       }
     }
     function unguarded(name, guards, at_line) {
@@ -2420,6 +2490,36 @@ collect_java_division_preflight() {
       }
       return 0
     }
+    function simple_right_operand(text,    value, token, rest, inner, i, ch, paren_depth) {
+      value = text
+      sub(/^[[:space:]]*/, "", value)
+      if (substr(value, 1, 1) == "(") {
+        paren_depth = 0
+        for (i = 1; i <= length(value); i++) {
+          ch = substr(value, i, 1)
+          if (ch == "(") paren_depth++
+          else if (ch == ")") {
+            paren_depth--
+            if (paren_depth == 0) {
+              inner = substr(value, 2, i - 2)
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", inner)
+              if (inner !~ /^[A-Za-z_][A-Za-z0-9_]*$/) return ""
+              return inner
+            }
+          }
+        }
+        return ""
+      }
+      if (match(value, /^[A-Za-z_][A-Za-z0-9_]*/) == 0) return ""
+      token = substr(value, RSTART, RLENGTH)
+      rest = substr(value, RSTART + RLENGTH)
+      # A bare identifier remains the denominator when arithmetic/comparison
+      # continues outside it (`a / b + 1`). Member access, indexing, calls and
+      # a parenthesized expression are not simple operands. Parenthesized
+      # ternaries such as `(b == 0 ? 1 : b)` were handled above and rejected.
+      if (rest ~ /^[[:space:]]*(\.|\[|\()/) return ""
+      return token
+    }
     function record_division(text,    expression, slash, left_text, right_text, left, right, trimmed, search_at) {
       trimmed = text
       sub(/^[[:space:]]+/, "", trimmed)
@@ -2431,11 +2531,9 @@ collect_java_division_preflight() {
         left_text = substr(text, 1, slash - 1)
         right_text = substr(text, slash + 1)
         gsub(/[^A-Za-z0-9_]+$/, "", left_text)
-        gsub(/^[^A-Za-z0-9_]+/, "", right_text)
-        sub(/[^A-Za-z0-9_].*$/, "", right_text)
         left = left_text
         sub(/^.*[^A-Za-z0-9_]/, "", left)
-        right = right_text
+        right = simple_right_operand(right_text)
         if (left != "" && right != "") {
           has_division = 1
           division_count++

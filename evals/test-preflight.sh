@@ -656,6 +656,44 @@ git -C "$repo" add src/main/java/com/example/api/client/ExpressionDivide.java
 git -C "$repo" commit -qm expression-divide-base
 sed -i '' 's/consume(a \/ b);/consume(a \/ b + 1);/' "$repo/src/main/java/com/example/api/client/ExpressionDivide.java"
 
+# Signature recovery must stay within the method that contains the changed
+# division.  The previous method has an Integer parameter with the same name,
+# but the changed method uses a primitive int and must remain clean.
+cat >"$repo/src/main/java/com/example/api/client/PreviousMethodScopeDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class PreviousMethodScopeDivide {
+    int old(Integer denominator) {
+        return 10 / denominator;
+    }
+
+    int current(int denominator) {
+        return 100 / denominator;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/PreviousMethodScopeDivide.java
+git -C "$repo" commit -qm previous-method-scope-divide-base
+sed -i '' 's/return 100 \/ denominator;/return 200 \/ denominator;/' \
+  "$repo/src/main/java/com/example/api/client/PreviousMethodScopeDivide.java"
+
+# Complex denominators are intentionally left to the model.  Reducing a
+# ternary expression to its first identifier would report a false zero-risk
+# even though the changed code explicitly substitutes a non-zero value.
+cat >"$repo/src/main/java/com/example/api/client/TernarySafeDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class TernarySafeDivide {
+    int divide(Integer a, Integer b) {
+        return a / (b == 0 ? 1 : b);
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/TernarySafeDivide.java
+git -C "$repo" commit -qm ternary-safe-divide-base
+sed -i '' 's/b == 0 ? 1 : b/b == 0 ? 2 : b/' \
+  "$repo/src/main/java/com/example/api/client/TernarySafeDivide.java"
+
 cat >"$repo/src/main/java/com/example/api/client/Client.java" <<'EOF'
 package com.example.api.client;
 
@@ -929,6 +967,16 @@ expression_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1
   printf '%s\n' "$java_division_output" >&2
   exit 1
 }
+if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/PreviousMethodScopeDivide.java:' >/dev/null; then
+  echo 'Java division preflight borrowed an Integer signature from a previous method' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+fi
+if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/TernarySafeDivide.java:' >/dev/null; then
+  echo 'Java division preflight treated a guarded ternary denominator as a bare variable' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+fi
 if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/QueryTokenFalsePositive.java' >/dev/null; then
   echo 'URL-token preflight reported a parameter-name prefix false positive' >&2
   printf '%s\n' "$java_division_output" >&2
