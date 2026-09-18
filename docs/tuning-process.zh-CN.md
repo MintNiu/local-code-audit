@@ -267,7 +267,7 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 2026-09-18 对补充提交 `89ea7d8` 做跨仓库复核时，又确认了一个不能只靠模型提示解决的边界：API 仓库的 workflow claim/ack 客户端没有 `X-Tenant-Id`，而显式的 workflow 服务上下文展示了 `wf_event_outbox.tenantId`、`ignoreTenant` 查询/更新以及只按 `applicationCode`/`eventId` 定位的路径。个人 tuned 模型在三个上下文文件全部传入时仍返回 clean，因此不能把“上下文已提供”当作召回保证。
 
-现在新增了一个严格 opt-in 的跨上下文确定性预检：只有显式 `--context` 中同时出现事件数据的 `tenantId`、`ignoreTenant`/`supplyWithIgnoreTenant` 和事件 claim/ack 证据，并且当前新增的 Java 内部客户端方法携带 `X-Gateway-Token` 却缺少 `X-Tenant-Id` 时，才报告对应方法的 P1；没有服务端绕过租户证据时保持 clean。回归同时覆盖 claim 与 ack 两个方法，以及无 `ignoreTenant` 证据的负例。该规则不把普通声明式客户端签名或单独的 `tenantId` 参数升级成漏洞，仍要求人工确认服务端契约和数据库条件。
+现在新增了一个严格 opt-in 的跨上下文确定性预检：只有显式 `--context` 中同时出现事件数据的 `tenantId`、`ignoreTenant`/`supplyWithIgnoreTenant` 和事件 claim/ack 证据，并且当前新增或修改的 Java 内部客户端方法携带 `X-Gateway-Token` 却缺少 `X-Tenant-Id` 时，才报告对应方法的 P1；endpoint 注解和令牌头即使只是 diff 上下文，也只有该方法本身出现新增行才会触发。没有服务端绕过租户证据时保持 clean。回归同时覆盖新增方法、上下文恢复的方法，以及无 `ignoreTenant` 证据的负例。该规则不把普通声明式客户端签名或单独的 `tenantId` 参数升级成漏洞，仍要求人工确认服务端契约和数据库条件。
 
 随后补充了可预测默认凭据边界：新增配置中的 `${...:nacos}`、`${...:admin}`、`${...:password}`、`${...:root}`、`${...:123456}` 或 `${...:changeme}` 不再因为值较短而绕过预检；凭据键中长度至少 16 的非空默认值也会被识别，即使 endpoint 是 localhost。空默认值、短本地占位符和示例占位符仍保持 clean。该规则只作用于当前 diff 新增的凭据键，避免把未改动的历史配置伪装成当前提交问题。
 

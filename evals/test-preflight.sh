@@ -1718,6 +1718,26 @@ workflow_count="$(printf '%s\n' "$workflow_output" | grep -c 'WorkflowClient.jav
   printf '%s\n' "$workflow_output" >&2
   exit 1
 }
+# The endpoint annotation and gateway header may be unchanged context while a
+# DTO/parameter line inside the same method is the only added line.  Recover
+# that method from context, but still require an actual added line before
+# emitting a finding.
+git -C "$repo" add src/main/java/com/example/api/client/WorkflowClient.java
+git -C "$repo" commit -qm workflow-client-context-base -- src/main/java/com/example/api/client/WorkflowClient.java
+sed -i '' 's/@PathVariable Long eventId/@PathVariable Integer eventId/' \
+  "$repo/src/main/java/com/example/api/client/WorkflowClient.java"
+partial_workflow_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" \
+  --context "$workflow_context_dir/WorkflowController.java" \
+  --context "$workflow_context_dir/WorkflowService.java" \
+  --context "$workflow_context_dir/WorkflowOutbox.java")"
+partial_workflow_count="$(printf '%s\n' "$partial_workflow_output" | grep -c 'WorkflowClient.java:' || true)"
+[[ "$partial_workflow_count" == "1" ]] || {
+  echo 'context tenant preflight missed a changed method whose endpoint was context-only' >&2
+  printf '%s\n' "$partial_workflow_output" >&2
+  exit 1
+}
 cat >"$workflow_context_dir/WorkflowSafeService.java" <<'EOF'
 package downstream.workflow;
 

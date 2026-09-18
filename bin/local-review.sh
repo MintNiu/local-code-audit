@@ -1811,7 +1811,7 @@ collect_context_tenant_preflight() {
 
   awk '
     function emit_candidate() {
-      if (candidate && gateway && !tenant && candidate_path != "" && candidate_kind != "") {
+      if (candidate && candidate_changed && gateway && !tenant && candidate_path != "" && candidate_kind != "") {
         printf "P1 %s:%d - 内部事件客户端的 %s 操作只携带 X-Gateway-Token，未携带 X-Tenant-Id；显式 context 同时显示事件数据含 tenantId 且服务端使用 ignoreTenant 绕过租户过滤，可能领取或确认其他租户的事件。\n影响：共享 applicationCode 或 eventId 场景下，消费者可能读取、锁定或确认不属于当前租户的工作流事件，造成跨租户数据泄漏或状态篡改。\n修复建议：让 claim/ack 接口显式携带并校验 X-Tenant-Id，且在查询和更新条件中保留 tenant_id 约束；如果该操作确实是全局后台任务，应在服务端绑定可信的租户范围而不是仅依赖网关令牌。\n验证方式：创建两个租户的同名 applicationCode 及事件，分别执行 claim/ack，确认每个客户端只能领取和确认本租户事件，并检查 SQL 条件包含 tenant_id。\n\n", candidate_path, candidate_line, candidate_kind
       }
       candidate = 0
@@ -1820,6 +1820,7 @@ collect_context_tenant_preflight() {
       candidate_path = ""
       candidate_line = 0
       candidate_kind = ""
+      candidate_changed = 0
     }
     /^diff --git / {
       emit_candidate()
@@ -1844,23 +1845,24 @@ collect_context_tenant_preflight() {
     {
       prefix = substr($0, 1, 1)
       text = (prefix == "+" ? substr($0, 2) : $0)
-      if (prefix == "+") {
-        if (!candidate && text ~ /@(PostExchange|PostMapping)[[:space:]]*\(/ && text ~ /([Cc]laim|[Aa]ck)/) {
+      if (prefix == "+" || prefix == " ") {
+        if (!candidate &&
+            text ~ /@(PostExchange|PostMapping)[[:space:]]*\(/ && text ~ /([Cc]laim|[Aa]ck)/) {
           candidate = 1
           candidate_path = path
           candidate_line = line_no
+          candidate_changed = (prefix == "+")
           if (text ~ /[Cc]laim/) candidate_kind = "claim"
           else candidate_kind = "ack"
         }
         if (candidate) {
+          if (prefix == "+") candidate_changed = 1
           if (text ~ /X-Gateway-Token/) gateway = 1
           if (text ~ /X-Tenant-Id/) tenant = 1
           # Client method declarations end at the parameter-list close.  A
           # method can span several added lines, so retain state until then.
           if (text ~ /\)[[:space:]]*;/ || text ~ /\)[[:space:]]*\{/) emit_candidate()
         }
-        line_no++
-      } else if (prefix == " ") {
         line_no++
       }
     }
