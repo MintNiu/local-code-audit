@@ -777,6 +777,23 @@ git -C "$repo" commit -qm previous-method-scope-divide-base
 sed -i '' 's/return 100 \/ denominator;/return 200 \/ denominator;/' \
   "$repo/src/main/java/com/example/api/client/PreviousMethodScopeDivide.java"
 
+# Fully-qualified return types are common in generated or deliberately
+# explicit Java code. Signature recovery must still recognize the containing
+# method instead of falling back to a previous method or file scope.
+cat >"$repo/src/main/java/com/example/api/client/QualifiedReturnDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class QualifiedReturnDivide {
+    java.lang.Integer divide(Integer a, Integer b) {
+        return 10 / b;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/QualifiedReturnDivide.java
+git -C "$repo" commit -qm qualified-return-divide-base
+sed -i '' 's/return 10 \/ b;/return 20 \/ b;/' \
+  "$repo/src/main/java/com/example/api/client/QualifiedReturnDivide.java"
+
 # Complex denominators are intentionally left to the model.  Reducing a
 # ternary expression to its first identifier would report a false zero-risk
 # even though the changed code explicitly substitutes a non-zero value.
@@ -1094,6 +1111,11 @@ if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example
   printf '%s\n' "$java_division_output" >&2
   exit 1
 fi
+printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/QualifiedReturnDivide.java:' >/dev/null || {
+  echo 'Java division preflight missed a fully-qualified return type signature' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
 if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/TernarySafeDivide.java:' >/dev/null; then
   echo 'Java division preflight treated a guarded ternary denominator as a bare variable' >&2
   printf '%s\n' "$java_division_output" >&2
@@ -1401,6 +1423,37 @@ wrapped_token_count="$(printf '%s\n' "$wrapped_token_output" | grep -c 'P1 src/m
 if [[ "$wrapped_token_count" != "1" ]]; then
   echo 'wrapped-signature query-token alias scope was not isolated' >&2
   printf '%s\n' "$wrapped_token_output" >&2
+  exit 1
+fi
+
+cat >"$repo/src/main/java/com/example/api/client/QualifiedReturnTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class QualifiedReturnTokenAlias {
+    private static final String TOKEN_HEADER = "x-token";
+
+    java.lang.String first(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = "safe";
+        return request.getParameter("safe");
+    }
+
+    java.lang.String second(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = "safe";
+        return request.getParameter("safe");
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/QualifiedReturnTokenAlias.java
+git -C "$repo" commit -qm qualified-return-token-base
+perl -0pi -e 's/(java\.lang\.String first\([^}]+?String parameterName = )"safe"/$1TOKEN_HEADER/; s/(java\.lang\.String first\([^}]+?return request\.getParameter\()"safe"/$1parameterName/; s/(java\.lang\.String second\([^}]+?return request\.getParameter\()"safe"/$1parameterName/' \
+  "$repo/src/main/java/com/example/api/client/QualifiedReturnTokenAlias.java"
+qualified_return_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+qualified_return_token_count="$(printf '%s\n' "$qualified_return_token_output" | grep -c 'P1 src/main/java/com/example/api/client/QualifiedReturnTokenAlias.java:' || true)"
+if [[ "$qualified_return_token_count" != "1" ]]; then
+  echo 'fully-qualified return type token alias scope was not isolated' >&2
+  printf '%s\n' "$qualified_return_token_output" >&2
   exit 1
 fi
 

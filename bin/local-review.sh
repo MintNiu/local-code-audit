@@ -1857,7 +1857,7 @@ collect_security_preflight() {
         # control-flow/call expressions so a local `if (...) {` cannot become
         # a false method boundary.
         if (candidate == "" &&
-            clean ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_<>, ?\[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/ &&
+            clean ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_.$<>, ?\[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/ &&
             clean !~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|synchronized|new)[[:space:]]*\(/) {
           candidate = clean
           candidate_start = source_line
@@ -2485,7 +2485,7 @@ collect_java_division_preflight() {
       for (i = 1; i <= division_line && i <= source_count[path]; i++) {
         clean = source_clean_lines[path, i]
         if (candidate == "" &&
-            clean ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_<>, ?\[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/ &&
+            clean ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_.$<>, ?\[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/ &&
             clean !~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|synchronized|new)[[:space:]]*\(/) {
           candidate = clean
           candidate_start = i
