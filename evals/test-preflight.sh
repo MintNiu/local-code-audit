@@ -752,6 +752,19 @@ duplicate_security_count="$(printf '%s\n' "$duplicate_security_output" | grep -F
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/QueryTokenProxy.java:7 - 认证令牌从 URL 查询参数读取，同时未校验 tenantId，可能造成跨租户访问。影响：凭据可能进入日志，租户边界也可能被绕过。修复建议：仅使用受保护请求头并校验 tenantId。验证方式：检查日志并用两个租户执行请求。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+mixed_security_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if ! printf '%s\n' "$mixed_security_output" | grep -Eiq 'tenantId|跨租户|租户边界'; then
+  echo 'mixed URL-token and tenant finding was incorrectly discarded as a duplicate' >&2
+  printf '%s\n' "$mixed_security_output" >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 printf '{"response":"P1 application-credential.yml:3 - 明文 AccessKey 已提交。影响：凭据泄露。修复建议：改用无默认值的环境变量。验证方式：检查配置与历史。\\n\\nP1 application-credential.yml:3 - 同一凭据暴露风险的另一种描述。影响：凭据泄露。修复建议：轮换凭据。验证方式：检查配置历史。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
@@ -830,6 +843,59 @@ expression_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1
   printf '%s\n' "$java_division_output" >&2
   exit 1
 }
+
+# A vulnerable division that is already present in the parent must not be
+# reported again merely because a later, unrelated line changed in the same
+# hunk.  Context lines are evidence for guards/signatures, not new findings.
+cat >"$repo/src/main/java/com/example/api/client/PreExistingContextDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class PreExistingContextDivide {
+    int divide(Integer divisor) {
+        return 10 / divisor;
+    }
+
+    int changedLater() {
+        return 1;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/PreExistingContextDivide.java
+git -C "$repo" commit -qm pre-existing-divide-base
+sed -i '' 's/return 1;/return 2;/' "$repo/src/main/java/com/example/api/client/PreExistingContextDivide.java"
+preexisting_division_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if printf '%s\n' "$preexisting_division_output" | grep -F 'PreExistingContextDivide.java:' >/dev/null; then
+  echo 'Java division preflight reported an unchanged, pre-existing division' >&2
+  printf '%s\n' "$preexisting_division_output" >&2
+  exit 1
+fi
+
+cat >"$repo/src/main/java/com/example/api/client/PreExistingQueryToken.java" <<'EOF'
+package com.example.api.client;
+
+final class PreExistingQueryToken {
+    String read(javax.servlet.http.HttpServletRequest request) {
+        return request.getParameter("x-token");
+    }
+
+    String changedLater() {
+        return "old";
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/PreExistingQueryToken.java
+git -C "$repo" commit -qm pre-existing-query-token-base
+sed -i '' 's/return "old";/return "new";/' "$repo/src/main/java/com/example/api/client/PreExistingQueryToken.java"
+preexisting_query_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if printf '%s\n' "$preexisting_query_token_output" | grep -F 'PreExistingQueryToken.java:' >/dev/null; then
+  echo 'URL-token preflight reported an unchanged, pre-existing query-token read' >&2
+  printf '%s\n' "$preexisting_query_token_output" >&2
+  exit 1
+fi
 
 grep -Fx 'devstral-small-2-review-tuned' "$resolved_model_capture" >/dev/null
 [[ ! -e "$fixture_root/textconv.marker" ]] || {

@@ -17,12 +17,12 @@ cat >"$labels_dir/$commit.labels.tsv" <<EOF
 # review_status	complete
 # verdict	findings
 # finding_id	severity	path	line	status	notes
-confirmed-1	P1	src/Example.java	10	confirmed	代码证明的根因
+confirmed-1	P1	src/Example.java	10	confirmed	查询直接拼接用户输入，模型命中 SQL 注入
 false-positive-1	P2	src/Example.java	20	false-positive	没有代码证据
 uncertain-1	P1	src/Other.java	3	uncertain	等待契约
 EOF
 cat >"$results_dir/$commit.txt" <<'EOF'
-P1 src/Example.java:10 - 真实问题
+P1 src/Example.java:10 - 查询直接拼接用户输入造成 SQL 注入
 影响：示例。
 修复建议：示例。
 验证方式：示例。
@@ -63,30 +63,55 @@ grep -F "$commit" "$missed_output" | grep -F $'\t2\t1\t2\t1\ttrue\t12' >/dev/nul
 missed_overlap_labels="$tmp_dir/missed-overlap-labels"
 mkdir -p "$missed_overlap_labels"
 cp "$labels_dir/$commit.labels.tsv" "$missed_overlap_labels/$commit.labels.tsv"
-printf 'missed-overlap\tP1\tsrc/Example.java\t10\tmissed\t与结果候选重叠，必须拒绝\n' >>"$missed_overlap_labels/$commit.labels.tsv"
+printf 'missed-overlap\tP1\tsrc/Example.java\t10\tmissed\t同一查询还缺少租户条件，模型仅报告 SQL 注入而未报告越权根因\n' >>"$missed_overlap_labels/$commit.labels.tsv"
 missed_overlap_output="$tmp_dir/missed-overlap.tsv"
-if "$repo_root/evals/build-scorecard.sh" --labels-dir "$missed_overlap_labels" --results-dir "$results_dir" --out "$missed_overlap_output" >/dev/null 2>&1; then
-  echo 'scorecard builder accepted a missed label overlapping a visible candidate' >&2
-  exit 1
-fi
-[[ ! -e "$missed_overlap_output" ]] || {
-  echo 'scorecard builder left partial output after missed overlap failure' >&2
-  exit 1
+"$repo_root/evals/build-scorecard.sh" --labels-dir "$missed_overlap_labels" --results-dir "$results_dir" --out "$missed_overlap_output" >/dev/null
+grep -F "$commit" "$missed_overlap_output" | grep -F $'\t2\t1\t2\t1\ttrue\t12' >/dev/null
+"$repo_root/evals/summarize-scorecard.sh" "$missed_overlap_output" | grep -F 'p0_p1_recall=50.0%' >/dev/null
+
+wide_labels="$tmp_dir/wide-labels"
+wide_results="$tmp_dir/wide-results"
+mkdir -p "$wide_labels" "$wide_results"
+cp "$labels_dir/$commit.labels.tsv" "$wide_labels/$commit.labels.tsv"
+cp "$results_dir/$commit.meta.tsv" "$wide_results/$commit.meta.tsv"
+sed 's/src\/Example.java:10 -/src\/Example.java:1-100 -/' "$result_file" >"$wide_results/$commit.txt"
+wide_sha256="$(shasum -a 256 "$wide_results/$commit.txt" | awk '{print $1}')"
+perl -0pi -e "s/$result_sha256/$wide_sha256/" "$wide_labels/$commit.labels.tsv"
+printf 'missed-wide\tP0\tsrc/Example.java\t42-42\tmissed\t第 42 行另有任意命令执行，整文件范围的 SQL 注入候选未描述该根因\n' >>"$wide_labels/$commit.labels.tsv"
+wide_output="$tmp_dir/wide.tsv"
+"$repo_root/evals/build-scorecard.sh" --labels-dir "$wide_labels" --results-dir "$wide_results" --out "$wide_output" >/dev/null
+grep -F "$commit" "$wide_output" | grep -F $'\t2\t1\t2\t1\ttrue\t12' >/dev/null
+"$repo_root/evals/summarize-scorecard.sh" "$wide_output" | grep -F 'p0_p1_recall=50.0%' >/dev/null
+
+expect_rejected_label() {
+  local case_name="$1" row="$2" expected_error="$3"
+  local case_labels="$tmp_dir/$case_name-labels" case_output="$tmp_dir/$case_name.tsv" case_error="$tmp_dir/$case_name.err"
+  mkdir -p "$case_labels"
+  cp "$labels_dir/$commit.labels.tsv" "$case_labels/$commit.labels.tsv"
+  printf '%s\n' "$row" >>"$case_labels/$commit.labels.tsv"
+  if "$repo_root/evals/build-scorecard.sh" --labels-dir "$case_labels" --results-dir "$results_dir" --out "$case_output" >/dev/null 2>"$case_error"; then
+    echo "scorecard builder accepted invalid label: $case_name" >&2
+    exit 1
+  fi
+  grep -F "$expected_error" "$case_error" >/dev/null
+  [[ ! -e "$case_output" ]] || {
+    echo "scorecard builder left partial output after invalid label: $case_name" >&2
+    exit 1
+  }
 }
 
-missed_malformed_labels="$tmp_dir/missed-malformed-labels"
-mkdir -p "$missed_malformed_labels"
-cp "$labels_dir/$commit.labels.tsv" "$missed_malformed_labels/$commit.labels.tsv"
-printf 'missed-malformed\tP2\tsrc/Missed.java\t0\tmissed\t没有有效行号\n' >>"$missed_malformed_labels/$commit.labels.tsv"
-missed_malformed_output="$tmp_dir/missed-malformed.tsv"
-if "$repo_root/evals/build-scorecard.sh" --labels-dir "$missed_malformed_labels" --results-dir "$results_dir" --out "$missed_malformed_output" >/dev/null 2>&1; then
-  echo 'scorecard builder accepted malformed missed metadata' >&2
-  exit 1
-fi
-[[ ! -e "$missed_malformed_output" ]] || {
-  echo 'scorecard builder left partial output after malformed missed failure' >&2
-  exit 1
-}
+# Isolate each invalid field: a severity error must not mask a line/notes error.
+expect_rejected_label missed-severity $'bad\tP2\tsrc/Missed.java\t42\tmissed\t代码证据' 'missed 标签只能记录 P0/P1'
+expect_rejected_label missed-zero $'bad\tP1\tsrc/Missed.java\t0\tmissed\t代码证据' 'missed 标签缺少有效'
+expect_rejected_label missed-negative $'bad\tP1\tsrc/Missed.java\t-1\tmissed\t代码证据' 'missed 标签缺少有效'
+expect_rejected_label missed-nonnumeric $'bad\tP1\tsrc/Missed.java\tline42\tmissed\t代码证据' 'missed 标签缺少有效'
+expect_rejected_label missed-reversed $'bad\tP1\tsrc/Missed.java\t20-10\tmissed\t代码证据' 'missed 标签行号范围必须正序'
+expect_rejected_label missed-shorter-end $'bad\tP1\tsrc/Missed.java\t20-9\tmissed\t代码证据' 'missed 标签行号范围必须正序'
+expect_rejected_label missed-empty-notes $'bad\tP1\tsrc/Missed.java\t42\tmissed\t' 'missed 标签缺少有效'
+expect_rejected_label missed-blank-notes $'bad\tP1\tsrc/Missed.java\t42\tmissed\t   ' 'missed 标签缺少有效'
+expect_rejected_label missed-absolute-path $'bad\tP1\t/src/Missed.java\t42\tmissed\t代码证据' 'missed 标签缺少有效'
+expect_rejected_label missed-parent-path $'bad\tP1\tsrc/../../Missed.java\t42\tmissed\t代码证据' 'missed 标签缺少有效'
+expect_rejected_label unknown-status $'bad\tP1\tsrc/Missed.java\t42\tunknown\t代码证据' '标签包含未知 finding status'
 
 overcount_labels="$tmp_dir/overcount-labels"
 mkdir -p "$overcount_labels"

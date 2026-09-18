@@ -684,6 +684,12 @@ filter_security_preflight_duplicates() {
     function overlaps(path, start, finish, other_path, other_start, other_finish) {
       return path == other_path && start > 0 && other_start > 0 && start <= other_finish && other_start <= finish
     }
+    function contains_independent_root(text) {
+      # A model paragraph can occasionally combine a deterministic URL/Java
+      # finding with a second root cause at the same location. Never discard
+      # that whole paragraph merely because one part overlaps preflight.
+      return text ~ /租户|tenant|跨租户|越权|权限绕过|授权绕过|SSRF|请求伪造|路径遍历|重放|竞态|并发|事务|SQL[[:space:]]*注入|迁移脚本|数据库升级|编译失败|构建失败/
+    }
     FILENAME == ARGV[1] {
       if ($0 ~ /凭据值被拼接到 URL|认证令牌从 URL 查询参数读取/) {
         set_location($0)
@@ -739,6 +745,12 @@ filter_security_preflight_duplicates() {
         for (i = 1; i <= hardcoded_count; i++) {
           if (overlaps(loc_path, loc_start, loc_end, hardcoded_path[i], hardcoded_start[i], hardcoded_end[i])) duplicate_hardcoded_credential = 1
         }
+      }
+      if (contains_independent_root(block)) {
+        duplicate_security = 0
+        duplicate_java_null = 0
+        duplicate_java_zero = 0
+        duplicate_hardcoded_credential = 0
       }
       if (!duplicate_security && !duplicate_java_null && !duplicate_java_zero && !duplicate_hardcoded_credential) {
         if (printed) printf "\n"
@@ -1328,68 +1340,88 @@ split_diff_into_chunks() {
       for (i = start; i <= end; i++) text = text lines[i] "\n"
       return text
     }
-    function write_hunk(header, hunk,    lines, n, i, hunk_header, body, line, limit, prefix, text,
-                         old_part, new_part, old_fields, new_fields, old_start, new_start,
-                         old_seen, new_seen, old_window, new_window, old_count, new_count,
-                         suffix, marker, emit_header) {
-      # A single unified-diff hunk can be larger than the model budget (for
-      # example, a newly added 600-line class). Keep every original line, but
-      # split the hunk body into ordered line windows. Repeating the file
-      # header is safe, but each window must get a new @@ range: otherwise the
-      # model sees later lines at the first window coordinates.
-      n = split(hunk, lines, "\n")
-      hunk_header = lines[1]
-      marker = hunk_header
-      sub(/^@@[[:space:]]+-/, "", marker)
-      split(marker, marker_parts, /[[:space:]]+\+/)
-      old_part = marker_parts[1]
-      new_part = marker_parts[2]
-      sub(/[[:space:]]+@@.*$/, "", new_part)
-      split(old_part, old_fields, ",")
-      split(new_part, new_fields, ",")
-      old_start = old_fields[1] + 0
-      new_start = new_fields[1] + 0
-      old_seen = 0
-      new_seen = 0
-      suffix = hunk_header
-      sub(/^.*@@/, "", suffix)
-      prefix = (first_section ? preamble : "")
-      # The regenerated range can be longer than the original (for example,
-      # when a one-digit count becomes a ten-digit count). Reserve enough
-      # bytes for that header growth so the shell-side unit check never turns
-      # an otherwise splittable hunk into a false oversized failure.
-      limit = max_bytes - length(prefix) - length(header) - 64
-      body = ""
-      for (i = 2; i <= n; i++) {
-        line = lines[i] "\n"
-        if (body != "" && length(body) + length(line) > limit) {
-          old_count = old_window
-          new_count = new_window
-          emit_header = sprintf("@@ -%d,%d +%d,%d @@%s\n", old_start + old_seen, old_count, new_start + new_seen, new_count, suffix)
-          text = header emit_header body
-          write_unit((first_section ? preamble : "") text)
-          first_section = 0
-          old_seen += old_window
-          new_seen += new_window
-          body = ""
-          old_window = 0
-          new_window = 0
+    function range_header(old_cursor, new_cursor, old_count, new_count, suffix,
+                          old_total, new_total, old_start, new_start) {
+      # A zero-length side uses the original zero anchor only when the whole
+      # source side is empty (e.g. a pure addition hunk). If a window merely
+      # has no lines from one side of a replacement, keep the next unread line
+      # as its anchor (e.g. `+1,0`, never `+0,0`).
+      return sprintf("@@ -%d,%d +%d,%d @@%s\n",
+        (old_total == 0 ? old_start : old_cursor), old_count,
+        (new_total == 0 ? new_start : new_cursor), new_count, suffix)
+    }
+    function write_hunk(header, hunk,    body_lines, n, i, j, fields, old_fields, new_fields,
+                        old_total, new_total, old_cursor, new_cursor, old_seen, new_seen,
+                        old_window, new_window, old_step, new_step, body_end,
+                        suffix, body, group, prefix, candidate, trailer) {
+      n = split(hunk, body_lines, "\n")
+      # split adds one terminal empty element; it is not a diff body line.
+      if (body_lines[n] == "") n--
+      if (!match(body_lines[1], /^@@ -[0-9]+(,[0-9]+)? \+[0-9]+(,[0-9]+)? @@/)) {
+        write_unit((first_section ? preamble : "") header hunk)
+        first_section = 0
+        return
+      }
+      suffix = substr(body_lines[1], RLENGTH + 1)
+      split(substr(body_lines[1], 1, RLENGTH), fields, " ")
+      old_total = (split(substr(fields[2], 2), old_fields, ",") == 1 ? 1 : old_fields[2] + 0)
+      new_total = (split(substr(fields[3], 2), new_fields, ",") == 1 ? 1 : new_fields[2] + 0)
+      old_cursor = old_fields[1] + 0
+      new_cursor = new_fields[1] + 0
+
+      # Locate the declared hunk body before handling section separators.
+      # Inside a hunk, even ---/+++ are source lines, never file headers.
+      old_seen = new_seen = 0
+      body_end = 1
+      for (i = 2; i <= n && (old_seen < old_total || new_seen < new_total); i++) {
+        if (body_lines[i] ~ /^-/) old_seen++
+        else if (body_lines[i] ~ /^\+/) new_seen++
+        else if (body_lines[i] ~ /^ /) { old_seen++; new_seen++ }
+        else if (body_lines[i] !~ /^\\ No newline at end of file$/) {
+          print "本地代码审查失败：无法解析 unified diff hunk 正文。" > "/dev/stderr"
+          exit 2
         }
-        body = body line
-        if (line ~ /^-/ && line !~ /^---/) old_window++
-        else if (line ~ /^\+/ && line !~ /^\+\+\+/) new_window++
-        else if (line ~ /^ /) { old_window++; new_window++ }
+        body_end = i
+      }
+      if (old_seen != old_total || new_seen != new_total) {
+        print "本地代码审查失败：unified diff hunk 行数与正文不符。" > "/dev/stderr"
+        exit 2
+      }
+      if (body_end < n && body_lines[body_end + 1] ~ /^\\ No newline at end of file$/) body_end++
+      trailer = ""
+      for (j = body_end + 1; j <= n; j++) trailer = trailer body_lines[j] "\n"
+      old_window = new_window = 0
+      body = ""
+      for (i = 2; i <= body_end; i++) {
+        old_step = (body_lines[i] ~ /^[- ]/ ? 1 : 0)
+        new_step = (body_lines[i] ~ /^[+ ]/ ? 1 : 0)
+        group = body_lines[i] "\n"
+        # Keep the no-newline marker attached to the source line it describes.
+        if (i < body_end && body_lines[i + 1] ~ /^\\ No newline at end of file$/) group = group body_lines[++i] "\n"
+        if (i == body_end) group = group trailer
+        prefix = (first_section ? preamble : "")
+        candidate = range_header(old_cursor, new_cursor, old_window + old_step, new_window + new_step, suffix, old_total, new_total, old_fields[1] + 0, new_fields[1] + 0)
+        if (body != "" && length(prefix header candidate body group) > max_bytes) {
+          write_unit(prefix header range_header(old_cursor, new_cursor, old_window, new_window, suffix, old_total, new_total, old_fields[1] + 0, new_fields[1] + 0) body)
+          first_section = 0
+          old_cursor += old_window
+          new_cursor += new_window
+          old_window = new_window = 0
+          body = ""
+        }
+        body = body group
+        old_window += old_step
+        new_window += new_step
       }
       if (body != "") {
-        emit_header = sprintf("@@ -%d,%d +%d,%d @@%s\n", old_start + old_seen, old_window, new_start + new_seen, new_window, suffix)
-        text = header emit_header body
-        write_unit((first_section ? preamble : "") text)
+        write_unit((first_section ? preamble : "") header range_header(old_cursor, new_cursor, old_window, new_window, suffix, old_total, new_total, old_fields[1] + 0, new_fields[1] + 0) body)
         first_section = 0
       }
     }
     function emit_section(    i, n, hunk_start, header, hunk) {
       if (section == "") return
       n = split(section, lines, "\n")
+      if (lines[n] == "") n--
       hunk_start = 0
       for (i = 1; i <= n; i++) {
         if (lines[i] ~ /^@@ /) {
@@ -2213,7 +2245,11 @@ collect_java_division_preflight() {
       if (prefix == "+" || prefix == " ") {
         if (prefix == "+") record_integer_parameters(text)
         record_guards(text, line_no)
-        record_division(text)
+        # A division on an unchanged context line is pre-existing.  Context
+        # is still useful for recovering guards/signatures, but only added
+        # lines may create a finding for this review; otherwise the same
+        # java-divide issue is reported on every later change in the hunk.
+        if (prefix == "+") record_division(text)
         if (integer_line == 0 && has_integer_parameter) {
           if (integer_line == 0) integer_line = line_no
         }
@@ -2307,12 +2343,11 @@ changed_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths.XXXXXX")"
 changed_imports_file="$(mktemp "${TMPDIR:-/tmp}/local-review-imports.XXXXXX")"
 deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX")"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
-preflight_emitted_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-emitted.XXXXXX")"
 java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -2433,7 +2468,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$preflight_emitted_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
@@ -2482,7 +2517,7 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   # Preserve complete finding paragraphs when routing deterministic evidence
   # to a shard. Line-by-line routing used to keep only the header, producing
   # malformed findings and allowing the model's duplicate to survive.
-  awk -v paths_file="$chunk_paths_file" -v emitted_file="$preflight_emitted_file" '
+  awk -v paths_file="$chunk_paths_file" '
     BEGIN {
       RS = "\n"
       while ((getline path < paths_file) > 0) if (path != "") allowed[path] = 1
@@ -2490,19 +2525,21 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
       RS = ""
       ORS = "\n\n"
     }
-    FILENAME == ARGV[1] { emitted[$0] = 1; next }
     {
       header = $0
       sub(/[\r\n].*$/, "", header)
       sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
       sub(/:[0-9]+(-[0-9]+)?[[:space:]]+-.*$/, "", header)
-      if (header in allowed && !emitted[$0]++) {
+      # Route the complete deterministic finding to every shard that contains
+      # the path. A large file can span multiple shards; each shard needs the
+      # evidence so its model duplicate is filtered locally. Final aggregation
+      # removes the identical preflight paragraph once, while preserving any
+      # independently worded finding that has different evidence.
+      if (header in allowed) {
         print $0
-        print $0 >> emitted_file
-        close(emitted_file)
       }
     }
-  ' "$preflight_emitted_file" "$build_preflight_file" >"$chunk_preflight_file"
+  ' "$build_preflight_file" >"$chunk_preflight_file"
   chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_preflight_file")"
   # Give each shard the complete changed-path inventory as scope metadata.
   # This is intentionally paths-only (no extra source content): it prevents

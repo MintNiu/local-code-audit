@@ -139,8 +139,9 @@ while IFS= read -r label_file; do
   fi
   # Candidate counts alone do not prove that the label was made from this
   # result. Require every confirmed/false-positive location to overlap a
-  # visible finding in the selected result. A `missed` row is the explicit
-  # human-recorded false negative and therefore must not overlap the result.
+  # visible finding in the selected result. Location overlap does not identify
+  # a root cause: a human-recorded `missed` row can share lines with a different
+  # visible finding. Its evidence notes, not location alone, explain the miss.
   while IFS=$'\t' read -r finding_id finding_severity finding_path finding_line finding_status finding_notes _; do
     [[ -n "$finding_id" && "$finding_id" != \#* ]] || continue
     case "$finding_status" in
@@ -150,27 +151,16 @@ while IFS= read -r label_file; do
           echo "missed 标签只能记录 P0/P1 根因: $commit $finding_id" >&2
           exit 1
         }
-        [[ "$finding_path" =~ ^[^[:space:]]+$ && "$finding_line" =~ ^[1-9][0-9]*(-[1-9][0-9]*)?$ && -n "$finding_notes" ]] || {
+        [[ "$finding_path" =~ ^[^[:space:]]+$ && "$finding_path" != /* && "/$finding_path/" != */../* && "/$finding_path/" != */./* && "$finding_line" =~ ^[1-9][0-9]*(-[1-9][0-9]*)?$ && "$finding_notes" =~ [^[:space:]] ]] || {
           echo "missed 标签缺少有效路径、行号或证据备注: $commit $finding_id" >&2
           exit 1
         }
-        # A missed row is an explicit false negative. If its location overlaps
-        # any visible candidate, the label contradicts the selected result and
-        # must be corrected before it can affect recall metrics.
-        if awk -v want_path="$finding_path" -v want_line="$finding_line" '
-          function range_start(value, fields) { split(value, fields, "-"); return fields[1] + 0 }
-          function range_end(value, fields) { split(value, fields, "-"); return (fields[2] == "" ? fields[1] : fields[2]) + 0 }
-          /^(P[0-3]|信息) / {
-            location = $2
-            candidate_path = location
-            sub(/:[0-9]+(-[0-9]+)?$/, "", candidate_path)
-            candidate_line = location
-            sub(/^.*:/, "", candidate_line)
-            if (candidate_path == want_path && range_end(candidate_line) >= range_start(want_line) && range_end(want_line) >= range_start(candidate_line)) found = 1
-          }
-          END { exit(found ? 0 : 1) }
-        ' "$result_file"; then
-          echo "missed 标签与结果候选重叠，拒绝把矛盾标签计入召回: $commit $finding_path:$finding_line" >&2
+        # Compare decimal strings by length, then lexically, to avoid shell
+        # integer overflow for malformed labels containing very large numbers.
+        line_start="${finding_line%%-*}"
+        line_end="${finding_line##*-}"
+        if [[ ${#line_end} -lt ${#line_start} || ( ${#line_end} -eq ${#line_start} && "$line_end" < "$line_start" ) ]]; then
+          echo "missed 标签行号范围必须正序: $commit $finding_id" >&2
           exit 1
         fi
         continue
