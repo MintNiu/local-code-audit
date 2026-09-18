@@ -205,7 +205,8 @@ final class QueryTokenParamAlias {
 
     String read(HttpServletRequest request) {
         String parameterName = TOKEN_HEADER;
-        return request.getParameter(parameterName);
+        String queryName = parameterName;
+        return request.getParameter(queryName);
     }
 }
 EOF
@@ -226,7 +227,8 @@ package com.example.api.client;
 final class UrlSecretAlias {
     String build(String token) {
         String queryValue = token;
-        return "https://internal.example/download?x-token=" + queryValue;
+        String finalValue = queryValue;
+        return "https://internal.example/download?x-token=" + finalValue;
     }
 }
 EOF
@@ -1074,6 +1076,9 @@ final class WrappedTokenAlias {
             javax.servlet.http.HttpServletRequest request
     )
     {
+        String json = """
+                {"nested": {"token": "safe"}}
+                """;
         String marker = "{";
         String commentMarker = "/* not code */";
         String parameterName = "safe";
@@ -1084,6 +1089,9 @@ final class WrappedTokenAlias {
             javax.servlet.http.HttpServletRequest request
     )
     {
+        String json = """
+                {"nested": {"token": "safe"}}
+                """;
         String marker = "{";
         String commentMarker = "/* not code */";
         String parameterName = "safe";
@@ -1103,6 +1111,9 @@ final class WrappedTokenAlias {
             javax.servlet.http.HttpServletRequest request
     )
     {
+        String json = """
+                {"nested": {"token": "safe"}}
+                """;
         String marker = "{";
         String commentMarker = "/* not code */";
         String parameterName = TOKEN_HEADER;
@@ -1113,6 +1124,9 @@ final class WrappedTokenAlias {
             javax.servlet.http.HttpServletRequest request
     )
     {
+        String json = """
+                {"nested": {"token": "safe"}}
+                """;
         String marker = "{";
         String commentMarker = "/* not code */";
         String parameterName = "safe";

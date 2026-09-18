@@ -1791,8 +1791,28 @@ collect_security_preflight() {
   # names such as authToken/signature/credential without treating ordinary IDs
   # as secrets.
   awk -v repo_root="$source_root" '
-    function clean_java_source_line(raw, text) {
+    function clean_java_source_line(raw, text, pos, prefix, tail, close_pos) {
       text = raw
+      # Java 15 text blocks can contain arbitrary JSON/SQL braces across
+      # lines. Strip them with state rather than letting their contents alter
+      # the method brace depth.
+      if (text_block) {
+        pos = index(text, "\"\"\"")
+        if (pos == 0) return ""
+        text = substr(text, pos + 3)
+        text_block = 0
+      }
+      while ((pos = index(text, "\"\"\"")) > 0) {
+        prefix = substr(text, 1, pos - 1)
+        tail = substr(text, pos + 3)
+        close_pos = index(tail, "\"\"\"")
+        if (close_pos == 0) {
+          text = prefix
+          text_block = 1
+          break
+        }
+        text = prefix substr(tail, close_pos + 3)
+      }
       # Remove literals before comment markers so `http://` or braces inside
       # strings cannot change the lexical depth used for method boundaries.
       gsub(/"([^"\\]|\\.)*"/, "", text)
@@ -1822,6 +1842,7 @@ collect_security_preflight() {
       depth = 0
       active_depth = 0
       block_comment = 0
+      text_block = 0
       candidate = ""
       candidate_start = 0
       candidate_lines = 0
@@ -1876,6 +1897,18 @@ collect_security_preflight() {
       # lower-case local from another method to leak across its boundary.
       return alias_scope == "__file__" && alias_name ~ /^[A-Z][A-Z0-9_]*$/
     }
+    function known_token_alias(alias_name, current_scope) {
+      if ((alias_name SUBSEP current_scope) in token_parameter_vars) return 1
+      if ((alias_name SUBSEP "__file__") in token_parameter_vars &&
+          alias_scope_matches(alias_name, "__file__", current_scope)) return 1
+      return 0
+    }
+    function known_url_secret_alias(alias_name, current_scope) {
+      if ((alias_name SUBSEP current_scope) in url_secret_vars) return 1
+      if ((alias_name SUBSEP "__file__") in url_secret_vars &&
+          alias_scope_matches(alias_name, "__file__", current_scope)) return 1
+      return 0
+    }
     function emit_ssrf(at_line) {
       if (!(at_line in ssrf_emitted_lines)) {
         printf "P1 %s:%d - 不可信 URL 直接进入出站 HTTP 调用，存在服务端请求伪造（SSRF）风险。\n影响：攻击者可借助服务端访问内网服务、云 metadata 或任意外部地址，绕过客户端网络边界。\n修复建议：仅允许明确的 https scheme 和 host allowlist，在发起请求前解析并校验目标，拒绝内网和 metadata 地址。\n验证方式：使用外部地址、内网地址和云 metadata 地址测试，确认未允许的目标均在出站调用前被拒绝。\n\n", path, at_line
@@ -1897,16 +1930,21 @@ collect_security_preflight() {
         query_token_emitted_lines[at_line] = 1
       }
     }
-    function record_token_parameter_alias(text, at_line, assignment, fields, count, name, scope) {
-      if (text !~ /=[[:space:]]*(TOKEN_HEADER|"x-token")[[:space:]]*;?[[:space:]]*$/) return
+    function record_token_parameter_alias(text, at_line, assignment, fields, count, name, scope, rhs) {
+      if (text !~ /=[[:space:]]*(TOKEN_HEADER|"x-token"|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;?[[:space:]]*$/) return
       assignment = text
       sub(/[[:space:]]*=.*/, "", assignment)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", assignment)
       count = split(assignment, fields, /[[:space:]]+/)
       name = fields[count]
       if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+        rhs = text
+        sub(/^.*=[[:space:]]*/, "", rhs)
+        sub(/[;[:space:]]*$/, "", rhs)
         scope = scope_for_line(at_line)
-        token_parameter_vars[name SUBSEP scope] = 1
+        if (rhs == "TOKEN_HEADER" || rhs == "\"x-token\"" || known_token_alias(rhs, scope)) {
+          token_parameter_vars[name SUBSEP scope] = 1
+        }
       }
     }
     function record_url_secret_alias(text, at_line, assignment, lhs, rhs, fields, count, name, scope) {
@@ -1924,8 +1962,8 @@ collect_security_preflight() {
       rhs = assignment
       sub(/^.*=[[:space:]]*/, "", rhs)
       sub(/[;[:space:]]*$/, "", rhs)
-      if (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/) {
-        scope = scope_for_line(at_line)
+      scope = scope_for_line(at_line)
+      if (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/ || known_url_secret_alias(rhs, scope)) {
         url_secret_vars[name SUBSEP scope] = 1
       }
     }

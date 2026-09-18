@@ -85,6 +85,7 @@
 - 2026-09-18 继续收紧预检与聚合：`java-token-url` 现在要求完整参数名并兼容大小写 `X-Token`，不再把 `tokenizer`/`authorizationCode` 等前缀误报；别名状态跨同文件 hunk 保留。`java-divide` 只接受拒绝 `null`/`0` 的 guard 方向，忽略注释、反向比较和同一行后置检查，并覆盖链式除法。最终分片聚合按风险族语义去重，新增低严重度先于高严重度、不同措辞分片重复和多分母回归；`test-preflight.sh`、`test-sharding.sh` 均通过。
 - 同日进一步把 token/secret alias 绑定到当前源码的方法范围，修复不同方法复用同名局部变量时的跨 hunk 误报；新增跨 hunk 正例与同名局部变量负例通过，真实 Ollama 合成门禁仍保持全部正例命中、clean 负例通过。
 - 同日补齐方法作用域解析边界：支持多行方法签名、左花括号换行，并在计算 Java 大括号深度前剥离字符串、字符字面量和块/行注释；新增 wrapped-signature、同名局部变量和大写类常量别名回归，避免 `java-token-url` 因代码排版变化反复误报或漏报。
+- 随后补齐 Java text block 与多级别名边界：作用域扫描忽略跨行 `"""..."""` 内容中的 JSON/SQL 花括号，token/secret 直接别名可连续传播但不会把普通变量扩大为凭据；对应回归覆盖两级 token 查询别名和两级 URL 凭据别名。
 - 同日对 `platform-file:a9a1d4a` 做独立安全留出：初始模型返回 clean，人工复核确认单删和批量删除都移除了 `fileStorageService.delete(...)`，导致 OSS/本地对象残留；初始私有 scorecard 为 0/1，作为真实漏报对照。新增对象生命周期确定性预检、同文件同根因聚合和 `missed` 人工标签状态后重跑，单删/批删合并为 `99-108` 行一条 P1，scorecard 恢复为 1/1、0 误报；原始与修复后结果均保留在私有目录。
 
 ## 失败处理原则
