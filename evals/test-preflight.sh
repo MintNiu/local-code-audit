@@ -281,6 +281,71 @@ final class BlockCommentOnly {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/QueryTokenFalsePositive.java" <<'EOF'
+package com.example.api.client;
+
+final class QueryTokenFalsePositive {
+    String read(javax.servlet.http.HttpServletRequest request) {
+        String first = request.getParameter("tokenizer");
+        String second = request.getParameter("authorizationCode");
+        return first + second;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/QueryTokenUppercase.java" <<'EOF'
+package com.example.api.client;
+
+final class QueryTokenUppercase {
+    String read(javax.servlet.http.HttpServletRequest request) {
+        return request.getParameter("X-Token");
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/ReverseGuardDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class ReverseGuardDivide {
+    int divide(Integer a, Integer b) {
+        if (b != 0) return 0;
+        return 30 / b;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/CommentGuardDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class CommentGuardDivide {
+    int divide(Integer a, Integer b) {
+        // if (b == 0) return 0;
+        return 30 / b;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/SafeZeroDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class SafeZeroDivide {
+    int divide(Integer a, Integer b) {
+        if (b == 0) throw new IllegalArgumentException("zero");
+        return 30 / b;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/ChainDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class ChainDivide {
+    int divide(Integer a, Integer b, Integer c) {
+        return a / b / c;
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/SsrfPreflight.java" <<'EOF'
 package com.example.api.client;
 
@@ -779,6 +844,25 @@ duplicate_credential_count="$(printf '%s\n' "$duplicate_credential_output" | gre
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P2 application-credential.yml:3 - 凭据风险的低严重度描述。影响：凭据可能泄露。修复建议：改用密钥管理。验证方式：检查配置。\\n\\nP1 application-credential.yml:3 - 同一凭据风险的高严重度描述。影响：凭据会泄露。修复建议：立即轮换并移除。验证方式：检查历史和构建产物。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+severity_order_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+severity_order_count="$(printf '%s\n' "$severity_order_output" | grep -F 'application-credential.yml:3' | wc -l | tr -d ' ')"
+[[ "$severity_order_count" == "1" ]] || {
+  echo 'semantic dedup kept both low- and high-severity variants' >&2
+  printf '%s\n' "$severity_order_output" >&2
+  exit 1
+}
+if printf '%s\n' "$severity_order_output" | grep -F 'P2 application-credential.yml:3' >/dev/null; then
+  echo 'semantic dedup retained an earlier lower-severity finding' >&2
+  printf '%s\n' "$severity_order_output" >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 printf '{"response":"P1 application-credential.yml:3 - 明文 AccessKey 已提交。影响：凭据泄露。修复建议：改用无默认值的环境变量。验证方式：检查配置与历史。\\n\\nP1 application-credential.yml:3 - token 被拼接到 URL 查询参数。影响：令牌可能进入访问日志。修复建议：改用请求头。验证方式：检查最终请求 URI。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
@@ -843,6 +927,39 @@ expression_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1
   printf '%s\n' "$java_division_output" >&2
   exit 1
 }
+if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/QueryTokenFalsePositive.java' >/dev/null; then
+  echo 'URL-token preflight reported a parameter-name prefix false positive' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+fi
+printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/QueryTokenUppercase.java' >/dev/null || {
+  echo 'URL-token preflight missed case-insensitive X-Token' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
+for reverse_guard_fixture in ReverseGuardDivide CommentGuardDivide; do
+  printf '%s\n' "$java_division_output" | grep -F "P1 src/main/java/com/example/api/client/${reverse_guard_fixture}.java" >/dev/null || {
+    echo "missing Java division preflight for ${reverse_guard_fixture}" >&2
+    printf '%s\n' "$java_division_output" >&2
+    exit 1
+  }
+  printf '%s\n' "$java_division_output" | grep -F "P1 src/main/java/com/example/api/client/${reverse_guard_fixture}.java:" | grep -F '除法分母未见非零保护' >/dev/null || {
+    echo "zero-risk guard was incorrectly suppressed for ${reverse_guard_fixture}" >&2
+    printf '%s\n' "$java_division_output" >&2
+    exit 1
+  }
+done
+if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/SafeZeroDivide.java:' | grep -F '除法分母未见非零保护' >/dev/null; then
+  echo 'true zero guard did not suppress the deterministic zero-risk finding' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+fi
+chain_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1 src/main/java/com/example/api/client/ChainDivide.java:' || true)"
+[[ "$chain_division_count" -ge 4 ]] || {
+  echo 'Java division preflight missed one side of a chained division' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
 
 # A vulnerable division that is already present in the parent must not be
 # reported again merely because a later, unrelated line changed in the same
@@ -894,6 +1011,43 @@ preexisting_query_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL
 if printf '%s\n' "$preexisting_query_token_output" | grep -F 'PreExistingQueryToken.java:' >/dev/null; then
   echo 'URL-token preflight reported an unchanged, pre-existing query-token read' >&2
   printf '%s\n' "$preexisting_query_token_output" >&2
+  exit 1
+fi
+
+# Alias state must survive separate unified-diff hunks in one file: the
+# constant/parameter alias can be changed in one hunk while the query read is
+# changed much farther away.  This is the shape that previously made
+# java-token-url findings depend on hunk boundaries.
+cat >"$repo/src/main/java/com/example/api/client/CrossHunkTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class CrossHunkTokenAlias {
+    private static final String TOKEN_HEADER = "x-token";
+
+    String read(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = "safe";
+        int one = 1;
+        int two = 2;
+        int three = 3;
+        int four = 4;
+        int five = 5;
+        int six = 6;
+        int seven = 7;
+        int eight = 8;
+        return request.getParameter("safe");
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/CrossHunkTokenAlias.java
+git -C "$repo" commit -qm cross-hunk-token-base
+perl -0pi -e 's/String parameterName = "safe";/String parameterName = TOKEN_HEADER;/; s/return request\.getParameter\("safe"\);/return request.getParameter(parameterName);/' \
+  "$repo/src/main/java/com/example/api/client/CrossHunkTokenAlias.java"
+cross_hunk_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if ! printf '%s\n' "$cross_hunk_token_output" | grep -F 'P1 src/main/java/com/example/api/client/CrossHunkTokenAlias.java:' >/dev/null; then
+  echo 'cross-hunk query-token alias was not carried through the file' >&2
+  printf '%s\n' "$cross_hunk_token_output" >&2
   exit 1
 fi
 

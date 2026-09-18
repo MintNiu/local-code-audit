@@ -25,23 +25,30 @@ exit 0
 EOF
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+count_file="${LOCAL_REVIEW_CAPTURE}.count"
+count=0
+if [[ -f "$count_file" ]]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$count_file"
 for ((i = 1; i <= $#; i++)); do
   if [[ "${!i}" == @* ]]; then
     cat "${!i#@}" >>"$LOCAL_REVIEW_CAPTURE"
     printf '\n--- request boundary ---\n' >>"$LOCAL_REVIEW_CAPTURE"
   fi
 done
-printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
+printf '{"response":"P1 A.txt:1 - 认证令牌从 URL 查询参数读取，分片变体 %s。影响：令牌可能进入访问日志。修复建议：改用受保护的请求头。验证方式：检查代理日志。","done":true,"done_reason":"stop"}\n' "$count"
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
-PATH="$fake_bin:$PATH" \
+sharded_output="$(PATH="$fake_bin:$PATH" \
   LOCAL_REVIEW_CAPTURE="$capture" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review \
   OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
   OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
   OLLAMA_REVIEW_NUM_CTX=16384 \
-  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
 
 expected="$(printf '%s\n' \
   '@@ -1,86 +1,0 @@' \
@@ -52,6 +59,13 @@ actual="$(grep -o '@@ -[0-9,]* +[0-9,]* @@' "$capture" | sort -u)"
 [[ "$actual" == "$expected" ]] || {
   echo 'oversized hunk coordinates changed unexpectedly' >&2
   printf '%s\n' "$actual" >&2
+  exit 1
+}
+
+shard_finding_count="$(printf '%s\n' "$sharded_output" | grep -c '^P1 A.txt:1' || true)"
+[[ "$shard_finding_count" == "1" ]] || {
+  echo 'semantic shard aggregation retained repeated findings at one location' >&2
+  printf '%s\n' "$sharded_output" >&2
   exit 1
 }
 

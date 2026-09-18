@@ -450,8 +450,23 @@ dedup_exact_findings() {
       header = block_lines[1]
       sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
       sub(/[[:space:]]+-.*$/, "", header)
-      key = header
       body_text = block
+      key = header
+      # Deterministic chained-division findings on one source line carry the
+      # involved operand in their body. Include it in the semantic location
+      # key so `a / b / c` does not erase the independent `c` risk merely
+      # because both operators share one line number.
+      variable_key = body_text
+      if (body_text ~ /涉及变量[[:space:]]*/) {
+        sub(/^.*涉及变量[[:space:]]*/, "", variable_key)
+        sub(/[^A-Za-z0-9_,[:space:]].*$/, "", variable_key)
+        key = key "|" variable_key
+      } else if (body_text ~ /分母变量[[:space:]]*/) {
+        variable_key = body_text
+        sub(/^.*分母变量[[:space:]]*/, "", variable_key)
+        sub(/[^A-Za-z0-9_].*$/, "", variable_key)
+        key = key "|" variable_key
+      }
       blocks[++count] = block
       keys[count] = key
       bodies[count] = body_text
@@ -473,6 +488,28 @@ dedup_exact_findings() {
       } else {
         credential_family[count] = ""
       }
+      # Classify common non-credential roots so shard aggregation can merge
+      # different prose for the same location without collapsing independent
+      # findings that happen to share a line.
+      if (body_text ~ /NullPointerException|非空保护|自动拆箱/) {
+        finding_family[count] = "java-null"
+      } else if (body_text ~ /ArithmeticException|除零|除数|分母|非零保护/) {
+        finding_family[count] = "java-zero"
+      } else if (body_text ~ /SSRF|请求伪造/) {
+        finding_family[count] = "ssrf"
+      } else if (body_text ~ /路径遍历|目录逃逸/) {
+        finding_family[count] = "path-traversal"
+      } else if (body_text ~ /认证令牌|令牌.*URL|URL.*令牌|查询参数.*令牌|token.*URL|URL.*token|Token.*URL|URL.*Token|TOKEN.*URL|URL.*TOKEN/) {
+        finding_family[count] = "url-token"
+      } else if (body_text ~ /硬编码凭据|AccessKey|access-key|secret-key|api-key|密码.*配置/) {
+        finding_family[count] = "hardcoded-credential"
+      } else if (body_text ~ /缺少仓库内类型|编译失败|import.*类型/) {
+        finding_family[count] = "build"
+      } else if (body_text ~ /跨租户|租户隔离|tenantId|TenantId|TENANT_ID|tenant[[:space:]-]*isolation|Tenant[[:space:]-]*Isolation/) {
+        finding_family[count] = "tenant"
+      } else {
+        finding_family[count] = ""
+      }
       severity[count] = severity_rank(block_lines[1])
       block = ""
     }
@@ -480,40 +517,56 @@ dedup_exact_findings() {
     { block = block $0 "\n" }
     END {
       flush()
+      # Decide all survivors before printing anything. The old one-pass
+      # implementation could print an early P2 and only later discover a
+      # more severe P1 for the same location, leaving both in the report.
       for (i = 1; i <= count; i++) {
-        duplicate = 0
         aggregate = has_null[i] && has_div[i]
         if (aggregate) {
+          null_component = 0
+          div_component = 0
           for (j = 1; j <= count; j++) {
             if (j == i || keys[j] != keys[i]) continue
             if (has_null[j] && !has_div[j]) null_component = 1
             if (has_div[j] && !has_null[j]) div_component = 1
           }
-          if (null_component && div_component) skip = 1
+          if (null_component && div_component) skipped[i] = 1
         }
-        # Models often describe the same credential exposure twice with
-        # different prose. Keep one finding for the same path/range and risk
-        # family, preferring the more severe entry; preserve findings at
-        # different locations or for independent risk families.
-        if (!skip && has_credential[i]) {
-          for (j = 1; j < i; j++) {
-            if (keys[j] != keys[i] || !has_credential[j] ||
-                credential_family[j] == "" || credential_family[j] != credential_family[i]) continue
-            if (severity[j] <= severity[i]) {
-              duplicate = 1
-            } else {
-              skipped[j] = 1
-            }
+      }
+      # Models often describe the same credential exposure twice with
+      # different prose. Keep one finding for the same path/range and risk
+      # family, preferring the most severe entry and then the earliest entry.
+      # Independent locations/families remain visible.
+      for (i = 1; i <= count; i++) {
+        if (skipped[i] || !has_credential[i]) continue
+        for (j = 1; j <= count; j++) {
+          if (i == j || skipped[j] || keys[j] != keys[i] || !has_credential[j] ||
+              credential_family[j] == "" || credential_family[j] != credential_family[i]) continue
+          if (severity[j] < severity[i] || (severity[j] == severity[i] && j < i)) {
+            skipped[i] = 1
+            break
           }
         }
-        if (!skip && !duplicate && !skipped[i] && !seen[bodies[i]]++) {
+      }
+      # Apply the same severity-first choice to deterministic risk families
+      # emitted by model shards. Blocks with no high-confidence family remain
+      # visible because their root cannot be established safely.
+      for (i = 1; i <= count; i++) {
+        if (skipped[i] || finding_family[i] == "") continue
+        for (j = 1; j <= count; j++) {
+          if (i == j || skipped[j] || keys[j] != keys[i] || finding_family[j] != finding_family[i]) continue
+          if (severity[j] < severity[i] || (severity[j] == severity[i] && j < i)) {
+            skipped[i] = 1
+            break
+          }
+        }
+      }
+      for (i = 1; i <= count; i++) {
+        if (!skipped[i] && !seen[bodies[i]]++) {
           if (printed) printf "\n"
           printf "%s", blocks[i]
           printed = 1
         }
-        null_component = 0
-        div_component = 0
-        skip = 0
       }
     }
   '
@@ -1788,8 +1841,6 @@ collect_security_preflight() {
     }
     function reset_hunk(    name) {
       for (name in url_input_vars) delete url_input_vars[name]
-      for (name in token_parameter_vars) delete token_parameter_vars[name]
-      for (name in url_secret_vars) delete url_secret_vars[name]
       for (name in query_token_emitted_lines) delete query_token_emitted_lines[name]
       url_guard_line = 0
       url_changed = 0
@@ -1803,6 +1854,8 @@ collect_security_preflight() {
       for (name in path_candidate_vars) delete path_candidate_vars[name]
     }
     function reset_file(    name) {
+      for (name in token_parameter_vars) delete token_parameter_vars[name]
+      for (name in url_secret_vars) delete url_secret_vars[name]
       for (name in file_url_input_vars) delete file_url_input_vars[name]
       file_url_changed = 0
       for (name in credential_lines) delete credential_lines[name]
@@ -2009,7 +2062,12 @@ collect_security_preflight() {
         if (url_risk) {
           printf "P1 %s:%d - 凭据值被拼接到 URL 查询参数或路径中，可能通过请求目标泄漏。\n影响：token/secret 等敏感值会进入 URL，可能被代理、网关或访问日志持久化。\n修复建议：改用受保护的请求头或安全的内部认证通道，避免把秘密放入 URL。\n验证方式：检查最终请求 URI 和网关/代理日志，确认 URL 不再包含敏感值。\n\n", path, line_no
         }
-        if (added ~ /getParameter[[:space:]]*\([^[:alnum:]_]*(x[-_]?token|token|authorization|access[-_]?token|refresh[-_]?token|session[-_]?key|jwt|api[-_]?key|TOKEN_HEADER)/) {
+        # Match complete quoted parameter names only. Prefix matching here
+        # made harmless names such as `tokenizer` and `authorizationCode`
+        # look like authentication tokens, while lower-case normalization
+        # still catches common `X-Token` spellings.
+        if (tolower(added) ~ /getparameter[[:space:]]*\([[:space:]]*["\047](x[-_]?token|token|authorization|access[-_]?token|refresh[-_]?token|session[-_]?key|jwt|api[-_]?key)["\047][[:space:]]*\)/ ||
+            added ~ /getParameter[[:space:]]*\([[:space:]]*TOKEN_HEADER[[:space:]]*\)/) {
           emit_query_token(line_no)
         }
         for (input_name in token_parameter_vars) {
@@ -2077,9 +2135,12 @@ collect_java_division_preflight() {
       }
     }
     function unguarded(name, guards, at_line) {
-      return !(name in guards) || guards[name] > at_line
+      # A same-line guard may appear after the division, and this compact
+      # preflight representation has no column information. Treat it as
+      # uncertain instead of suppressing a real risk.
+      return !(name in guards) || guards[name] >= at_line
     }
-    function emit_hunk(    i, null_risk, zero_risk, at_line, left, right) {
+    function emit_hunk(    i, null_risk, zero_risk, at_line, left, right, null_operands) {
       if (path == "" || hunk_start == "") return
       if (has_division && !has_integer_parameter) source_method_parameters()
       for (i = 1; i <= division_count; i++) {
@@ -2088,17 +2149,24 @@ collect_java_division_preflight() {
         right = division_rights[i]
         null_risk = has_division && ((left in integer_names && unguarded(left, null_guards, at_line)) || (right in integer_names && unguarded(right, null_guards, at_line)))
         zero_risk = has_division && (right in integer_names) && unguarded(right, zero_guards, at_line)
+        null_operands = ""
+        if (left in integer_names && unguarded(left, null_guards, at_line)) null_operands = left
+        if (right in integer_names && unguarded(right, null_guards, at_line)) {
+          if (null_operands != "") null_operands = null_operands ", "
+          null_operands = null_operands right
+        }
         if (null_risk) {
-          printf "P1 %s:%d - Integer 包装类型参与除法时未见非空保护，自动拆箱可能抛出 NullPointerException。\n影响：调用方传入 null 时方法会在进入业务处理前失败，导致请求或任务异常。\n修复建议：在除法前显式拒绝 null，或改用基本类型并由边界层完成输入校验。\n验证方式：分别以 null 参数调用方法，确认返回受控错误而不是 NullPointerException。\n\n", path, at_line
+          printf "P1 %s:%d - Integer 包装类型参与除法时未见非空保护（涉及变量 %s），自动拆箱可能抛出 NullPointerException。\n影响：调用方传入 null 时方法会在进入业务处理前失败，导致请求或任务异常。\n修复建议：在除法前显式拒绝 null，或改用基本类型并由边界层完成输入校验。\n验证方式：分别以 null 参数调用方法，确认返回受控错误而不是 NullPointerException。\n\n", path, at_line, null_operands
         }
         if (zero_risk) {
-          printf "P1 %s:%d - 除法分母未见非零保护，运行时可能抛出 ArithmeticException。\n影响：分母为 0 时请求或任务会异常终止，可能造成接口失败或批处理任务中断。\n修复建议：在执行除法前拒绝 0，或定义并验证分母为 0 时的业务结果。\n验证方式：分别以分母为 0 和非 0 的输入执行单元测试，确认错误路径和正常路径均符合契约。\n\n", path, at_line
+          printf "P1 %s:%d - 除法分母未见非零保护（分母变量 %s），运行时可能抛出 ArithmeticException。\n影响：分母为 0 时请求或任务会异常终止，可能造成接口失败或批处理任务中断。\n修复建议：在执行除法前拒绝 0，或定义并验证分母为 0 时的业务结果。\n验证方式：分别以分母为 0 和非 0 的输入执行单元测试，确认错误路径和正常路径均符合契约。\n\n", path, at_line, right
         }
       }
     }
     function reset_hunk() {
       has_division = 0
       block_comment = 0
+      guard_block_comment = 0
       has_integer_parameter = 0
       integer_line = 0
       division_line = 0
@@ -2130,21 +2198,46 @@ collect_java_division_preflight() {
         }
       }
     }
-    function record_guards(text, line,    name, pattern) {
+    function record_guards(text, line,    name, pattern, clean) {
       # A comparison in a log statement or an unrelated branch is not proof
       # that the value is safe at the division.  Only accept compact guards
       # whose same line exits/throws/asserts; multi-line control-flow guards
       # remain model-reviewed instead of suppressing a deterministic finding.
-      if (text !~ /(^|[^[:alnum:]_])(if|assert)[[:space:]]*\(/ ||
-          text !~ /(throw|return|continue|break|assert|requireNonNull)/) return
+      clean = text
+      if (guard_block_comment) {
+        if (clean ~ /\*\//) {
+          sub(/^.*\*\//, "", clean)
+          guard_block_comment = 0
+        } else return
+      }
+      if (clean ~ /\/\*/) {
+        if (clean ~ /\/\*.*\*\//) {
+          sub(/\/\*.*\*\//, "", clean)
+        } else {
+          sub(/\/\*.*/, "", clean)
+          guard_block_comment = 1
+        }
+      }
+      # Ignore guard-looking text inside Java string literals (for example a
+      # log message or documentation example).
+      gsub(/"([^"\\]|\\.)*"/, "", clean)
+      sub(/\/\/.*$/, "", clean)
+      if (clean !~ /(^|[^[:alnum:]_])(if|assert)[[:space:]]*\(/ ||
+          clean !~ /(throw|return|continue|break|assert|requireNonNull)/) return
       for (name in integer_names) {
-        pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*(==|!=)[[:space:]]*null([^[:alnum:]_]|$)"
-        if (text ~ pattern && (!(name in null_guards) || line < null_guards[name])) null_guards[name] = line
-        pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*(==|!=|<=|>=|<|>)[[:space:]]*0([^[:alnum:]_]|$)"
-        if (text ~ pattern && (!(name in zero_guards) || line < zero_guards[name])) zero_guards[name] = line
+        # Only an exit on `name == null` proves the continuing path non-null.
+        # The opposite direction (`!= null`) exits on the safe path and leaves
+        # null reachable at the division.
+        pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*==[[:space:]]*null([^[:alnum:]_]|$)"
+        if (clean ~ pattern && (!(name in null_guards) || line < null_guards[name])) null_guards[name] = line
+        # `== 0` and `<= 0` are the only compact exit guards that prove zero
+        # cannot reach the continuing division path. `!= 0`, `> 0`, etc.
+        # protect the opposite branch and must not suppress the finding.
+        pattern = "(^|[^[:alnum:]_])" name "[[:space:]]*(==|<=)[[:space:]]*0([^[:alnum:]_]|$)"
+        if (clean ~ pattern && (!(name in zero_guards) || line < zero_guards[name])) zero_guards[name] = line
       }
     }
-    function find_division_slash(text,    i, ch, next_ch, previous_ch, quote, escaped, single_quote) {
+    function find_division_slash(text, start_at,    i, ch, next_ch, previous_ch, quote, escaped, single_quote) {
       # Find an operator slash outside Java string/character literals and
       # line comments. A literal such as "a/b" may precede the real
       # expression on the same changed line; using index(text, "/") would
@@ -2152,7 +2245,8 @@ collect_java_division_preflight() {
       quote = ""
       escaped = 0
       single_quote = sprintf("%c", 39)
-      for (i = 1; i <= length(text); i++) {
+      if (start_at == "") start_at = 1
+      for (i = start_at; i <= length(text); i++) {
         ch = substr(text, i, 1)
         if (quote != "") {
           if (escaped) {
@@ -2190,27 +2284,32 @@ collect_java_division_preflight() {
       }
       return 0
     }
-    function record_division(text,    expression, slash, left_text, right_text, left, right, trimmed) {
+    function record_division(text,    expression, slash, left_text, right_text, left, right, trimmed, search_at) {
       trimmed = text
       sub(/^[[:space:]]+/, "", trimmed)
       if (trimmed ~ /^\/\// || trimmed ~ /^\/\*|^\*/) return
-      slash = find_division_slash(text)
-      if (slash == 0) return
-      left_text = substr(text, 1, slash - 1)
-      right_text = substr(text, slash + 1)
-      gsub(/[^A-Za-z0-9_]+$/, "", left_text)
-      gsub(/^[^A-Za-z0-9_]+/, "", right_text)
-      sub(/[^A-Za-z0-9_].*$/, "", right_text)
-      left = left_text
-      sub(/^.*[^A-Za-z0-9_]/, "", left)
-      right = right_text
-      if (left == "" || right == "") return
-      has_division = 1
-      division_count++
-      division_lefts[division_count] = left
-      division_rights[division_count] = right
-      division_lines[division_count] = line_no
-      if (division_line == 0) division_line = line_no
+      search_at = 1
+      while (search_at <= length(text)) {
+        slash = find_division_slash(text, search_at)
+        if (slash == 0) break
+        left_text = substr(text, 1, slash - 1)
+        right_text = substr(text, slash + 1)
+        gsub(/[^A-Za-z0-9_]+$/, "", left_text)
+        gsub(/^[^A-Za-z0-9_]+/, "", right_text)
+        sub(/[^A-Za-z0-9_].*$/, "", right_text)
+        left = left_text
+        sub(/^.*[^A-Za-z0-9_]/, "", left)
+        right = right_text
+        if (left != "" && right != "") {
+          has_division = 1
+          division_count++
+          division_lefts[division_count] = left
+          division_rights[division_count] = right
+          division_lines[division_count] = line_no
+          if (division_line == 0) division_line = line_no
+        }
+        search_at = slash + 1
+      }
     }
     /^diff --git / {
       emit_hunk()
@@ -2589,8 +2688,9 @@ if [[ "$has_findings" == true ]]; then
   # Re-establish the global severity order after shard aggregation. Each shard
   # is ordered independently, so lexical chunk order cannot guarantee P0/P1
   # findings appear before lower-severity findings. Keep original order within
-  # each severity and remove only byte-identical paragraphs.
-  sort_findings_by_severity <"$combined_output_file" | LC_ALL=C awk 'BEGIN { RS = ""; ORS = "\n\n" } !seen[$0]++ { print }'
+  # each severity. Re-run semantic deduplication after shard aggregation:
+  # shards can describe one root cause at one location with different prose.
+  sort_findings_by_severity <"$combined_output_file" | dedup_exact_findings | sort_findings_by_severity
 else
   printf '未发现阻塞问题\n'
 fi
