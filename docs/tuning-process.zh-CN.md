@@ -243,7 +243,7 @@ URL 预检也补充了 `authToken`、`accessToken`、`refreshToken`、`sessionKe
 
 随后补齐了 Java text block 的除法扫描状态：如果新增行只是 `"""...a / b..."""` 文本内容，不能因为同一方法有 `Integer` 参数就误报 `java-divide`。扫描器现在先消费上下文中的 text block/块注释边界，再只对新增代码中的可见运算符记录 finding；新增负例已加入 `test-preflight.sh`。
 
-跨多个 unified-diff hunk 时，text block 的开始分隔符可能不在当前 hunk 的上下文中；仅靠逐行状态仍会漏掉这类边界。现在除法预检从当前源码快照记录每个行号之前的 text block/块注释状态，在每个 hunk 起点恢复状态，再继续只扫描新增行。新增 `SplitTextBlockDivide` 回归确认远离分隔符的文本修改不会被误报。
+跨多个 unified-diff hunk 时，text block 或块注释的开始分隔符可能不在当前 hunk 的上下文中；仅靠逐行状态仍会漏掉这类边界。现在除法预检从当前源码快照记录每个行号之前的 text block/块注释状态，在每个 hunk 起点恢复状态，再继续只扫描新增行。新增 `SplitTextBlockDivide` 和 `SplitBlockCommentDivide` 回归确认远离分隔符的文本修改不会被误报。
 
 随后又修复了除法签名恢复的两个边界：不能从前一个方法借用 `Integer` 参数来解释当前基本类型 `int` 方法；三元、成员访问和调用形式的复杂分母不能简单截断为第一个标识符。现在只有当前方法范围内的参数会进入确定性预检，复杂分母交给模型结合完整上下文判断，相关负例和原有链式/调用表达式正例均加入回归。
 

@@ -358,6 +358,31 @@ git -C "$repo" add src/main/java/com/example/api/client/SplitTextBlockDivide.jav
 git -C "$repo" commit -qm split-text-block-divide-base
 sed -i '' 's/a \/ b/a \/ changed/' "$repo/src/main/java/com/example/api/client/SplitTextBlockDivide.java"
 
+cat >"$repo/src/main/java/com/example/api/client/SplitBlockCommentDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class SplitBlockCommentDivide {
+    int divide(Integer divisor) {
+        /*
+         * comment line one
+         * comment line two
+         * comment line three
+         * comment line four
+         * comment line five
+         * comment line six
+         * comment line seven
+         * comment line eight
+         * a / b
+         * comment line ten
+         */
+        return 10 / divisor;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/SplitBlockCommentDivide.java
+git -C "$repo" commit -qm split-block-comment-divide-base
+sed -i '' 's/a \/ b/a \/ changed/' "$repo/src/main/java/com/example/api/client/SplitBlockCommentDivide.java"
+
 cat >"$repo/src/main/java/com/example/api/client/QueryTokenFalsePositive.java" <<'EOF'
 package com.example.api.client;
 
@@ -917,6 +942,10 @@ if grep -F 'P1 src/main/java/com/example/api/client/TextBlockDivide.java' "$capt
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/SplitTextBlockDivide.java' "$capture" >/dev/null; then
   echo 'Java division preflight lost source text-block state across hunks' >&2
+  exit 1
+fi
+if grep -F 'P1 src/main/java/com/example/api/client/SplitBlockCommentDivide.java' "$capture" >/dev/null; then
+  echo 'Java division preflight lost source block-comment state across hunks' >&2
   exit 1
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/SsrfSafe.java' "$capture" >/dev/null || \
