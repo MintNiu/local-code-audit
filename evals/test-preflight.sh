@@ -215,6 +215,22 @@ final class QueryTokenParamAlias {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/QueryTokenInlineCommentAlias.java" <<'EOF'
+package com.example.api.client;
+
+import jakarta.servlet.http.HttpServletRequest;
+
+final class QueryTokenInlineCommentAlias {
+    private static final String TOKEN_HEADER = "x-token";
+
+    String read(HttpServletRequest request) {
+        String queryName = // keep the alias explicit
+                TOKEN_HEADER;
+        return request.getParameter(queryName);
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/QueryTokenAlias.java" <<'EOF'
 package com.example.api.client;
 
@@ -235,6 +251,17 @@ final class UrlSecretAlias {
         String finalValue =
                 queryValue;
         return "https://internal.example/download?x-token=" + finalValue;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/UrlSecretInlineCommentAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class UrlSecretInlineCommentAlias {
+    String build(String token) {
+        String queryValue = /* direct credential alias */ token;
+        return "https://internal.example/download?x-token=" + queryValue;
     }
 }
 EOF
@@ -288,6 +315,22 @@ final class BlockCommentOnly {
     }
 }
 EOF
+
+cat >"$repo/src/main/java/com/example/api/client/TextBlockDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class TextBlockDivide {
+    int divide(Integer divisor) {
+        String example = """
+                a / b
+                """;
+        return 10 / divisor;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/TextBlockDivide.java
+git -C "$repo" commit -qm text-block-divide-base
+sed -i '' 's/a \/ b/a \/ changed/' "$repo/src/main/java/com/example/api/client/TextBlockDivide.java"
 
 cat >"$repo/src/main/java/com/example/api/client/QueryTokenFalsePositive.java" <<'EOF'
 package com.example.api.client;
@@ -743,6 +786,16 @@ grep -F 'P1 src/main/java/com/example/api/client/QueryTokenParamAlias.java' "$ca
   cat "$capture" >&2
   exit 1
 }
+grep -F 'P1 src/main/java/com/example/api/client/QueryTokenInlineCommentAlias.java' "$capture" >/dev/null || {
+  echo 'missing query-token inline-comment alias preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'P1 src/main/java/com/example/api/client/UrlSecretInlineCommentAlias.java' "$capture" >/dev/null || {
+  echo 'missing URL credential inline-comment alias preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F '认证令牌从 URL 查询参数读取' "$capture" >/dev/null
 grep -F 'P1 src/main/java/com/example/api/client/SsrfPreflight.java' "$capture" >/dev/null
 grep -F '服务端请求伪造' "$capture" >/dev/null
@@ -830,6 +883,10 @@ if grep -F 'P1 src/main/java/com/example/api/client/CommentOnly.java' "$capture"
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/BlockCommentOnly.java' "$capture" >/dev/null; then
   echo 'Java division preflight reported a block-comment-only expression' >&2
+  exit 1
+fi
+if grep -F 'P1 src/main/java/com/example/api/client/TextBlockDivide.java' "$capture" >/dev/null; then
+  echo 'Java division preflight reported a text-block-only expression' >&2
   exit 1
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/SsrfSafe.java' "$capture" >/dev/null || \

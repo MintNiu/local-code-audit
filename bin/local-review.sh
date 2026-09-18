@@ -962,7 +962,7 @@ Spring 客户端负例：`@Bean` 方法接收由容器注入的 `Platform*Proper
 
 分片边界：当前请求可能只包含一个文件或 unified-diff hunk 的片段；未在本分片展示的方法、字段、调用链和构建文件均视为未知。不得仅因其他代码不在当前分片就报告“代码被截断/实现不完整/缺少方法、校验、日志或异常处理”；每条问题必须由当前分片中可见的具体证据支持。跨分片的结论只能依赖系统预检或明确附带的上下文文件。
 
-安全判定硬规则：仅凭 `header("X-Token", token)`、`Authorization` 或其他 HTTP header 传递 token，且目标是明确的内部 URI、差异中没有日志记录、外部跳转、URL query/path 拼接或禁止该 header 的契约时，必须视为安全负例并输出“未发现阻塞问题”。不要声称 header 会“必然”进入日志；header 泄漏只有在差异直接展示日志、持久化、外部边界或契约冲突时才可报告。`token` 拼进 URL query/path，或从 `request.getParameter("x-token")`、`getParameter(TOKEN_HEADER)` 等 URL 查询参数读取认证令牌，则必须单独报告凭证可能进入访问日志、代理历史或 Referer 的 P1 泄漏风险。
+安全判定硬规则：仅凭 `header("X-Token", token)`、`Authorization` 或其他 HTTP header 传递 token，且目标是明确的内部 URI、差异中没有日志记录、外部跳转、URL query/path 拼接或禁止该 header 的契约时，必须视为安全负例并输出“未发现阻塞问题”。不要声称 header 会“必然”进入日志；header 泄漏只有在差异直接展示日志、持久化、外部边界或契约冲突时才可报告。`token` 拼进 URL query/path，或从 `request.getParameter("x-token")`、`getParameter(TOKEN_HEADER)` 等 URL 查询参数读取认证令牌（包括先把 `TOKEN_HEADER` 赋给局部变量、再把该别名传给 `getParameter`），则必须单独报告凭证可能进入访问日志、代理历史或 Referer 的 P1 泄漏风险。
 
 最终硬门槛：逐条删除依赖“可能/如果未来/未证明/建议确认”的候选；这些措辞本身表明当前差异没有可验证反例。不要把防御性偏好、未来兼容性、测试参数化、日志审计或代码注释问题升级为缺陷。若删完没有证据充分的问题，只输出“未发现阻塞问题”。
 
@@ -1937,7 +1937,13 @@ collect_security_preflight() {
       if (text == "TOKEN_HEADER") return 1
       return known_token_alias(text, scope)
     }
+    function strip_inline_comments(text) {
+      sub(/[[:space:]]*\/\/.*$/, "", text)
+      sub(/\/\*.*\*\//, "", text)
+      return text
+    }
     function record_token_parameter_alias(text, at_line, assignment, fields, count, name, scope, rhs) {
+      text = strip_inline_comments(text)
       if (pending_token_name != "") {
         rhs = text
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
@@ -1987,6 +1993,7 @@ collect_security_preflight() {
       # Track only a direct assignment from a clearly secret-like variable.
       # This catches `String queryValue = token` followed by URL assembly
       # without treating ordinary IDs or arbitrary data as credentials.
+      text = strip_inline_comments(text)
       if (pending_url_secret_name != "") {
         rhs = text
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
@@ -2466,6 +2473,7 @@ collect_java_division_preflight() {
     function reset_hunk() {
       has_division = 0
       block_comment = 0
+      division_text_block = 0
       guard_block_comment = 0
       has_integer_parameter = 0
       integer_line = 0
@@ -2558,6 +2566,18 @@ collect_java_division_preflight() {
           }
           continue
         }
+        if (division_text_block) {
+          if (substr(text, i, 3) == "\"\"\"") {
+            division_text_block = 0
+            i += 2
+          }
+          continue
+        }
+        if (substr(text, i, 3) == "\"\"\"") {
+          division_text_block = 1
+          i += 2
+          continue
+        }
         if (block_comment) {
           if (ch == "*" && substr(text, i + 1, 1) == "/") {
             block_comment = 0
@@ -2614,10 +2634,7 @@ collect_java_division_preflight() {
       if (rest ~ /^[[:space:]]*(\.|\[|\()/) return ""
       return token
     }
-    function record_division(text,    expression, slash, left_text, right_text, left, right, trimmed, search_at) {
-      trimmed = text
-      sub(/^[[:space:]]+/, "", trimmed)
-      if (trimmed ~ /^\/\// || trimmed ~ /^\/\*|^\*/) return
+    function record_division(text, allow_record,    expression, slash, left_text, right_text, left, right, trimmed, search_at) {
       search_at = 1
       while (search_at <= length(text)) {
         slash = find_division_slash(text, search_at)
@@ -2628,7 +2645,7 @@ collect_java_division_preflight() {
         left = left_text
         sub(/^.*[^A-Za-z0-9_]/, "", left)
         right = simple_right_operand(right_text)
-        if (left != "" && right != "") {
+        if (allow_record && left != "" && right != "") {
           has_division = 1
           division_count++
           division_lefts[division_count] = left
@@ -2676,7 +2693,10 @@ collect_java_division_preflight() {
         # is still useful for recovering guards/signatures, but only added
         # lines may create a finding for this review; otherwise the same
         # java-divide issue is reported on every later change in the hunk.
-        if (prefix == "+") record_division(text)
+        # Scan context lines too so Java text-block and block-comment state
+        # carries into an added line. `record_division` only records findings
+        # when the line is added; context remains evidence for lexical state.
+        record_division(text, prefix == "+")
         if (integer_line == 0 && has_integer_parameter) {
           if (integer_line == 0) integer_line = line_no
         }
