@@ -1782,6 +1782,7 @@ collect_deleted_context_preflight() {
 collect_security_preflight() {
   local diff_file="$1"
   local output_file="$2"
+  local source_root="${3:-}"
 
   # Catch unambiguous credential-in-URL patterns before model inference. This
   # is intentionally narrow: only added lines that visibly concatenate a
@@ -1789,7 +1790,42 @@ collect_security_preflight() {
   # from a URL query parameter, are reported. The alias set covers common
   # names such as authToken/signature/credential without treating ordinary IDs
   # as secrets.
-  awk '
+  awk -v repo_root="$source_root" '
+    function load_method_scopes(    source_path, value, source_line, depth, active_depth, method_id, clean, opens, closes) {
+      if (repo_root == "" || path == "" || method_scopes_loaded[path]) return
+      method_scopes_loaded[path] = 1
+      source_path = repo_root "/" path
+      source_line = 0
+      depth = 0
+      active_depth = 0
+      while ((getline value < source_path) > 0) {
+        source_line++
+        clean = value
+        sub(/\/\/.*$/, "", clean)
+        # Method declarations normally put the opening brace on the same
+        # line. Exclude control-flow expressions so a local `if (...) {`
+        # cannot become a false method boundary.
+        if (clean ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\([^;{}]*\)[[:space:]]*(throws[^{]+)?\{[[:space:]]*$/ &&
+            clean !~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|synchronized)[[:space:]]*\(/) {
+          method_id = source_line
+          active_depth = depth + 1
+        }
+        if (active_depth > 0) method_scopes[path, source_line] = method_id
+        opens = gsub(/\{/, "{", clean)
+        closes = gsub(/\}/, "}", clean)
+        depth += opens - closes
+        if (active_depth > 0 && depth < active_depth) active_depth = 0
+      }
+      close(source_path)
+    }
+    function scope_for_line(at_line) {
+      load_method_scopes()
+      if ((path SUBSEP at_line) in method_scopes) return method_scopes[path, at_line]
+      # If the source snapshot is unavailable (for example an externally
+      # supplied diff), retain the old file-level behavior rather than losing
+      # a high-confidence alias finding entirely.
+      return "__file__"
+    }
     function emit_ssrf(at_line) {
       if (!(at_line in ssrf_emitted_lines)) {
         printf "P1 %s:%d - 不可信 URL 直接进入出站 HTTP 调用，存在服务端请求伪造（SSRF）风险。\n影响：攻击者可借助服务端访问内网服务、云 metadata 或任意外部地址，绕过客户端网络边界。\n修复建议：仅允许明确的 https scheme 和 host allowlist，在发起请求前解析并校验目标，拒绝内网和 metadata 地址。\n验证方式：使用外部地址、内网地址和云 metadata 地址测试，确认未允许的目标均在出站调用前被拒绝。\n\n", path, at_line
@@ -1811,16 +1847,19 @@ collect_security_preflight() {
         query_token_emitted_lines[at_line] = 1
       }
     }
-    function record_token_parameter_alias(text, assignment, fields, count, name) {
+    function record_token_parameter_alias(text, at_line, assignment, fields, count, name, scope) {
       if (text !~ /=[[:space:]]*(TOKEN_HEADER|"x-token")[[:space:]]*;?[[:space:]]*$/) return
       assignment = text
       sub(/[[:space:]]*=.*/, "", assignment)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", assignment)
       count = split(assignment, fields, /[[:space:]]+/)
       name = fields[count]
-      if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) token_parameter_vars[name] = 1
+      if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+        scope = scope_for_line(at_line)
+        token_parameter_vars[name SUBSEP scope] = 1
+      }
     }
-    function record_url_secret_alias(text, assignment, lhs, rhs, fields, count, name) {
+    function record_url_secret_alias(text, at_line, assignment, lhs, rhs, fields, count, name, scope) {
       # Track only a direct assignment from a clearly secret-like variable.
       # This catches `String queryValue = token` followed by URL assembly
       # without treating ordinary IDs or arbitrary data as credentials.
@@ -1836,7 +1875,8 @@ collect_security_preflight() {
       sub(/^.*=[[:space:]]*/, "", rhs)
       sub(/[;[:space:]]*$/, "", rhs)
       if (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/) {
-        url_secret_vars[name] = 1
+        scope = scope_for_line(at_line)
+        url_secret_vars[name SUBSEP scope] = 1
       }
     }
     function reset_hunk(    name) {
@@ -1946,8 +1986,8 @@ collect_security_preflight() {
       trimmed_code = code
       sub(/^[[:space:]]+/, "", trimmed_code)
       if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/ && trimmed_code !~ /^#/) {
-        record_token_parameter_alias(code)
-        record_url_secret_alias(code)
+        record_token_parameter_alias(code, line_no)
+        record_url_secret_alias(code, line_no)
         # Configuration may point at a remote database or service without an
         # HTTP URL (for example jdbc:mysql://192.168.x.x or server-addr).
         # Treat those endpoints as remote evidence too, while keeping local
@@ -2053,7 +2093,11 @@ collect_security_preflight() {
         builder_secret = added ~ /(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)/
         format_risk = (added ~ /String[[:space:]]*\.[[:space:]]*format[[:space:]]*\(/ && added ~ /https?:\/\/|[?&](token|secret|password|api[_-]?key|auth|sig|credential)/ && builder_secret)
         append_risk = added ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\+=[^;]*(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)/
-        for (secret_name in url_secret_vars) {
+        current_scope = scope_for_line(line_no)
+        for (secret_key in url_secret_vars) {
+          split(secret_key, secret_parts, SUBSEP)
+          if (secret_parts[2] != current_scope) continue
+          secret_name = secret_parts[1]
           if (added ~ ("\\+[[:space:]]*" secret_name "([^[:alnum:]_]|$)")) url_risk = 1
         }
         if ((builder_query && builder_secret) || format_risk || append_risk) {
@@ -2070,7 +2114,11 @@ collect_security_preflight() {
             added ~ /getParameter[[:space:]]*\([[:space:]]*TOKEN_HEADER[[:space:]]*\)/) {
           emit_query_token(line_no)
         }
-        for (input_name in token_parameter_vars) {
+        current_scope = scope_for_line(line_no)
+        for (token_key in token_parameter_vars) {
+          split(token_key, token_parts, SUBSEP)
+          if (token_parts[2] != current_scope) continue
+          input_name = token_parts[1]
           if (added ~ ("getParameter[[:space:]]*\\([[:space:]]*" input_name "[[:space:]]*\\)")) {
             emit_query_token(line_no)
             break
@@ -2504,7 +2552,7 @@ else
   : >"$java_main_source_index"
 fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
-collect_security_preflight "$chunk_input_file" "$build_preflight_file"
+collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 {

@@ -1036,6 +1036,14 @@ final class CrossHunkTokenAlias {
         int eight = 8;
         return request.getParameter("safe");
     }
+    String unrelated(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = "safe";
+        int nine = 9;
+        int ten = 10;
+        int eleven = 11;
+        int twelve = 12;
+        return request.getParameter("safe");
+    }
 }
 EOF
 git -C "$repo" add src/main/java/com/example/api/client/CrossHunkTokenAlias.java
@@ -1045,7 +1053,8 @@ perl -0pi -e 's/String parameterName = "safe";/String parameterName = TOKEN_HEAD
 cross_hunk_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo")"
-if ! printf '%s\n' "$cross_hunk_token_output" | grep -F 'P1 src/main/java/com/example/api/client/CrossHunkTokenAlias.java:' >/dev/null; then
+cross_hunk_token_count="$(printf '%s\n' "$cross_hunk_token_output" | grep -c 'P1 src/main/java/com/example/api/client/CrossHunkTokenAlias.java:' || true)"
+if [[ "$cross_hunk_token_count" != "1" ]]; then
   echo 'cross-hunk query-token alias was not carried through the file' >&2
   printf '%s\n' "$cross_hunk_token_output" >&2
   exit 1
