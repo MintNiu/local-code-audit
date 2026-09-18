@@ -1060,6 +1060,106 @@ if [[ "$cross_hunk_token_count" != "1" ]]; then
   exit 1
 fi
 
+# Method-scoped aliases must also survive wrapped Java signatures and a brace
+# on the following line.  The second method deliberately reuses the same
+# local variable name with an ordinary value; reporting it would recreate the
+# cross-method false positive that motivated method-scoped alias tracking.
+cat >"$repo/src/main/java/com/example/api/client/WrappedTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class WrappedTokenAlias {
+    private static final String TOKEN_HEADER = "x-token";
+
+    String first(
+            javax.servlet.http.HttpServletRequest request
+    )
+    {
+        String marker = "{";
+        String commentMarker = "/* not code */";
+        String parameterName = "safe";
+        return request.getParameter("safe");
+    }
+
+    String second(
+            javax.servlet.http.HttpServletRequest request
+    )
+    {
+        String marker = "{";
+        String commentMarker = "/* not code */";
+        String parameterName = "safe";
+        return request.getParameter("safe");
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/WrappedTokenAlias.java
+git -C "$repo" commit -qm wrapped-token-alias-base
+cat >"$repo/src/main/java/com/example/api/client/WrappedTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class WrappedTokenAlias {
+    private static final String TOKEN_HEADER = "x-token";
+
+    String first(
+            javax.servlet.http.HttpServletRequest request
+    )
+    {
+        String marker = "{";
+        String commentMarker = "/* not code */";
+        String parameterName = TOKEN_HEADER;
+        return request.getParameter(parameterName);
+    }
+
+    String second(
+            javax.servlet.http.HttpServletRequest request
+    )
+    {
+        String marker = "{";
+        String commentMarker = "/* not code */";
+        String parameterName = "safe";
+        return request.getParameter("safe");
+    }
+}
+EOF
+wrapped_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+wrapped_token_count="$(printf '%s\n' "$wrapped_token_output" | grep -c 'P1 src/main/java/com/example/api/client/WrappedTokenAlias.java:' || true)"
+if [[ "$wrapped_token_count" != "1" ]]; then
+  echo 'wrapped-signature query-token alias scope was not isolated' >&2
+  printf '%s\n' "$wrapped_token_output" >&2
+  exit 1
+fi
+
+# A class-level constant may alias TOKEN_HEADER and be consumed inside a
+# method.  Keep that high-confidence constant available across method scopes;
+# otherwise a refactor from the literal `TOKEN_HEADER` to `QUERY_NAME` would
+# silently lose the finding.
+cat >"$repo/src/main/java/com/example/api/client/FieldTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class FieldTokenAlias {
+    private static final String TOKEN_HEADER = "x-token";
+    private static final String QUERY_NAME = TOKEN_HEADER;
+
+    String read(javax.servlet.http.HttpServletRequest request) {
+        return request.getParameter("safe");
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/FieldTokenAlias.java
+git -C "$repo" commit -qm field-token-alias-base
+sed -i '' 's/request.getParameter("safe")/request.getParameter(QUERY_NAME)/' \
+  "$repo/src/main/java/com/example/api/client/FieldTokenAlias.java"
+field_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+field_token_count="$(printf '%s\n' "$field_token_output" | grep -c 'P1 src/main/java/com/example/api/client/FieldTokenAlias.java:' || true)"
+if [[ "$field_token_count" != "1" ]]; then
+  echo 'class-level token alias was not carried into the method scope' >&2
+  printf '%s\n' "$field_token_output" >&2
+  exit 1
+fi
+
 grep -Fx 'devstral-small-2-review-tuned' "$resolved_model_capture" >/dev/null
 [[ ! -e "$fixture_root/textconv.marker" ]] || {
   echo 'git diff executed a configured textconv filter' >&2

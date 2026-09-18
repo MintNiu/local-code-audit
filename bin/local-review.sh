@@ -1791,24 +1791,66 @@ collect_security_preflight() {
   # names such as authToken/signature/credential without treating ordinary IDs
   # as secrets.
   awk -v repo_root="$source_root" '
-    function load_method_scopes(    source_path, value, source_line, depth, active_depth, method_id, clean, opens, closes) {
+    function clean_java_source_line(raw, text) {
+      text = raw
+      # Remove literals before comment markers so `http://` or braces inside
+      # strings cannot change the lexical depth used for method boundaries.
+      gsub(/"([^"\\]|\\.)*"/, "", text)
+      gsub(/\047([^\047\\]|\\.)*\047/, "", text)
+      if (block_comment) {
+        if (text !~ /\*\//) return ""
+        sub(/^.*\*\//, "", text)
+        block_comment = 0
+      }
+      while (text ~ /\/\*/) {
+        if (text ~ /\/\*.*\*\//) {
+          sub(/\/\*.*\*\//, "", text)
+        } else {
+          sub(/\/\*.*$/, "", text)
+          block_comment = 1
+          break
+        }
+      }
+      sub(/\/\/.*$/, "", text)
+      return text
+    }
+    function load_method_scopes(    source_path, value, source_line, depth, active_depth, method_id, clean, opens, closes, candidate, candidate_start, candidate_lines) {
       if (repo_root == "" || path == "" || method_scopes_loaded[path]) return
       method_scopes_loaded[path] = 1
       source_path = repo_root "/" path
       source_line = 0
       depth = 0
       active_depth = 0
+      block_comment = 0
+      candidate = ""
+      candidate_start = 0
+      candidate_lines = 0
       while ((getline value < source_path) > 0) {
         source_line++
-        clean = value
-        sub(/\/\/.*$/, "", clean)
-        # Method declarations normally put the opening brace on the same
-        # line. Exclude control-flow expressions so a local `if (...) {`
-        # cannot become a false method boundary.
-        if (clean ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\([^;{}]*\)[[:space:]]*(throws[^{]+)?\{[[:space:]]*$/ &&
-            clean !~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|synchronized)[[:space:]]*\(/) {
-          method_id = source_line
+        clean = clean_java_source_line(value)
+        # Accept both one-line and wrapped Java method signatures. Exclude
+        # control-flow/call expressions so a local `if (...) {` cannot become
+        # a false method boundary.
+        if (candidate == "" &&
+            clean ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_<>, ?\[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/ &&
+            clean !~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|synchronized|new)[[:space:]]*\(/) {
+          candidate = clean
+          candidate_start = source_line
+          candidate_lines = 1
+        } else if (candidate != "") {
+          candidate = candidate " " clean
+          candidate_lines++
+        }
+        if (candidate != "" && candidate ~ /\{/) {
+          method_id = candidate_start
           active_depth = depth + 1
+          candidate = ""
+          candidate_start = 0
+          candidate_lines = 0
+        } else if (candidate != "" && (candidate ~ /;/ || candidate_lines > 12)) {
+          candidate = ""
+          candidate_start = 0
+          candidate_lines = 0
         }
         if (active_depth > 0) method_scopes[path, source_line] = method_id
         opens = gsub(/\{/, "{", clean)
@@ -1825,6 +1867,14 @@ collect_security_preflight() {
       # supplied diff), retain the old file-level behavior rather than losing
       # a high-confidence alias finding entirely.
       return "__file__"
+    }
+    function alias_scope_matches(alias_name, alias_scope, current_scope) {
+      if (alias_scope == current_scope) return 1
+      # Class-level constants are intentionally allowed to flow into a method
+      # when their names are unmistakably constant-like.  This preserves
+      # recall for `QUERY_NAME = TOKEN_HEADER` without allowing an ordinary
+      # lower-case local from another method to leak across its boundary.
+      return alias_scope == "__file__" && alias_name ~ /^[A-Z][A-Z0-9_]*$/
     }
     function emit_ssrf(at_line) {
       if (!(at_line in ssrf_emitted_lines)) {
@@ -2096,8 +2146,8 @@ collect_security_preflight() {
         current_scope = scope_for_line(line_no)
         for (secret_key in url_secret_vars) {
           split(secret_key, secret_parts, SUBSEP)
-          if (secret_parts[2] != current_scope) continue
           secret_name = secret_parts[1]
+          if (!alias_scope_matches(secret_name, secret_parts[2], current_scope)) continue
           if (added ~ ("\\+[[:space:]]*" secret_name "([^[:alnum:]_]|$)")) url_risk = 1
         }
         if ((builder_query && builder_secret) || format_risk || append_risk) {
@@ -2117,8 +2167,8 @@ collect_security_preflight() {
         current_scope = scope_for_line(line_no)
         for (token_key in token_parameter_vars) {
           split(token_key, token_parts, SUBSEP)
-          if (token_parts[2] != current_scope) continue
           input_name = token_parts[1]
+          if (!alias_scope_matches(input_name, token_parts[2], current_scope)) continue
           if (added ~ ("getParameter[[:space:]]*\\([[:space:]]*" input_name "[[:space:]]*\\)")) {
             emit_query_token(line_no)
             break
