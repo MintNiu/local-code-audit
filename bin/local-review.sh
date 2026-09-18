@@ -2374,21 +2374,34 @@ collect_java_division_preflight() {
       sub(/\/\/.*$/, "", text)
       return text
     }
-    function source_method_parameters(    source_path, i, method_start, method_depth, active_method, depth, opens, closes, signature, candidate, candidate_start, candidate_lines, value, k, clean) {
-      if (repo_root == "" || path == "" || division_line == 0) return
-      source_path = repo_root "/" path
-      if (!source_loaded[path]) {
-        source_loaded[path] = 1
-        source_count[path] = 0
-        source_block_comment = 0
-        source_text_block = 0
-        while ((getline value < source_path) > 0) {
-          source_count[path]++
-          source_lines[path, source_count[path]] = value
-          source_clean_lines[path, source_count[path]] = clean_source_line(value)
-        }
-        close(source_path)
+    function load_source_snapshot(target_path,    source_path, value, source_line) {
+      if (source_loaded[target_path]) return
+      source_loaded[target_path] = 1
+      source_count[target_path] = 0
+      source_path = repo_root "/" target_path
+      source_text_block = 0
+      source_block_comment = 0
+      while ((getline value < source_path) > 0) {
+        source_line = ++source_count[target_path]
+        source_lines[target_path, source_line] = value
+        source_text_block_before[target_path SUBSEP source_line] = source_text_block
+        source_block_comment_before[target_path SUBSEP source_line] = source_block_comment
+        source_clean_lines[target_path, source_line] = clean_source_line(value)
       }
+      close(source_path)
+    }
+    function set_hunk_lex_state(at_line, key) {
+      division_text_block = 0
+      block_comment = 0
+      if (repo_root == "" || path == "" || path == "/dev/null") return
+      load_source_snapshot(path)
+      key = path SUBSEP at_line
+      if (key in source_text_block_before) division_text_block = source_text_block_before[key]
+      if (key in source_block_comment_before) block_comment = source_block_comment_before[key]
+    }
+    function source_method_parameters(    i, method_start, method_depth, active_method, depth, opens, closes, signature, candidate, candidate_start, candidate_lines, k, clean) {
+      if (repo_root == "" || path == "" || division_line == 0) return
+      load_source_snapshot(path)
       if (source_count[path] == 0) return
       depth = 0
       active_method = 0
@@ -2680,6 +2693,7 @@ collect_java_division_preflight() {
       hunk_start = hunk + 0
       reset_hunk()
       line_no = hunk_start
+      set_hunk_lex_state(hunk_start)
       next
     }
     {

@@ -332,6 +332,32 @@ git -C "$repo" add src/main/java/com/example/api/client/TextBlockDivide.java
 git -C "$repo" commit -qm text-block-divide-base
 sed -i '' 's/a \/ b/a \/ changed/' "$repo/src/main/java/com/example/api/client/TextBlockDivide.java"
 
+cat >"$repo/src/main/java/com/example/api/client/SplitTextBlockDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class SplitTextBlockDivide {
+    int divide(Integer divisor) {
+        String example = """
+                line one
+                line two
+                line three
+                line four
+                line five
+                line six
+                line seven
+                line eight
+                a / b
+                line ten
+                line eleven
+                """;
+        return 10 / divisor;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/SplitTextBlockDivide.java
+git -C "$repo" commit -qm split-text-block-divide-base
+sed -i '' 's/a \/ b/a \/ changed/' "$repo/src/main/java/com/example/api/client/SplitTextBlockDivide.java"
+
 cat >"$repo/src/main/java/com/example/api/client/QueryTokenFalsePositive.java" <<'EOF'
 package com.example.api.client;
 
@@ -887,6 +913,10 @@ if grep -F 'P1 src/main/java/com/example/api/client/BlockCommentOnly.java' "$cap
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/TextBlockDivide.java' "$capture" >/dev/null; then
   echo 'Java division preflight reported a text-block-only expression' >&2
+  exit 1
+fi
+if grep -F 'P1 src/main/java/com/example/api/client/SplitTextBlockDivide.java' "$capture" >/dev/null; then
+  echo 'Java division preflight lost source text-block state across hunks' >&2
   exit 1
 fi
 if grep -F 'P1 src/main/java/com/example/api/client/SsrfSafe.java' "$capture" >/dev/null || \
