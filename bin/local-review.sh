@@ -3247,7 +3247,11 @@ $(cat "$changed_paths_file")
   num_predict="$chunk_num_predict"
   chunk_start="$(date +%s)"
   run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_status=$?
-  printf -v trace_line 'chunk_status\t%s\t%s\t%s' "$chunk_name" "$chunk_status" "$(( $(date +%s) - chunk_start ))"
+  chunk_bytes="$(wc -c <"$chunk_file" | tr -d ' ')"
+  printf -v trace_line 'chunk_status\t%s\t%s\t%s\t%s' "$chunk_name" "$chunk_status" "$(( $(date +%s) - chunk_start ))" "$chunk_bytes"
+  write_review_trace "$trace_line"
+  chunk_paths_trace="$(paste -sd, "$chunk_paths_file")"
+  printf -v trace_line 'chunk_paths\t%s\t%s' "$chunk_name" "$chunk_paths_trace"
   write_review_trace "$trace_line"
   num_predict="$original_num_predict"
   if [[ "$chunk_status" -ne 0 ]]; then

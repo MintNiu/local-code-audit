@@ -104,7 +104,7 @@
 - 2026-09-18 对 `platform-workflow-service:65de399` 复核时，模型把移除本地默认凭据、改为必须注入运行时环境变量误报成启动/连接失败 P1。新增严格的 fail-closed 配置误报过滤，并用“同一配置变更 + 独立跨租户根因”回归确认只过滤前者；逗号分隔行号的证据解析也已覆盖。真实提交复跑为 clean，独立安全根因仍保持可见。
 - 2026-09-18 增加四个跨服务探索性留出：`platform-gateway:052b848`、`platform-publishing-service:6e24286`、`platform-integration:fd0f1c4`、`platform-hr-service:51709d1` 均用个人 profile 完整结束并返回 clean；publishing 的版本化产物接口另经代码语义复核，确认保留历史版本是契约行为。这四条尚未完成独立人工真值标注，不计入正式召回率或误报率。
 - 同日完成大提交 `platform-system:57475a8` 的个人 profile 复核：约 4,000 行迁移/权限 SQL 在 535 秒内完整结束、无截断，结果为 clean；模块 SQL 合约测试 16/16 通过。该样本只记录为高成本探索性证据，不计入正式 scorecard 或性能承诺。
-- 同日为历史评测增加私有分片追踪：`.meta.tsv` 现在记录分片总数、每片状态和耗时，正常 `local-review` 输出保持不变；分片、历史、预检、scorecard 和运行态回归均通过。
+- 同日为历史评测增加私有分片追踪：`.meta.tsv` 现在记录分片总数、每片文件路径、字节数、状态和耗时，正常 `local-review` 输出保持不变；分片、历史、预检、scorecard 和运行态回归均通过。
 
 ## 失败处理原则
 

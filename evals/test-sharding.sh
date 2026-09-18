@@ -76,12 +76,17 @@ grep -E '^chunk_count[[:space:]]+[2-9][0-9]*$' "$trace_file" >/dev/null || {
   cat "$trace_file" >&2
   exit 1
 }
-if awk -F '\t' '$1 == "chunk_status" && ($3 != 0 || $4 !~ /^[0-9]+$/) { bad = 1 } END { exit(bad ? 1 : 0) }' "$trace_file"; then
+if awk -F '\t' '$1 == "chunk_status" && ($3 != 0 || $4 !~ /^[0-9]+$/ || $5 !~ /^[1-9][0-9]*$/) { bad = 1 } END { exit(bad ? 1 : 0) }' "$trace_file"; then
   :
 else
   echo 'sharding trace recorded a failed or malformed chunk status' >&2
   cat "$trace_file" >&2
   exit 1
 fi
+grep -E '^chunk_paths[[:space:]]+chunk-[0-9]{4}[[:space:]]+[^[:space:]]' "$trace_file" >/dev/null || {
+  echo 'sharding trace did not record chunk paths' >&2
+  cat "$trace_file" >&2
+  exit 1
+}
 
 echo 'diff sharding regression passed'
