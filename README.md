@@ -127,6 +127,8 @@ Run the public synthetic regression gate before changing prompts or runtime opti
 ./evals/run-synthetic.sh
 ```
 
+The repository also runs the model-independent regression suites in GitHub Actions on macOS for every push and pull request. This catches parser, sharding, aggregation, label-migration, and runtime-verifier regressions without requiring Ollama or exposing private review data.
+
 The current gate is intentionally strict: it fails on extra P0–P3 findings, contradictory output, API errors, timeouts, or truncation. See [evals/goal.md](evals/goal.md) for the acceptance target and current status.
 
 For private historical-commit evaluation, use [evals/README.md](evals/README.md) and keep the manifest, raw outputs, and labels outside this public repository.

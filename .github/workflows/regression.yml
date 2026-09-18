@@ -1,0 +1,35 @@
+name: local-review regression
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-regression:
+    runs-on: macos-14
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check shell syntax
+        run: |
+          bash -n bin/*.sh scripts/*.sh evals/*.sh
+
+      - name: Run deterministic regression suites
+        run: |
+          ./evals/test-preflight.sh
+          ./evals/test-sharding.sh
+          ./evals/test-shard-preflight-routing.sh
+          ./evals/test-shard-integrity.sh
+          ./evals/test-history.sh
+          ./evals/test-label-migration.sh
+          ./evals/test-scorecard.sh
+          ./evals/test-scorecard-builder.sh
+          ./evals/test-runtime-verify.sh
