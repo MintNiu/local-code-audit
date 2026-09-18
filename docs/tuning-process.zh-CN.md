@@ -371,6 +371,12 @@ devstral-small-2-review-tuned
 
 这条 CI 只验证脚本、夹具和运行态校验，不上传 Ollama 输出、业务源码、真实 diff 或私有 few-shot 数据；需要本地模型的 `run-synthetic.sh` 和历史评测仍由开发者在本机执行。这样既能阻止 `java-divide`、`java-token-url` 等规则回归，也不会把公开 CI 的通过误认为模型在生产数据上的召回率证明。
 
+同日又做了四个跨服务探索性留出：`platform-gateway:052b848`、
+`platform-publishing-service:6e24286`、`platform-integration:fd0f1c4` 和
+`platform-hr-service:51709d1` 均使用个人 profile 完整结束且返回 clean；其中 publishing
+提交还人工核对了“版本化产物列表”接口保留历史版本是契约行为，不把它误标成当前执行隔离缺陷。
+这些结果只作为下一轮人工标注候选，尚未写入正式 scorecard，也不代表跨服务生产召回率。
+
 ### 2026-09-18：收紧 fail-closed 配置误报
 
 对真实 `platform-workflow-service:65de3996400acb054246f45207f26db24c2a2de3` 的首次个人 profile 复核发现，模型把“删除本地默认凭据、改为必须从 `${...}` 环境变量注入”误报成了服务启动/连接失败的 P1。该提交的意图是 fail-closed：没有运行时凭据就拒绝启动，而不是恢复不安全默认值。
