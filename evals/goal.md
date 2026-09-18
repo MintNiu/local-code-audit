@@ -97,6 +97,7 @@
 - 同日补充 token/url 多行语法回归：跨行直接别名赋值、两级 URL 凭据别名以及跨行 `getParameter(...)` 参数现在都会进入同一确定性预检；普通 ID、内部请求头和未完成别名仍保持 clean。
 - 同日补齐完全限定 Java 返回类型边界：作用域/签名解析现在识别 `java.lang.String`、`java.lang.Integer` 等含 `.`/`$` 的类型名；新增完全限定返回类型除法正例和跨方法 token 别名负例，避免漏报或文件级作用域串线。
 - 同轮又补齐同一行注解边界：`@Deprecated(...) java.lang.Integer divide(Integer a, Integer b)` 的参数提取现在选择最后一个顶层方法括号，不会误取注解参数；新增 `InlineAnnotatedDivide` 正例，完整合成门禁哈希保持稳定。
+- 随后补齐注解数组花括号边界：方法作用域只在参数列表后紧跟方法体或 `throws` 方法体时建立，新增同一行 `@SuppressWarnings({...})` 的 token 别名跨方法负例，避免注解 `{}` 让作用域退化到文件级。
 - 随后用该解析器版本重新定向复核真实 `platform-api` 提交 `63d520b` 与 `a1284658`：两次均 exit=0、输出完整且各只保留唯一一条 `getParameter("x-token")` P1，分别定位到文件客户端第 58 行和字典客户端第 81 行；结果仍使用 `devstral-small-2-review-tuned` 与固定 SYSTEM SHA-256。
 - 同日对 `platform-file:a9a1d4a` 做独立安全留出：初始模型返回 clean，人工复核确认单删和批量删除都移除了 `fileStorageService.delete(...)`，导致 OSS/本地对象残留；初始私有 scorecard 为 0/1，作为真实漏报对照。新增对象生命周期确定性预检、同文件同根因聚合和 `missed` 人工标签状态后重跑，单删/批删合并为 `99-108` 行一条 P1，scorecard 恢复为 1/1、0 误报；原始与修复后结果均保留在私有目录。
 

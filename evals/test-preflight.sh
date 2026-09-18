@@ -1495,6 +1495,37 @@ if [[ "$qualified_return_token_count" != "1" ]]; then
   exit 1
 fi
 
+cat >"$repo/src/main/java/com/example/api/client/InlineArrayAnnotatedTokenAlias.java" <<'EOF'
+package com.example.api.client;
+
+final class InlineArrayAnnotatedTokenAlias {
+    private static final String TOKEN_HEADER = "x-token";
+
+    @SuppressWarnings({"unused", "fixture"}) java.lang.String first(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = "safe";
+        return request.getParameter("safe");
+    }
+
+    @SuppressWarnings({"unused", "fixture"}) java.lang.String second(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = "safe";
+        return request.getParameter("safe");
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/InlineArrayAnnotatedTokenAlias.java
+git -C "$repo" commit -qm inline-array-annotated-token-base
+perl -0pi -e 's/(java\.lang\.String first\([^}]+?String parameterName = )"safe"/$1TOKEN_HEADER/; s/(java\.lang\.String first\([^}]+?return request\.getParameter\()"safe"/$1parameterName/; s/(java\.lang\.String second\([^}]+?return request\.getParameter\()"safe"/$1parameterName/' \
+  "$repo/src/main/java/com/example/api/client/InlineArrayAnnotatedTokenAlias.java"
+inline_array_annotated_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+inline_array_annotated_token_count="$(printf '%s\n' "$inline_array_annotated_token_output" | grep -c 'P1 src/main/java/com/example/api/client/InlineArrayAnnotatedTokenAlias.java:' || true)"
+if [[ "$inline_array_annotated_token_count" != "1" ]]; then
+  echo 'inline array annotation token alias scope was not isolated' >&2
+  printf '%s\n' "$inline_array_annotated_token_output" >&2
+  exit 1
+fi
+
 # A class-level constant may alias TOKEN_HEADER and be consumed inside a
 # method.  Keep that high-confidence constant available across method scopes;
 # otherwise a refactor from the literal `TOKEN_HEADER` to `QUERY_NAME` would

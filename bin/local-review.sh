@@ -1866,7 +1866,7 @@ collect_security_preflight() {
           candidate = candidate " " clean
           candidate_lines++
         }
-        if (candidate != "" && candidate ~ /\{/) {
+        if (candidate != "" && candidate ~ /\)[[:space:]]*(throws[[:space:]][^{}]*)?[[:space:]]*\{/) {
           method_id = candidate_start
           active_depth = depth + 1
           candidate = ""
@@ -2494,7 +2494,7 @@ collect_java_division_preflight() {
           candidate = candidate " " clean
           candidate_lines++
         }
-        if (candidate != "" && candidate ~ /\{/) {
+        if (candidate != "" && candidate ~ /\)[[:space:]]*(throws[[:space:]][^{}]*)?[[:space:]]*\{/) {
           method_start = candidate_start
           method_depth = depth + 1
           signature = candidate
