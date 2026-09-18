@@ -1669,6 +1669,22 @@ interface WorkflowClient {
                        @RequestBody Object request);
 }
 EOF
+cat >"$repo/src/main/java/com/example/api/client/TenantSafeWorkflowClient.java" <<'EOF'
+package com.example.api.client;
+
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.service.annotation.HttpExchange;
+import org.springframework.web.service.annotation.PostExchange;
+
+@HttpExchange("/workflow/v1/internal")
+interface TenantSafeWorkflowClient {
+    @PostExchange("/events/claims")
+    Object claimEvents(@RequestHeader("X-Gateway-Token") String token,
+                       @RequestHeader("X-Tenant-Id") Long tenantId,
+                       @RequestBody Object request);
+}
+EOF
 cat >"$workflow_context_dir/WorkflowController.java" <<'EOF'
 package downstream.workflow;
 
@@ -1718,6 +1734,11 @@ workflow_count="$(printf '%s\n' "$workflow_output" | grep -c 'WorkflowClient.jav
   printf '%s\n' "$workflow_output" >&2
   exit 1
 }
+if printf '%s\n' "$workflow_output" | grep -F 'TenantSafeWorkflowClient.java:' >/dev/null; then
+  echo 'context tenant preflight reported a client that already carries X-Tenant-Id' >&2
+  printf '%s\n' "$workflow_output" >&2
+  exit 1
+fi
 # The endpoint annotation and gateway header may be unchanged context while a
 # DTO/parameter line inside the same method is the only added line.  Recover
 # that method from context, but still require an actual added line before
