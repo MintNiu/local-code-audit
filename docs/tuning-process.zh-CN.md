@@ -414,7 +414,7 @@ token，但首个分片还要附带配置凭据预检和分片文件列表，实
 reserve 和 effective budget，方便后续复核。
 
 同一 holdout 还暴露了一个与模型无关的 SQL 契约问题：`sql/platform_file.sql` 新增
-`CREATE DATABASE platform_file`，但保留 `USE platform_db_file`，空库部署会在错误的
+`CREATE DATABASE platform_file_db`，但保留 `USE platform_db_file`，空库部署会在错误的
 数据库上执行 DDL。现在增加了窄范围 SQL 预检：只有同一 SQL 文件中恰好一个
 `CREATE DATABASE/SCHEMA` 和一个 `USE`、名称不一致且至少一条语句是新增行时才报告 P1；
 多 schema 脚本、只有 CREATE、名称一致和带行尾注释的安全样例均保持 clean。该规则已经
