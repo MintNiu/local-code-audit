@@ -109,6 +109,7 @@
 - 同日隔离配置文件对照 `chunk_num_predict=2048/4096`：两次都完整保留 6 条凭据问题，结果哈希一致，耗时 123/125 秒；降低输出预算没有收益，因此保持个人 profile 的 4096 设置，不以速度换取截断风险。
 - 同日全局禁用 few-shot 的 A/B 作为负面对照：`java-token-header` clean 样本耗时 197 秒且哈希变化，`java-tenant-safe` 连续 3 次 180 秒无响应，整次审查失败；因此保留 examples，不采用看似更快但破坏 clean 稳定性的方案。
 - 2026-09-19 修复“预检证据较多时首片预算低估”的可用性边界：真实 `platform-file:f6ce8f6` 首次因固定探测 9,095/11,264 token、实际首片 11,367 token 而在请求前失败；现在按分片路径和路由预检证据的实际增量动态提高 reserve，将有效分片预算从 3,000 调整为 2,004 字节。复跑后 8 个分片全部完成，309 秒内保留 8 条确定性凭据 P1；完整预检、分片、运行态校验通过，未改变默认 few-shot 或截断失败策略。
+- 同一 `f6ce8f6` holdout 还确认 `sql/platform_file.sql` 新增的 `CREATE DATABASE platform_file` 与保留的 `USE platform_db_file` 不一致；新增窄范围 SQL schema 预检，仅在单一 CREATE/USE 且至少一条为新增行时报告 P1，多 schema、同名、CREATE-only 和行尾注释负例保持 clean，回归已加入 `test-preflight.sh`。
 
 ## 失败处理原则
 

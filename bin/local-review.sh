@@ -3037,6 +3037,106 @@ collect_storage_delete_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sql_schema_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # A schema rename must update the database selected by the same script. Keep
+  # this deliberately narrow: only one CREATE DATABASE/SCHEMA and one USE
+  # statement are visible in the changed SQL file, their normalized names
+  # differ, and at least one of those statements is newly added. This avoids
+  # guessing when a migration intentionally manages several schemas.
+  awk '
+    function reset_file() {
+      create_count = 0
+      use_count = 0
+      create_name = ""
+      use_name = ""
+      create_line = 0
+      use_line = 0
+      create_changed = 0
+      use_changed = 0
+    }
+    function normalized_name(value) {
+      gsub(/[`;"'"'"'()]/, "", value)
+      return tolower(value)
+    }
+    function record_create(text, is_added, at_line, normalized, fields, count, field_index, name) {
+      normalized = text
+      gsub(/[[:space:]]+/, " ", normalized)
+      sub(/^[[:space:]]+/, "", normalized)
+      sub(/[[:space:]]+(--|#).*/, "", normalized)
+      sub(/[[:space:]]+$/, "", normalized)
+      if (tolower(normalized) !~ /^create[[:space:]]+(database|schema)([[:space:]]+if[[:space:]]+not[[:space:]]+exists)?[[:space:]]+/) return
+      count = split(normalized, fields, " ")
+      field_index = 3
+      if (tolower(fields[3]) == "if") field_index = 6
+      if (field_index > count) return
+      name = normalized_name(fields[field_index])
+      if (name == "") return
+      create_count++
+      create_name = name
+      create_line = at_line
+      if (is_added) create_changed = 1
+    }
+    function record_use(text, is_added, at_line, normalized, fields, count, name) {
+      normalized = text
+      gsub(/[[:space:]]+/, " ", normalized)
+      sub(/^[[:space:]]+/, "", normalized)
+      sub(/[[:space:]]+(--|#).*/, "", normalized)
+      sub(/[[:space:]]+$/, "", normalized)
+      if (tolower(normalized) !~ /^use[[:space:]]+/) return
+      count = split(normalized, fields, " ")
+      if (count < 2) return
+      name = normalized_name(fields[2])
+      if (name == "") return
+      use_count++
+      use_name = name
+      use_line = at_line
+      if (is_added) use_changed = 1
+    }
+    function emit_file() {
+      if (path == "" || path !~ /\.sql$/) return
+      if (create_count == 1 && use_count == 1 && create_name != use_name &&
+          (create_changed || use_changed)) {
+        line = (create_changed ? create_line : use_line)
+        printf "P1 %s:%d - SQL 创建的数据库名与后续 USE 目标不一致，初始化或迁移可能把表结构执行到错误的数据库。\n影响：部署可能创建一个数据库却在另一个数据库上执行 DDL，导致目标服务缺表、启动失败或升级结果不可预测。\n修复建议：统一 CREATE DATABASE/SCHEMA 与 USE 的名称，或在迁移入口显式选择同一个目标数据库，并补充空库初始化验证。\n验证方式：在全新数据库和已有数据库上执行脚本，确认建库、USE、表创建和应用连接使用同一数据库名称。\n\n", path, line
+      }
+    }
+    /^diff --git / {
+      emit_file()
+      path = $4
+      sub(/^b\//, "", path)
+      reset_file()
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      if (path == "" || path !~ /\.sql$/) next
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" || prefix == "-" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        record_create(text, prefix == "+", line_no)
+        record_use(text, prefix == "+", line_no)
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { emit_file() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
@@ -3110,6 +3210,7 @@ collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
+collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames

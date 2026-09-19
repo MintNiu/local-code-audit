@@ -2300,4 +2300,53 @@ printf '%s\n' "$storage_output" | grep -F '删除文件元数据时移除了对�
   exit 1
 }
 
+mkdir -p "$repo/sql"
+cat >"$repo/sql/platform_file.sql" <<'EOF'
+CREATE DATABASE IF NOT EXISTS `platform_db_file`;
+USE `platform_db_file`;
+CREATE TABLE `sys_file` (`id` bigint);
+EOF
+cat >"$repo/sql/schema_variant.sql" <<'EOF'
+CREATE SCHEMA IF NOT EXISTS `schema_a`;
+USE `schema_a`;
+CREATE TABLE `schema_table` (`id` bigint);
+EOF
+git -C "$repo" add sql/platform_file.sql sql/schema_variant.sql
+git -C "$repo" commit -qm sql-schema-base
+sed -i '' 's/CREATE DATABASE IF NOT EXISTS `platform_db_file`/CREATE DATABASE IF NOT EXISTS `platform_file`/' "$repo/sql/platform_file.sql"
+sed -i '' 's/USE `schema_a`/USE `schema_b`/' "$repo/sql/schema_variant.sql"
+cat >"$repo/sql/safe_schema.sql" <<'EOF'
+CREATE DATABASE IF NOT EXISTS `safe_db`; -- keep the existing schema
+USE `safe_db`; -- execute below in the same schema
+EOF
+cat >"$repo/sql/multiple_schema.sql" <<'EOF'
+CREATE DATABASE IF NOT EXISTS `first_db`;
+USE `second_db`;
+CREATE DATABASE IF NOT EXISTS `third_db`;
+USE `fourth_db`;
+EOF
+cat >"$repo/sql/create_only.sql" <<'EOF'
+CREATE DATABASE IF NOT EXISTS `created_only`;
+EOF
+sql_schema_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$sql_schema_output" | grep -F 'SQL 创建的数据库名与后续 USE 目标不一致' >/dev/null || {
+  echo 'missing SQL CREATE/USE schema mismatch preflight' >&2
+  printf '%s\n' "$sql_schema_output" >&2
+  exit 1
+}
+for expected_schema_path in platform_file.sql schema_variant.sql; do
+  printf '%s\n' "$sql_schema_output" | grep -F "$expected_schema_path" >/dev/null || {
+    echo "missing SQL schema preflight finding for: $expected_schema_path" >&2
+    printf '%s\n' "$sql_schema_output" >&2
+    exit 1
+  }
+done
+for safe_schema_path in safe_schema.sql multiple_schema.sql create_only.sql; do
+  if printf '%s\n' "$sql_schema_output" | grep -F "$safe_schema_path" >/dev/null; then
+    echo "SQL schema preflight reported a negative fixture: $safe_schema_path" >&2
+    printf '%s\n' "$sql_schema_output" >&2
+    exit 1
+  fi
+done
+
 printf 'preflight regression passed\n'

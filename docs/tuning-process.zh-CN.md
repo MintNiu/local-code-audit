@@ -413,6 +413,15 @@ token，但首个分片还要附带配置凭据预检和分片文件列表，实
 不删除差异、不省略预检，也不改变普通小提交的请求路径；私有 `.meta.tsv` 会记录实际
 reserve 和 effective budget，方便后续复核。
 
+同一 holdout 还暴露了一个与模型无关的 SQL 契约问题：`sql/platform_file.sql` 新增
+`CREATE DATABASE platform_file`，但保留 `USE platform_db_file`，空库部署会在错误的
+数据库上执行 DDL。现在增加了窄范围 SQL 预检：只有同一 SQL 文件中恰好一个
+`CREATE DATABASE/SCHEMA` 和一个 `USE`、名称不一致且至少一条语句是新增行时才报告 P1；
+多 schema 脚本、只有 CREATE、名称一致和带行尾注释的安全样例均保持 clean。该规则已经
+加入 `test-preflight.sh`，不把多数据库迁移的推测泛化成问题。
+这是保守的 diff-visible 预检：跨多行拼接、跨文件变量或复杂迁移编排仍交给模型和人工复核，
+不会把无法证明的关系强行升级为问题。
+
 ### 2026-09-18：收紧 fail-closed 配置误报
 
 对真实 `platform-workflow-service:65de3996400acb054246f45207f26db24c2a2de3` 的首次个人 profile 复核发现，模型把“删除本地默认凭据、改为必须从 `${...}` 环境变量注入”误报成了服务启动/连接失败的 P1。该提交的意图是 fail-closed：没有运行时凭据就拒绝启动，而不是恢复不安全默认值。
