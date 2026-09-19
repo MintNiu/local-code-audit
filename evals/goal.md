@@ -68,7 +68,7 @@
 - 同日对 `platform-api-20.tsv` 使用个人 profile 做两轮真实历史复测：20/20 提交均 completed，完整输出和运行配置签名逐提交一致；非 clean 仍仅为 `420ae70c` 的 5 条构建阻断引用，以及 `63d520b`、`a1284658` 各 1 条待人工确认的查询 token 候选。
 - 评测标签链路新增按结果内容 SHA-256 的安全迁移和 scorecard 自动构建：结果路径变化但内容完全一致、且标签条目数量不超过最终候选数、文件/行号与候选重叠时才迁移 complete 标签，内容变化、候选计数不一致、定位不一致或运行元数据缺失时均 fail-closed；相关回归测试已通过。
 - 2026-09-15 对迁移后的真实标签运行 scorecard 构建时，`2f6c3934` 和 `91bff253` 被安全拒绝：标签分别记录了 12 条和 5 条误报，但对应的最终 `source_result` 都只有“未发现阻塞问题”，候选数为 0。构建器没有把这些历史标签强行计入统计，也没有留下半成品输出；这说明剩余阻塞是标签与最终结果内容的语义不一致，必须重新阅读原始审查过程并将标签改为与最终结果一致后，才能继续计算真实误报率/召回率。
-- 同日 `test-scorecard-builder.sh`、`test-label-migration.sh`、`test-history.sh` 和 `scripts/verify-runtime.sh` 均通过；运行态 tuned 模型 SYSTEM SHA-256 仍为 `5ca0a78b346832404f95d08a0b540ff0b9c37e6a2c92cd84161c281616655700`。因此当前不是运行器或模型规则漂移，而是阶段 1 人工标签尚未完成一致性复核。
+- 同日 `test-scorecard-builder.sh`、`test-label-migration.sh`、`test-history.sh` 和 `scripts/verify-runtime.sh` 均通过；重建 SQL 规则后的运行态 tuned 模型 SYSTEM SHA-256 为 `9aa021f8c50feaac17ab2556bbe4485e18d87a726ff0b848e3a5451e9f6c0274`。因此当前不是运行器或模型规则漂移，而是阶段 1 人工标签尚未完成一致性复核。
 - 重新从原始历史标签迁移到当前个人 profile 结果时，位置/数量双重门禁仅接受 14 份标签，拒绝 6 份；对这 14 份生成的 scorecard 为 14 个 clean、0 个 confirmed P0/P1，因此 `p0_p1_recall=n/a` 是正确结果，不能把“全是 clean”误报成 100% 召回。剩余 6 份必须重新绑定到对应最终结果并人工确认后，阶段 1 才有可测分母。
 - 在同日完成这 6 份重新绑定后的人工复核：`2f6c3934`、`91bff253`、`39955c8` 标为 clean，`420ae70c` 确认 5 条缺失 DTO 的 P1 编译阻断，`63d520b` 与 `a1284658` 各确认 1 条从查询参数读取 `x-token` 的 P1。私有标签集 `platform-api-labels-final-20260915` 生成 20 行 scorecard：7 个 confirmed P0/P1、7 个命中、0 个误报，当前为 7/7（100%）；分母仍只有 7 个真实高优先级根因，且未分离 holdout，因此这只是阶段 1 的当前证据，不是生产级验收结论。
 - 同日补充评测了仓库中原 20 提交清单之外的 4 个非合并业务提交：`b4ea10fc`、`12a1aeb0`、`6dc87ecf` 标为 clean，`89ea7d8d` 对工作流事件 claim/ack 未显式携带租户上下文标为 uncertain，等待服务端实现复核。扩展私有标签/结果集 `platform-api-labels-final-extended-20260915` 共 24 个提交，scorecard 仍为 7/7（100%）、0 误报、1 个 uncertain 未计入；新增样本增加了 clean 覆盖，但尚未增加已确认 P0/P1 分母。
@@ -91,7 +91,7 @@
 - 同日补齐 token/url 别名中的行内注释边界：`TOKEN_HEADER` 或凭据变量赋值行带 `//`/`/*...*/` 注释时，别名仍能跨行传播并进入预检；对应普通参数负例继续保持 clean。
 - 同日补齐源码快照别名恢复：别名赋值未改动且位于 diff 上下文之外时，新增 `getParameter(alias)` 或 URL 拼接仍能按当前 Java 方法作用域命中；新增 `PreExistingQueryTokenAlias`、`PreExistingUrlSecretAlias`，并保持同名局部变量不跨方法串线。
 - 同日统一 token 别名的 header 大小写语义：源码快照和 diff 内的 `"x-token"`/`"X-Token"` 直接别名均进入同一查询参数风险规则，新增大写别名回归通过。
-- 同日用当前运行器和 `devstral-small-2-review-tuned` 复核真实 `platform-api` 提交 `91bff253`、`63d520b`、`a1284658`：三次均 exit=0；前者保持 clean，后两者各保留唯一的 `getParameter("x-token")` P1（58、81 行），结果字段完整且 SYSTEM SHA-256 为 `5ca0a78b...`。
+- 同日用当前运行器和 `devstral-small-2-review-tuned` 复核真实 `platform-api` 提交 `91bff253`、`63d520b`、`a1284658`：三次均 exit=0；前者保持 clean，后两者各保留唯一的 `getParameter("x-token")` P1（58、81 行），结果字段完整且使用已校验的 tuned SYSTEM 规则。
 - 同日用当前 tuned 运行态对 `platform-api` 的真实提交 `63d520b`、`a1284658` 和 `39955c8` 做定向复核：前两个提交各只保留一个对应文件/行号的 `x-token` 查询参数 P1，后一个提交为 clean，三次均完成且 exit=0；这说明前两个是不同业务位置的真实重复模式，不是同一次分片聚合重复制造的 finding。
 - 同日继续收紧 `java-divide`：源码签名恢复改为按当前方法花括号范围前向解析，新增“前一方法为 `Integer`、当前方法为 `int`”负例；复杂三元分母不再被截断成第一个变量，新增安全负例，原有方法调用表达式和链式除法正例仍通过。
 - 同日补充 token/url 多行语法回归：跨行直接别名赋值、两级 URL 凭据别名以及跨行 `getParameter(...)` 参数现在都会进入同一确定性预检；普通 ID、内部请求头和未完成别名仍保持 clean。
@@ -110,6 +110,7 @@
 - 同日全局禁用 few-shot 的 A/B 作为负面对照：`java-token-header` clean 样本耗时 197 秒且哈希变化，`java-tenant-safe` 连续 3 次 180 秒无响应，整次审查失败；因此保留 examples，不采用看似更快但破坏 clean 稳定性的方案。
 - 2026-09-19 修复“预检证据较多时首片预算低估”的可用性边界：真实 `platform-file:f6ce8f6` 首次因固定探测 9,095/11,264 token、实际首片 11,367 token 而在请求前失败；现在按分片路径和路由预检证据的实际增量动态提高 reserve，将有效分片预算从 3,000 调整为 2,004 字节。复跑后 8 个分片全部完成，309 秒内保留 8 条确定性凭据 P1；完整预检、分片、运行态校验通过，未改变默认 few-shot 或截断失败策略。
 - 同一 `f6ce8f6` holdout 还确认 `sql/platform_file.sql` 新增的 `CREATE DATABASE platform_file_db` 与保留的 `USE platform_db_file` 不一致；新增窄范围 SQL schema 预检，仅在单一 CREATE/USE 且至少一条为新增行时报告 P1，多 schema、同名、CREATE-only 和行尾注释负例保持 clean，回归已加入 `test-preflight.sh`。
+- 2026-09-19 将同一条 SQL schema 边界同步进 `config/Modelfile` 并重建 tuned 模型（复用已有基础层）；`SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 通过，除法、URL token、租户、迁移、凭据、预签名和 4 个 clean 负例均完成，截断故障仍按预期显式失败。运行态 SYSTEM SHA-256 为 `9aa021f8c50feaac17ab2556bbe4485e18d87a726ff0b848e3a5451e9f6c0274`。
 
 ## 失败处理原则
 
