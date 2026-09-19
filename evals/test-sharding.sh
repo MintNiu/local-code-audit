@@ -96,4 +96,46 @@ else
   exit 1
 fi
 
+# A config-heavy diff adds deterministic credential evidence to each routed
+# shard. The budget planner must account for that variable prompt section
+# instead of relying on the old fixed reserve, while still completing every
+# fake model request.
+budget_repo="$fixture_root/budget-repo"
+budget_meta="$fixture_root/budget.tsv"
+mkdir -p "$budget_repo"
+git -C "$budget_repo" init -q
+git -C "$budget_repo" config user.email test@example.invalid
+git -C "$budget_repo" config user.name sharding-budget-test
+printf 'base\n' >"$budget_repo/A.txt"
+git -C "$budget_repo" add A.txt
+git -C "$budget_repo" commit -qm base
+printf 'changed\n' >"$budget_repo/A.txt"
+cat >"$budget_repo/application.yml" <<'EOF'
+storage:
+  endpoint: https://storage.example.invalid
+  access-key-id: AKID_1234567890abcdef
+  access-key-secret: SECRET_1234567890abcdef
+  password: password_1234567890
+gateway:
+  internal-token: token_1234567890
+  api-key: api_key_1234567890
+database:
+  username: app-user
+  passwd: passwd_1234567890
+  secret-key: secret_1234567890
+EOF
+PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
+  OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
+  OLLAMA_REVIEW_NUM_CTX=16384 \
+  OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE="$budget_meta" \
+  "$repo_root/bin/local-review.sh" --repo "$budget_repo" >/dev/null
+grep -E '^chunk_budget_preflight_reserve_tokens[[:space:]]+[5-9][0-9][0-9]$|^chunk_budget_preflight_reserve_tokens[[:space:]]+[1-9][0-9]{3,}$' "$budget_meta" >/dev/null || {
+  echo 'budget planner did not expand the reserve for routed preflight evidence' >&2
+  cat "$budget_meta" >&2
+  exit 1
+}
+
 echo 'diff sharding regression passed'

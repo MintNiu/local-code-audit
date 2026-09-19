@@ -1637,7 +1637,9 @@ write_chunk_budget_metadata() {
 resolve_chunk_budget() {
   local configured_bytes="$1"
   local available_tokens probe_tokens remaining_tokens budget_bytes
-  local probe_prompt adjusted=false
+  local probe_prompt probe_body probe_base_prompt probe_variable_prompt
+  local probe_base_tokens probe_variable_tokens dynamic_reserve_tokens
+  local adjusted=false
 
   effective_max_diff_bytes="$configured_bytes"
   # Shards use their own output budget.  Size the shard cap against that
@@ -1660,7 +1662,9 @@ resolve_chunk_budget() {
   # retained, but it already covers every path.  Do not also put the complete
   # inventory into the "current shard" status section: that duplicate used to
   # reject large commits before the real, smaller shard prompts were built.
-  probe_prompt="$(build_prompt '--- 当前审查分片：chunk-0001 ---' without-examples "" /dev/null)"
+  probe_body='--- 当前审查分片：chunk-0001 ---'
+  probe_base_prompt="$(build_prompt "$probe_body" without-examples "" /dev/null)"
+  probe_prompt="$probe_base_prompt"
   probe_prompt="$probe_prompt
 --- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
 $(cat "$changed_paths_file")
@@ -1671,8 +1675,20 @@ $(cat "$changed_paths_file")
     write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
     return 13
   fi
-  # Leave room for the shard-local preflight evidence and a small amount of
-  # prompt-shape variance. The actual request still passes check_prompt_budget.
+  # The actual shard also adds its local path list and routed deterministic
+  # evidence. Estimate that exact variable section instead of reserving a
+  # fixed guess: a credential-heavy config diff can otherwise exceed the
+  # budget by a small amount before the first model request is sent.
+  probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$build_preflight_file")"
+  probe_base_tokens="$(estimate_prompt_tokens "$probe_base_prompt")"
+  probe_variable_tokens=$(( $(estimate_prompt_tokens "$probe_variable_prompt") - probe_base_tokens ))
+  if (( probe_variable_tokens < 0 )); then probe_variable_tokens=0; fi
+  dynamic_reserve_tokens=$((probe_variable_tokens + 128))
+  if (( dynamic_reserve_tokens > chunk_budget_preflight_reserve_tokens )); then
+    chunk_budget_preflight_reserve_tokens="$dynamic_reserve_tokens"
+  fi
+  # Leave room for the shard-local evidence and a small amount of prompt-shape
+  # variance. The actual request still passes check_prompt_budget.
   remaining_tokens=$((available_tokens - probe_tokens - chunk_budget_preflight_reserve_tokens))
   budget_bytes=$((remaining_tokens * 3))
   if (( budget_bytes < 1000 )); then
