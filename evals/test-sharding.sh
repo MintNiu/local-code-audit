@@ -88,5 +88,12 @@ grep -E '^chunk_paths[[:space:]]+chunk-[0-9]{4}[[:space:]]+[^[:space:]]' "$trace
   cat "$trace_file" >&2
   exit 1
 }
+if awk -F '\t' '$1 == "chunk_prompt" && ($3 !~ /^[1-9][0-9]*$/ || $4 !~ /^[1-9][0-9]*$/) { bad = 1 } END { exit(bad ? 1 : 0) }' "$trace_file"; then
+  :
+else
+  echo 'sharding trace recorded malformed prompt size/token estimates' >&2
+  cat "$trace_file" >&2
+  exit 1
+fi
 
 echo 'diff sharding regression passed'

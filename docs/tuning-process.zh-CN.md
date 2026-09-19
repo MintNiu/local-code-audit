@@ -218,7 +218,7 @@ context_files[@]: unbound variable
 
 `scripts/verify-runtime.sh` 现在还会从 `config/Modelfile` 与 `ollama show --modelfile` 提取完整 SYSTEM 块并比较 SHA-256。规则缺失、格式异常或运行态漂移都会 fail-closed；`evals/test-runtime-verify.sh` 覆盖一致通过和人为漂移失败两条路径。该机制解决的是“脚本已更新但 Ollama 派生模型仍是旧规则”的运维问题，不代表基础模型能力发生变化。
 
-历史评测现在还会在私有 `.meta.tsv` 中记录 `chunk_count`、每个分片的文件路径、字节数、完成状态和耗时；普通 `local-review` 不创建这些旁路文件。这样大提交的总耗时可以拆解为分片数量、单片慢请求和失败重试，调优时不必猜测瓶颈，也不会把诊断信息混进用户审查结果。
+历史评测现在还会在私有 `.meta.tsv` 中记录 `chunk_count`、每个分片的文件路径、diff/提示词字节数、估算输入 token、完成状态和耗时；普通 `local-review` 不创建这些旁路文件。这样大提交的总耗时可以拆解为分片数量、固定提示词大小、单片慢请求和失败重试，调优时不必猜测瓶颈，也不会把诊断信息混进用户审查结果。
 
 本轮新增的 `evals/test-preflight.sh` 回归覆盖了重试次数、超预算拒绝和越界行号拒绝；随后使用当前 tuned 模型跑了一轮完整合成门禁，除截断故障按预期非零退出外，`divide=1`、`security=1`、`tenant=1`、`clean=4`、`migration=1`、`secret=1`、`presigned=1` 全部通过。全局 `~/.local/bin/local-review` 已重新同步，Ollama 模型未被脚本自动下载或常驻保持。
 
@@ -395,6 +395,11 @@ devstral-small-2-review-tuned
 `448a938b0199d2fbc64c4f24c4353cb338539beff8aea781da0d386ca0f712fb`，耗时分别为 123 秒和
 125 秒。说明瓶颈不在输出上限，降低 `num_predict` 没有可测收益；当前不改变个人 profile 的
 4096 分片输出预算，后续应从提示词重复和模型请求次数入手，并继续以完整性门禁为先。
+
+同轮做了全局禁用 few-shot 的 A/B 作为负面验证：确定性除法和 URL 令牌正例仍能通过，
+但 `java-token-header` clean 对照耗时升到 197 秒且输出哈希变化，随后 `java-tenant-safe`
+连续 3 次各等待 180 秒无响应，整次审查按失败处理。由此确认 examples 虽增加约 4–5k
+输入 token，却是当前模型稳定性和 clean 负例可用性的一部分；不采用全局去除 examples 的优化。
 
 ### 2026-09-18：收紧 fail-closed 配置误报
 

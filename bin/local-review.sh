@@ -3245,6 +3245,12 @@ $(cat "$changed_paths_file")
   chunk_status=0
   original_num_predict="$num_predict"
   num_predict="$chunk_num_predict"
+  if [[ -n "$review_trace_file" ]]; then
+    chunk_prompt_bytes="$(printf '%s' "$chunk_prompt" | wc -c | tr -d ' ')"
+    chunk_prompt_tokens="$(estimate_prompt_tokens "$chunk_prompt")"
+    printf -v trace_line 'chunk_prompt\t%s\t%s\t%s' "$chunk_name" "$chunk_prompt_bytes" "$chunk_prompt_tokens"
+    write_review_trace "$trace_line"
+  fi
   chunk_start="$(date +%s)"
   run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_status=$?
   chunk_bytes="$(wc -c <"$chunk_file" | tr -d ' ')"
