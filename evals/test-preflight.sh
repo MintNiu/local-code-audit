@@ -162,6 +162,19 @@ operation-log:
   internal-token: ${GATEWAY_INTERNAL_TOKEN:platform-dev-shared-internal-token}
   safe-token: ${SAFE_TOKEN:short-example}
 EOF
+cat >"$repo/application-credential-repeated-default.yml" <<'EOF'
+operation-log:
+  internal-token: ${GATEWAY_INTERNAL_TOKEN:platform-localhost-shared-internal-token}
+gateway:
+  internal-token: ${GATEWAY_INTERNAL_TOKEN:platform-localhost-shared-internal-token}
+platform:
+  job:
+    access-token: ${XXL_JOB_ACCESS_TOKEN:${GATEWAY_INTERNAL_TOKEN:platform-localhost-shared-internal-token}}
+    internal-token: ${GATEWAY_INTERNAL_TOKEN:platform-localhost-shared-internal-token}
+api-resource:
+  sync:
+    internal-token: ${GATEWAY_INTERNAL_TOKEN:platform-localhost-shared-internal-token}
+EOF
 cat >"$repo/application-credential-remote-default.yml" <<'EOF'
 spring:
   datasource:
@@ -946,6 +959,14 @@ grep -F 'P1 application-credential-weak-default.yml' "$capture" >/dev/null || {
 }
 grep -F 'P1 application-credential-long-default.yml' "$capture" >/dev/null || {
   echo 'missing long default credential preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+# The fake transport stores JSON, so prompt newlines are escaped rather than
+# appearing as physical lines; count the exact finding prefix in the payload.
+repeated_default_count="$(grep -o 'P1 application-credential-repeated-default.yml:' "$capture" | wc -l | tr -d '[:space:]')"
+[[ "$repeated_default_count" == "5" ]] || {
+  echo 'repeated hardcoded credential findings were collapsed or missed' >&2
   cat "$capture" >&2
   exit 1
 }

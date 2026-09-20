@@ -50,8 +50,8 @@ prepare_fixture() {
     git -C "$target_dir" add .
     git -C "$target_dir" commit -qm base
     sed -i '' \
-      -e 's#${OSS_ACCESS_KEY_ID}#AKID_EXAMPLE#' \
-      -e 's#${OSS_ACCESS_KEY_SECRET}#SECRET_EXAMPLE#' \
+      -e 's#${OSS_ACCESS_KEY_ID}#AKID_EXAMPLE_9f8e7d6c5b4a3210#' \
+      -e 's#${OSS_ACCESS_KEY_SECRET}#SECRET_EXAMPLE_9f8e7d6c5b4a3210#' \
       "$target_dir/application.yml"
   fi
 }
