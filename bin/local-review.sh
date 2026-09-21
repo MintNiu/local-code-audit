@@ -2077,6 +2077,21 @@ collect_security_preflight() {
         sub(/\/\*.*\*\//, "", alias_code)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", alias_code)
         scope = scope_for_line(i)
+        # A direct reassignment must invalidate an older alias even when the
+        # new RHS is an ordinary string or method call. Otherwise a source
+        # snapshot can keep treating `parameterName = "safe"` as a token
+        # alias and repeat a stale java-token-url finding.
+        if (alias_code ~ /(^|[^=])=[^=]/ && alias_code !~ /==|!=|<=|>=/) {
+          alias_lhs = alias_code
+          sub(/[[:space:]]*=.*/, "", alias_lhs)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", alias_lhs)
+          alias_count = split(alias_lhs, alias_fields, /[[:space:]]+/)
+          alias_name = alias_fields[alias_count]
+          if (alias_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            delete token_parameter_vars[alias_name SUBSEP scope]
+            delete url_secret_vars[alias_name SUBSEP scope]
+          }
+        }
         if (source_pending_name != "") {
           rhs = alias_code
           gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
@@ -2142,6 +2157,48 @@ collect_security_preflight() {
       if (text == "TOKEN_HEADER") return 1
       return known_token_alias(text, scope)
     }
+    function secret_identifier(text, scope) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", text)
+      sub(/[),;[:space:]]+$/, "", text)
+      if (text ~ /^[A-Za-z_][A-Za-z0-9_]*$/ &&
+          (text ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/ ||
+           known_url_secret_alias(text, scope))) return 1
+      return 0
+    }
+    function builder_secret_value(text, scope, start, rest, comma, key, value) {
+      start = match(text, /(queryParam|query)[[:space:]]*\([[:space:]]*/)
+      if (start == 0) return 0
+      rest = substr(text, RSTART + RLENGTH)
+      comma = index(rest, ",")
+      if (comma == 0) return 0
+      key = substr(rest, 1, comma - 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      sub(/^["\047]/, "", key)
+      sub(/["\047]$/, "", key)
+      if (tolower(key) !~ /(^|[-_.])(token|secret|password|passwd|api[-_]?key|access[-_]?key|auth|sig|signature|credential|session[-_]?key)([-_.]|$)/) return 0
+      value = substr(rest, comma + 1)
+      sub(/[[:space:]]*\).*/, "", value)
+      return secret_identifier(value, scope)
+    }
+    function format_secret_value(text, scope, start, rest, comma, template, value) {
+      start = match(text, /String[[:space:]]*\.[[:space:]]*format[[:space:]]*\([[:space:]]*/)
+      if (start == 0) return 0
+      rest = substr(text, RSTART + RLENGTH)
+      comma = index(rest, ",")
+      if (comma == 0) return 0
+      template = substr(rest, 1, comma - 1)
+      if (template !~ /https?:\/\/|[?&\/]([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key|auth|sig|signature|credential|session[_-]?key)[A-Za-z0-9_.-]*)[=\/]/) return 0
+      value = substr(rest, comma + 1)
+      sub(/,[^,]*$/, "", value)
+      return secret_identifier(value, scope)
+    }
+    function append_secret_value(text, scope, start, rest) {
+      start = match(text, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\+=[[:space:]]*/)
+      if (start == 0) return 0
+      rest = substr(text, RSTART + RLENGTH)
+      sub(/;.*/, "", rest)
+      return secret_identifier(rest, scope)
+    }
     function strip_inline_comments(text) {
       sub(/[[:space:]]*\/\/.*$/, "", text)
       sub(/\/\*.*\*\//, "", text)
@@ -2153,6 +2210,7 @@ collect_security_preflight() {
         rhs = text
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
         sub(/[;[:space:]]*$/, "", rhs)
+        delete token_parameter_vars[pending_token_name SUBSEP pending_token_scope]
         if (rhs ~ /^(TOKEN_HEADER|"[Xx]-[Tt][Oo][Kk][Ee][Nn]"|[A-Za-z_][A-Za-z0-9_]*)$/) {
           if (rhs == "TOKEN_HEADER" || tolower(rhs) == "\"x-token\"" || known_token_alias(rhs, pending_token_scope)) {
             token_parameter_vars[pending_token_name SUBSEP pending_token_scope] = 1
@@ -2163,6 +2221,17 @@ collect_security_preflight() {
         }
         pending_token_name = ""
         pending_token_scope = ""
+      }
+      if (text ~ /(^|[^=])=[^=]/ && text !~ /==|!=|<=|>=/) {
+        assignment = text
+        sub(/[[:space:]]*=.*/, "", assignment)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", assignment)
+        count = split(assignment, fields, /[[:space:]]+/)
+        name = fields[count]
+        if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+          scope = scope_for_line(at_line)
+          delete token_parameter_vars[name SUBSEP scope]
+        }
       }
       if (text ~ /=[[:space:]]*$/) {
         assignment = text
@@ -2189,6 +2258,7 @@ collect_security_preflight() {
         sub(/^.*=[[:space:]]*/, "", rhs)
         sub(/[;[:space:]]*$/, "", rhs)
         scope = scope_for_line(at_line)
+        delete token_parameter_vars[name SUBSEP scope]
         if (rhs == "TOKEN_HEADER" || tolower(rhs) == "\"x-token\"" || known_token_alias(rhs, scope)) {
           token_parameter_vars[name SUBSEP scope] = 1
         }
@@ -2203,6 +2273,7 @@ collect_security_preflight() {
         rhs = text
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", rhs)
         sub(/[;[:space:]]*$/, "", rhs)
+        delete url_secret_vars[pending_url_secret_name SUBSEP pending_url_secret_scope]
         if (rhs ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
           if (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/ || known_url_secret_alias(rhs, pending_url_secret_scope)) {
             url_secret_vars[pending_url_secret_name SUBSEP pending_url_secret_scope] = 1
@@ -2213,6 +2284,17 @@ collect_security_preflight() {
         }
         pending_url_secret_name = ""
         pending_url_secret_scope = ""
+      }
+      if (text ~ /(^|[^=])=[^=]/ && text !~ /==|!=|<=|>=/) {
+        lhs = text
+        sub(/[[:space:]]*=.*/, "", lhs)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
+        count = split(lhs, fields, /[[:space:]]+/)
+        name = fields[count]
+        if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+          scope = scope_for_line(at_line)
+          delete url_secret_vars[name SUBSEP scope]
+        }
       }
       if (text ~ /=[[:space:]]*$/) {
         lhs = text
@@ -2240,6 +2322,7 @@ collect_security_preflight() {
       sub(/^.*=[[:space:]]*/, "", rhs)
       sub(/[;[:space:]]*$/, "", rhs)
       scope = scope_for_line(at_line)
+      delete url_secret_vars[name SUBSEP scope]
       if (rhs ~ /^(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)$/ || known_url_secret_alias(rhs, scope)) {
         url_secret_vars[name SUBSEP scope] = 1
       }
@@ -2483,19 +2566,17 @@ collect_security_preflight() {
         # literal `+ token` expression. Keep the rule narrow: a visible URL or
         # query-key must appear on the changed line together with a
         # high-confidence secret-like variable.
-        builder_query = (added ~ /queryParam[[:space:]]*\([^,]*(token|secret|password|api[_-]?key|auth|sig|credential)[^,]*,[^)]*/) ||
-          (added ~ /query[[:space:]]*\([^,]*(token|secret|password|api[_-]?key|auth|sig|credential)[^,]*/)
-        builder_secret = added ~ /(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)/
-        format_risk = (added ~ /String[[:space:]]*\.[[:space:]]*format[[:space:]]*\(/ && added ~ /https?:\/\/|[?&](token|secret|password|api[_-]?key|auth|sig|credential)/ && builder_secret)
-        append_risk = added ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\+=[^;]*(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)/
         current_scope = scope_for_line(line_no)
+        builder_secret = builder_secret_value(added, current_scope)
+        format_risk = format_secret_value(added, current_scope)
+        append_risk = append_secret_value(added, current_scope)
         for (secret_key in url_secret_vars) {
           split(secret_key, secret_parts, SUBSEP)
           secret_name = secret_parts[1]
           if (!alias_scope_matches(secret_name, secret_parts[2], current_scope)) continue
           if (added ~ ("\\+[[:space:]]*" secret_name "([^[:alnum:]_]|$)")) url_risk = 1
         }
-        if ((builder_query && builder_secret) || format_risk || append_risk) {
+        if (builder_secret || format_risk || append_risk) {
           url_risk = 1
         }
         if (url_risk) {
@@ -2666,18 +2747,43 @@ collect_java_division_preflight() {
       # uncertain instead of suppressing a real risk.
       return !(name in guards) || guards[name] >= at_line
     }
+    function division_unguarded(name, division_index, guards, at_line, key) {
+      key = division_index SUBSEP name
+      return !(key in guards) || guards[key] >= at_line
+    }
+    function snapshot_source_division(division_index, at_line, name) {
+      if (repo_root == "" || path == "" || path == "/dev/null") return
+      # Re-run source signature recovery independently for each changed
+      # division. This prevents parameters or guards from one method
+      # from leaking into a later method in the same unified-diff hunk.
+      for (name in integer_names) delete integer_names[name]
+      for (name in null_guards) delete null_guards[name]
+      for (name in zero_guards) delete zero_guards[name]
+      has_integer_parameter = 0
+      has_division = 1
+      division_line = at_line
+      integer_line = 0
+      source_method_parameters()
+      division_has_integer[division_index] = has_integer_parameter
+      for (name in integer_names) division_integer_names[division_index SUBSEP name] = 1
+      for (name in null_guards) division_null_guards[division_index SUBSEP name] = null_guards[name]
+      for (name in zero_guards) division_zero_guards[division_index SUBSEP name] = zero_guards[name]
+    }
     function emit_hunk(    i, null_risk, zero_risk, at_line, left, right, null_operands) {
       if (path == "" || hunk_start == "") return
-      if (has_division && !has_integer_parameter) source_method_parameters()
       for (i = 1; i <= division_count; i++) {
         at_line = division_lines[i]
         left = division_lefts[i]
         right = division_rights[i]
-        null_risk = has_division && ((left in integer_names && unguarded(left, null_guards, at_line)) || (right in integer_names && unguarded(right, null_guards, at_line)))
-        zero_risk = has_division && (right in integer_names) && unguarded(right, zero_guards, at_line)
+        if (repo_root != "" && path ~ /\.java$/) snapshot_source_division(i, at_line)
+        null_risk = (division_has_integer[i] &&
+          (((i SUBSEP left) in division_integer_names && division_unguarded(left, i, division_null_guards, at_line)) ||
+           ((i SUBSEP right) in division_integer_names && division_unguarded(right, i, division_null_guards, at_line))))
+        zero_risk = (division_has_integer[i] && ((i SUBSEP right) in division_integer_names) &&
+          division_unguarded(right, i, division_zero_guards, at_line))
         null_operands = ""
-        if (left in integer_names && unguarded(left, null_guards, at_line)) null_operands = left
-        if (right in integer_names && unguarded(right, null_guards, at_line)) {
+        if ((i SUBSEP left) in division_integer_names && division_unguarded(left, i, division_null_guards, at_line)) null_operands = left
+        if ((i SUBSEP right) in division_integer_names && division_unguarded(right, i, division_null_guards, at_line)) {
           if (null_operands != "") null_operands = null_operands ", "
           null_operands = null_operands right
         }
@@ -2704,6 +2810,10 @@ collect_java_division_preflight() {
       for (name in integer_names) delete integer_names[name]
       for (name in null_guards) delete null_guards[name]
       for (name in zero_guards) delete zero_guards[name]
+      for (name in division_integer_names) delete division_integer_names[name]
+      for (name in division_null_guards) delete division_null_guards[name]
+      for (name in division_zero_guards) delete division_zero_guards[name]
+      for (name in division_has_integer) delete division_has_integer[name]
     }
     function record_integer_parameters(text,    signature, params, count, i, fields, field_count, j, candidate, paren_depth, open_at, close_at, last_open, last_close, selected_open, selected_close, suffix, ch) {
       if (text !~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/ || text !~ /\(/) return
@@ -2893,7 +3003,7 @@ collect_java_division_preflight() {
       if (rest ~ /^[[:space:]]*(\.|\[|\()/) return ""
       return token
     }
-    function record_division(text, allow_record,    expression, slash, left_text, right_text, left, right, trimmed, search_at) {
+    function record_division(text, allow_record,    expression, slash, left_text, right_text, left, right, trimmed, search_at, name) {
       search_at = 1
       while (search_at <= length(text)) {
         slash = find_division_slash(text, search_at)
@@ -2910,6 +3020,10 @@ collect_java_division_preflight() {
           division_lefts[division_count] = left
           division_rights[division_count] = right
           division_lines[division_count] = line_no
+          for (name in integer_names) division_integer_names[division_count SUBSEP name] = 1
+          for (name in null_guards) division_null_guards[division_count SUBSEP name] = null_guards[name]
+          for (name in zero_guards) division_zero_guards[division_count SUBSEP name] = zero_guards[name]
+          division_has_integer[division_count] = has_integer_parameter
           if (division_line == 0) division_line = line_no
         }
         search_at = slash + 1

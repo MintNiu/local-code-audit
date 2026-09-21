@@ -472,6 +472,10 @@ reserve 和 effective budget，方便后续复核。
 
 同日又复核了 `platform-file:bc14e16`：个人 profile 30 秒完整返回 clean。差异新增 `${COMPUTERNAME:NY-TEST-LOCAL}` 作为 Nacos 集群名回退；在非 Windows 环境下它可能让多台机器共享集群名，但当前仓库没有明确部署契约证明该行为必然错误，因此只记录为待人工确认的 P2 候选，不自动扩展确定性预检或正式 scorecard。
 
+同日复核重复模式时又发现两类会制造“反复出现”的预检边界：URL builder 只看整行是否含 `token`，会把 `.queryParam("token", userId)` 或 `String.format("...?token=%s", userId)` 的普通 ID 误判为凭据；别名变量先绑定令牌、随后重赋普通值时，旧 alias 也可能残留。现在 builder/format/`+=` 规则解析实际值参数，别名在每次直接重赋时先清除旧状态；`TokenBuilderUserId`、`FormatUserId`、`QueryTokenAliasReassigned` 和 `UrlSecretAliasReassigned` 负例已加入 `test-preflight.sh` 并通过。该修复不扩大 `java-token-url` 的业务判定范围，只减少同一审查链路中的误报和后续重复修补。
+
+同一轮还验证了 `java-divide` 的方法边界：同一 hunk 里先修改 `Integer` 参数方法、再修改同名 `int` 参数方法时，旧实现会把前一个方法的参数和保护条件带入后一个方法。现在每个改动除法都从当前源码快照独立恢复其包含方法的参数与 guard；`SameHunkMethodScopeDivide` 回归确认 boxed 方法仍保留两条独立 P1，而 primitive 方法不再被重复报告。
+
 ### 2026-09-21：修复过滤导致的静默漏报与测试夹具串扰
 
 后续补正例时反复遇到路径校验失败。根因不是输出格式或随机性，而是大型预检测试中途的 `git add .`/commit 已把早期配置夹具提交；末尾再返回这些配置路径时，它们不属于待审查变更。删掉失败断言并不能证明过滤安全。

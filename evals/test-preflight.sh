@@ -645,6 +645,65 @@ final class TokenBuilderSafe {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/TokenBuilderUserId.java" <<'EOF'
+package com.example.api.client;
+
+final class TokenBuilderUserId {
+    String build(String userId) {
+        return org.springframework.web.util.UriComponentsBuilder
+            .fromUriString("https://internal.example/download")
+            .queryParam("token", userId)
+            .toUriString();
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/FormatUserId.java" <<'EOF'
+package com.example.api.client;
+
+final class FormatUserId {
+    String build(String userId) {
+        return String.format("https://internal.example/download?token=%s", userId);
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/FormatToken.java" <<'EOF'
+package com.example.api.client;
+
+final class FormatToken {
+    String build(String authToken) {
+        return String.format("https://internal.example/download?token=%s", authToken);
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/QueryTokenAliasReassigned.java" <<'EOF'
+package com.example.api.client;
+
+final class QueryTokenAliasReassigned {
+    String read(javax.servlet.http.HttpServletRequest request) {
+        String parameterName = TOKEN_HEADER;
+        parameterName = "safe";
+        return request.getParameter(parameterName);
+    }
+
+    private static final String TOKEN_HEADER = "x-token";
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/UrlSecretAliasReassigned.java" <<'EOF'
+package com.example.api.client;
+
+final class UrlSecretAliasReassigned {
+    String build(String token, String resourceId) {
+        String queryValue = token;
+        queryValue = resourceId;
+        return "https://internal.example/download?x-token=" + queryValue;
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/PathAliasPreflight.java" <<'EOF'
 package com.example.api.client;
 
@@ -790,6 +849,27 @@ git -C "$repo" commit -qm previous-method-scope-divide-base
 sed -i '' 's/return 100 \/ denominator;/return 200 \/ denominator;/' \
   "$repo/src/main/java/com/example/api/client/PreviousMethodScopeDivide.java"
 
+# Two changed methods in one hunk must keep boxed-Integer evidence scoped to
+# the containing method. The primitive method uses the same parameter names
+# but must not inherit the previous method's java-divide finding.
+cat >"$repo/src/main/java/com/example/api/client/SameHunkMethodScopeDivide.java" <<'EOF'
+package com.example.api.client;
+
+final class SameHunkMethodScopeDivide {
+    int boxed(Integer a, Integer b) {
+        return 10 / b;
+    }
+
+    int primitive(int a, int b) {
+        return 100 / b;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/SameHunkMethodScopeDivide.java
+git -C "$repo" commit -qm same-hunk-method-scope-divide-base
+sed -i '' -e 's/return 10 \/ b;/return 20 \/ b;/' -e 's/return 100 \/ b;/return 200 \/ b;/' \
+  "$repo/src/main/java/com/example/api/client/SameHunkMethodScopeDivide.java"
+
 # Fully-qualified return types are common in generated or deliberately
 # explicit Java code. Signature recovery must still recognize the containing
 # method instead of falling back to a previous method or file scope.
@@ -926,6 +1006,23 @@ grep -F 'P1 src/main/java/com/example/api/client/TokenBuilder.java' "$capture" >
   cat "$capture" >&2
   exit 1
 }
+grep -F 'P1 src/main/java/com/example/api/client/FormatToken.java' "$capture" >/dev/null || {
+  echo 'missing String.format URL credential preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+if grep -F 'P1 src/main/java/com/example/api/client/TokenBuilderUserId.java' "$capture" >/dev/null || \
+   grep -F 'P1 src/main/java/com/example/api/client/FormatUserId.java' "$capture" >/dev/null; then
+  echo 'URL builder preflight treated an ordinary user id as a credential' >&2
+  cat "$capture" >&2
+  exit 1
+fi
+if grep -F 'P1 src/main/java/com/example/api/client/QueryTokenAliasReassigned.java' "$capture" >/dev/null || \
+   grep -F 'P1 src/main/java/com/example/api/client/UrlSecretAliasReassigned.java' "$capture" >/dev/null; then
+  echo 'URL alias preflight kept a stale secret alias after reassignment' >&2
+  cat "$capture" >&2
+  exit 1
+fi
 grep -F 'P1 src/main/java/com/example/api/client/PathAliasPreflight.java' "$capture" >/dev/null || {
   echo 'missing path API alias preflight' >&2
   cat "$capture" >&2
@@ -1196,6 +1293,17 @@ expression_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1
 }
 if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/PreviousMethodScopeDivide.java:' >/dev/null; then
   echo 'Java division preflight borrowed an Integer signature from a previous method' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+fi
+same_hunk_method_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1 src/main/java/com/example/api/client/SameHunkMethodScopeDivide.java:' || true)"
+[[ "$same_hunk_method_count" -eq 2 ]] || {
+  echo 'Java division preflight did not keep boxed-Integer findings scoped to the method' >&2
+  printf '%s\n' "$java_division_output" >&2
+  exit 1
+}
+if printf '%s\n' "$java_division_output" | grep -F 'P1 src/main/java/com/example/api/client/SameHunkMethodScopeDivide.java:9' >/dev/null; then
+  echo 'Java division preflight borrowed boxed-Integer evidence into a primitive method' >&2
   printf '%s\n' "$java_division_output" >&2
   exit 1
 fi

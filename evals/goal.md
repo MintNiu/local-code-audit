@@ -115,6 +115,8 @@
 - 2026-09-21 对真实 `platform-file:cf6a214` 做配置误报留出复核：5 条确定性共享 token 凭据问题全部保留；对普通 `${ENV:default}` 具体化的 5 组条件式配置推测采用窄范围输出过滤后全部移除。此前尝试把这条边界写进 SYSTEM 提示词会造成迁移正例输出漂移，已撤回；当前仅保留运行器门禁，并以无模型回归、两轮合成门禁和真实提交复跑验证不影响 `java-divide`、`java-token-url`、租户、迁移等独立根因。该结果用于降噪，不扩大人工真值分母。
 - 同日补充真实 `platform-workflow-service:beab22f3` 配置/SQL 合约留出，个人 profile 39 秒完整返回 clean；该结果只作为待人工确认的探索性样本，不计入正式召回率或误报率。
 - 同日补充真实 `platform-file:bc14e16` 配置留出，个人 profile 30 秒完整返回 clean；`${COMPUTERNAME:NY-TEST-LOCAL}` 在非 Windows 环境的共享集群名风险暂标为待人工确认 P2，不据此修改规则或统计正式召回率。
+- 同日修复 URL builder/别名状态边界：`.queryParam("token", userId)`、`String.format("...?token=%s", userId)` 等普通 ID 不再因为整行关键词被误报；令牌别名重赋为普通值后会清除旧状态。四个负例已接入 `test-preflight.sh`，不改变高置信 `java-token-url` 正例的覆盖范围。
+- 同日修复同一 hunk 内的 Java 方法串线：每个新增除法现在按当前源码快照独立绑定包含方法的 `Integer` 参数和 guard；`SameHunkMethodScopeDivide` 确认前一个 boxed 方法的 P1 不会复制到后一个同名 primitive 方法。
 
 ## 失败处理原则
 
