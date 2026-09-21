@@ -393,6 +393,19 @@ filter_unsupported_shard_findings() {
       if (evidence !~ /\+[^\n]*\$\{[A-Za-z_][A-Za-z0-9_]*\}/) return 0
       return 1
     }
+    function speculative_config_default_only(text, evidence, path) {
+      # A model may turn an ordinary `${ENV:default}` -> literal config
+      # change into a P1 by listing hypothetical deployment failures. Keep
+      # this filter narrower than a general config suppressor: only remove a
+      # config-only paragraph that is explicitly conditional/speculative and
+      # lacks a concrete contract, mismatch, or observed failure. Credential,
+      # migration, tenancy, URL, and other independent roots remain visible.
+      if (path !~ /\.(ya?ml|properties|conf|ini|env|toml|json)$/) return 0
+      if (text !~ /环境变量|默认值|具体化|配置注入|部署拓扑|服务名|重试|fail-fast|endpoint|超时|端口|log-path/) return 0
+      if (text !~ /如果|若|可能|未说明|请确认|是否/) return 0
+      if (text ~ /硬编码|明文|泄漏|凭据|密码|Secret|AccessKey|token|令牌|查询参数|SSRF|租户|越权|迁移|不一致|违反|明确契约|项目规则|可复现|实测|当前部署|代码直接证明/) return 0
+      return 1
+    }
     function flush(    invalid, path_evidence) {
       if (block == "") return
       path_evidence = evidence_by_path[finding_path(block)]
@@ -443,6 +456,7 @@ filter_unsupported_shard_findings() {
       # contract; concrete secret logging remains reportable by its evidence.
       if (block ~ /缺少.*日志|没有.*日志|日志记录/ && block !~ /秘密|Secret|password|密码/) invalid = 1
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
+      if (speculative_config_default_only(block, path_evidence, finding_path(block))) invalid = 1
       if (!invalid) {
         if (printed) printf "\n"
         printf "%s", block

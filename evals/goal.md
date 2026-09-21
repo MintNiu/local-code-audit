@@ -112,6 +112,7 @@
 - 同一 `f6ce8f6` holdout 还确认 `sql/platform_file.sql` 新增的 `CREATE DATABASE platform_file_db` 与保留的 `USE platform_db_file` 不一致；新增窄范围 SQL schema 预检，仅在单一 CREATE/USE 且至少一条为新增行时报告 P1，多 schema、同名、CREATE-only 和行尾注释负例保持 clean，回归已加入 `test-preflight.sh`。
 - 2026-09-19 将同一条 SQL schema 边界同步进 `config/Modelfile` 并重建 tuned 模型（复用已有基础层）；`SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 通过，除法、URL token、租户、迁移、凭据、预签名和 4 个 clean 负例均完成，截断故障仍按预期显式失败。运行态 SYSTEM SHA-256 为 `9aa021f8c50feaac17ab2556bbe4485e18d87a726ff0b848e3a5451e9f6c0274`。
 - 2026-09-20 在同一运行态上重新执行 5 轮完整合成门禁：`java-divide`、`java-token-url`、查询参数令牌、租户隔离、迁移删除、字面量凭据和预签名票据均 5/5 命中，20 个 clean 对照全部通过，所有样例的输出哈希在 5 轮内一致，截断路径按预期显式失败。另加入重复共享 token 的 5 处配置位置回归，确认预检不会因同一根因去重而隐藏受影响行；结果已提交为 `85e25ad` 并推送到公开仓库。阶段 1 的真实人工标签分母仍未扩大，不能据此宣称达到生产级召回目标。
+- 2026-09-21 对真实 `platform-file:cf6a214` 做配置误报留出复核：5 条确定性共享 token 凭据问题全部保留；对普通 `${ENV:default}` 具体化的 5 组条件式配置推测采用窄范围输出过滤后全部移除。此前尝试把这条边界写进 SYSTEM 提示词会造成迁移正例输出漂移，已撤回；当前仅保留运行器门禁，并以无模型回归、两轮合成门禁和真实提交复跑验证不影响 `java-divide`、`java-token-url`、租户、迁移等独立根因。该结果用于降噪，不扩大人工真值分母。
 
 ## 失败处理原则
 
