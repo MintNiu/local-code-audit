@@ -651,18 +651,23 @@ validate_finding_line_ranges() {
       }
       close(paths_file)
     }
-    function parse_range(token,    start, finish, tail) {
-      sub(/^[^0-9]*/, "", token)
-      start = token + 0
-      finish = start
-      if (token ~ /-/) {
-        tail = token
-        sub(/^.*-[[:space:]]*/, "", tail)
-        finish = tail + 0
-      }
-      if (start < 1 || finish < start || finish > target_max) {
-        invalid = 1
-        bad_token = token
+    function parse_range(token,    count, pieces, i, piece, start, finish, tail) {
+      count = split(token, pieces, /[,，]/)
+      for (i = 1; i <= count; i++) {
+        piece = pieces[i]
+        sub(/^[^0-9]*/, "", piece)
+        if (piece == "") continue
+        start = piece + 0
+        finish = start
+        if (piece ~ /-/) {
+          tail = piece
+          sub(/^.*-[[:space:]]*/, "", tail)
+          finish = tail + 0
+        }
+        if (start < 1 || finish < start || finish > target_max) {
+          invalid = 1
+          bad_token = piece
+        }
       }
     }
     function inspect_path_location(paragraph,    i, position, best_position, best_path, suffix, token) {
@@ -679,19 +684,19 @@ validate_finding_line_ranges() {
       if (best_position == 0 || !(best_path in line_counts)) return
       target_max = line_counts[best_path]
       suffix = substr(paragraph, best_position + length(best_path))
-      if (match(suffix, /^[[:space:]]*[,，:：][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?/)) {
+      if (match(suffix, /^[[:space:]]*[,，:：][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([[:space:]]*[,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*/)) {
         token = substr(suffix, RSTART, RLENGTH)
         parse_range(token)
       }
       # Also validate explicit “行号/line(s)/第 N 行” labels in the same
       # finding block; this covers formats where the path and line are split
       # across separate lines.
-      while (match(paragraph, /(行号|[Ll][Ii][Nn][Ee][Ss]?)[[:space:]]*[:：]?[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?/)) {
+      while (match(paragraph, /(行号|[Ll][Ii][Nn][Ee][Ss]?)[[:space:]]*[:：]?[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([[:space:]]*[,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*/)) {
         token = substr(paragraph, RSTART, RLENGTH)
         parse_range(token)
         paragraph = substr(paragraph, RSTART + RLENGTH)
       }
-      while (match(paragraph, /第[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?[[:space:]]*行/)) {
+      while (match(paragraph, /第[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([[:space:]]*[,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*[[:space:]]*行/)) {
         token = substr(paragraph, RSTART, RLENGTH)
         parse_range(token)
         paragraph = substr(paragraph, RSTART + RLENGTH)
@@ -1309,14 +1314,15 @@ validate_response() {
       }
       return 0
     }
-    function paragraph_has_changed_path(    path, basename) {
+    function paragraph_has_changed_path(text,    path, basename) {
+      if (text == "") text = paragraph
       for (path in changed_paths) {
-        if (has_token(paragraph, path) || has_token(paragraph, "./" path) || has_token(paragraph, repo_root "/" path) || has_token(paragraph, "a/" path) || has_token(paragraph, "b/" path)) {
+        if (has_token(text, path) || has_token(text, "./" path) || has_token(text, repo_root "/" path) || has_token(text, "a/" path) || has_token(text, "b/" path)) {
           return 1
         }
         basename = path
         sub(/^.*\//, "", basename)
-        if (basename_counts[basename] == 1 && has_token(paragraph, basename)) {
+        if (basename_counts[basename] == 1 && has_token(text, basename)) {
           return 1
         }
       }
@@ -1342,26 +1348,28 @@ validate_response() {
       }
       return 0
     }
-    function paragraph_has_adjacent_location(    path, basename) {
+    function paragraph_has_adjacent_location(text,    path, basename) {
+      if (text == "") text = paragraph
       for (path in changed_paths) {
-        if (token_has_adjacent_line(paragraph, path) || token_has_adjacent_line(paragraph, "./" path) || token_has_adjacent_line(paragraph, repo_root "/" path) || token_has_adjacent_line(paragraph, "a/" path) || token_has_adjacent_line(paragraph, "b/" path)) {
+        if (token_has_adjacent_line(text, path) || token_has_adjacent_line(text, "./" path) || token_has_adjacent_line(text, repo_root "/" path) || token_has_adjacent_line(text, "a/" path) || token_has_adjacent_line(text, "b/" path)) {
           return 1
         }
         basename = path
         sub(/^.*\//, "", basename)
-        if (basename_counts[basename] == 1 && token_has_adjacent_line(paragraph, basename)) {
+        if (basename_counts[basename] == 1 && token_has_adjacent_line(text, basename)) {
           return 1
         }
       }
       return 0
     }
-    function check_paragraph(    generic_location_pattern, explicit_line_pattern, has_location, first_line_pattern, has_impact, has_fix, has_verification) {
+    function check_paragraph(    explicit_line_pattern, has_location, first_line_pattern, first_line, has_changed_path, has_impact, has_fix, has_verification) {
       if (paragraph == "") return
-      generic_location_pattern = "[[:alnum:]_.+/\\-]+([,:：][[:space:]]*[0-9]+|[[:space:]]+[0-9]+(-[0-9]+)?)"
-      explicit_line_pattern = "((行号|[Ll][Ii][Nn][Ee][Ss]?|[Ll])[[:space:]]*[:：]?[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?|第[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?[[:space:]]*行)"
+      first_line = paragraph
+      sub(/\n.*/, "", first_line)
+      explicit_line_pattern = "((行号|[Ll][Ii][Nn][Ee][Ss]?|[Ll])[[:space:]]*[:：]?[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*|第[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*[[:space:]]*行)"
       first_line_pattern = "^(P[0-3]|信息)[[:space:]:：]+"
-      has_location = (paragraph ~ explicit_line_pattern || paragraph_has_adjacent_location() || (!require_changed_path && paragraph ~ generic_location_pattern))
-      has_changed_path = paragraph_has_changed_path()
+      has_location = (first_line ~ explicit_line_pattern || paragraph_has_adjacent_location(first_line))
+      has_changed_path = paragraph_has_changed_path(first_line)
       has_impact = (paragraph ~ /(^|[[:space:]\n])*(影响|[Ii]mpact)[：:]/)
       has_fix = (paragraph ~ /(^|[[:space:]\n])*(修复建议|修复|[Ff]ix|[Rr]emediation)[：:]/)
       has_verification = (paragraph ~ /(^|[[:space:]\n])*(验证方式|验证|[Vv]erification|[Tt]est)[：:]/)
@@ -2199,6 +2207,35 @@ collect_security_preflight() {
       sub(/;.*/, "", rest)
       return secret_identifier(rest, scope)
     }
+    function has_url_secret_key(text) {
+      return text ~ /https?:\/\// || text ~ /(^|[?&\/])([A-Za-z0-9_.-]*(token|secret|password|passwd|api[_-]?key|access[_-]?key|auth|sig|signature|credential|session[_-]?key)[A-Za-z0-9_.-]*)[=\/]/
+    }
+    function text_has_secret_identifier(text, scope, name, clean) {
+      clean = text
+      gsub(/"([^"\\]|\\.)*"/, "", clean)
+      gsub(/\047([^\047\\]|\\.)*\047/, "", clean)
+      sub(/[[:space:]]*\/\/.*$/, "", clean)
+      if (clean ~ /(^|[^[:alnum:]_])(token|secret|password|passwd|apiKey|accessKey|authToken|accessToken|refreshToken|sessionKey|signature|credential|bearerToken|apiToken|clientSecret|jwt|idToken)([^[:alnum:]_]|$)/) return 1
+      for (name in url_secret_vars) {
+        split(name, secret_parts, SUBSEP)
+        if (!alias_scope_matches(secret_parts[1], secret_parts[2], scope)) continue
+        if (clean ~ ("(^|[^[:alnum:]_])" secret_parts[1] "([^[:alnum:]_]|$)")) return 1
+      }
+      return 0
+    }
+    function builder_append_secret_value(text, scope, rest, argument, close_pos) {
+      if (!has_url_secret_key(text)) return 0
+      rest = text
+      while (match(rest, /\.append[[:space:]]*\([[:space:]]*/)) {
+        rest = substr(rest, RSTART + RLENGTH)
+        close_pos = index(rest, ")")
+        if (close_pos == 0) return 0
+        argument = substr(rest, 1, close_pos - 1)
+        if (secret_identifier(argument, scope)) return 1
+        rest = substr(rest, close_pos + 1)
+      }
+      return 0
+    }
     function strip_inline_comments(text) {
       sub(/[[:space:]]*\/\/.*$/, "", text)
       sub(/\/\*.*\*\//, "", text)
@@ -2347,6 +2384,10 @@ collect_security_preflight() {
       pending_query_call = 0
       pending_query_added = 0
       pending_query_scope = ""
+      pending_url_secret = 0
+      pending_url_secret_age = 0
+      pending_url_secret_scope = ""
+      continued_url_risk = 0
     }
     function reset_file(    name) {
       for (name in token_parameter_vars) delete token_parameter_vars[name]
@@ -2444,6 +2485,14 @@ collect_security_preflight() {
       if ((prefix == "+" || prefix == " ") && trimmed_code !~ /^\/\// && trimmed_code !~ /^\/\*|^\*/ && trimmed_code !~ /^#/) {
         record_token_parameter_alias(code, line_no)
         record_url_secret_alias(code, line_no)
+        current_scope = scope_for_line(line_no)
+        continued_url_risk = 0
+        if (pending_url_secret && prefix == "+" && text_has_secret_identifier(code, current_scope)) {
+          continued_url_risk = 1
+          pending_url_secret = 0
+          pending_url_secret_age = 0
+          pending_url_secret_scope = ""
+        }
         # Configuration may point at a remote database or service without an
         # HTTP URL (for example jdbc:mysql://192.168.x.x or server-addr).
         # Treat those endpoints as remote evidence too, while keeping local
@@ -2568,6 +2617,7 @@ collect_security_preflight() {
         # high-confidence secret-like variable.
         current_scope = scope_for_line(line_no)
         builder_secret = builder_secret_value(added, current_scope)
+        builder_append_secret = builder_append_secret_value(added, current_scope)
         format_risk = format_secret_value(added, current_scope)
         append_risk = append_secret_value(added, current_scope)
         for (secret_key in url_secret_vars) {
@@ -2576,7 +2626,7 @@ collect_security_preflight() {
           if (!alias_scope_matches(secret_name, secret_parts[2], current_scope)) continue
           if (added ~ ("\\+[[:space:]]*" secret_name "([^[:alnum:]_]|$)")) url_risk = 1
         }
-        if (builder_secret || format_risk || append_risk) {
+        if (builder_secret || builder_append_secret || format_risk || append_risk || continued_url_risk) {
           url_risk = 1
         }
         if (url_risk) {
@@ -2603,6 +2653,21 @@ collect_security_preflight() {
         line_no++
       } else if (prefix == " ") {
         line_no++
+      }
+      if (prefix == "+" || prefix == " ") {
+        if (!continued_url_risk && has_url_secret_key(code) &&
+            (code ~ /\+[[:space:]]*$/ || code ~ /\.append[[:space:]]*\(/ || code ~ /StringBuilder|UriComponentsBuilder/)) {
+          pending_url_secret = 1
+          pending_url_secret_age = 0
+          pending_url_secret_scope = scope_for_line(line_no - (prefix == "+" ? 1 : 0))
+        } else if (pending_url_secret && !continued_url_risk) {
+          pending_url_secret_age++
+          if (pending_url_secret_age >= 3) {
+            pending_url_secret = 0
+            pending_url_secret_age = 0
+            pending_url_secret_scope = ""
+          }
+        }
       }
     }
     END {
@@ -2814,6 +2879,9 @@ collect_java_division_preflight() {
       for (name in division_null_guards) delete division_null_guards[name]
       for (name in division_zero_guards) delete division_zero_guards[name]
       for (name in division_has_integer) delete division_has_integer[name]
+      pending_division_left = ""
+      pending_division_line = 0
+      pending_division_added = 0
     }
     function record_integer_parameters(text,    signature, params, count, i, fields, field_count, j, candidate, paren_depth, open_at, close_at, last_open, last_close, selected_open, selected_close, suffix, ch) {
       if (text !~ /(^|[^[:alnum:]_])Integer([^[:alnum:]_]|$)/ || text !~ /\(/) return
@@ -3003,7 +3071,44 @@ collect_java_division_preflight() {
       if (rest ~ /^[[:space:]]*(\.|\[|\()/) return ""
       return token
     }
-    function record_division(text, allow_record,    expression, slash, left_text, right_text, left, right, trimmed, search_at, name) {
+    function record_division(text, allow_record,    expression, slash, left_text, right_text, left, right, trimmed, search_at, name, emit_line) {
+      # Preserve a short expression when the slash or its right operand is
+      # split across diff lines, for example return a / followed by b;
+      # or return a followed by / b;. Only an added side may create a
+      # finding; context lines merely carry the expression state.
+      if (pending_division_left != "") {
+        right = ""
+        if (text ~ /^[[:space:]]*\//) {
+          slash = find_division_slash(text, 1)
+          if (slash > 0) right = simple_right_operand(substr(text, slash + 1))
+        } else {
+          right = simple_right_operand(text)
+        }
+        if (right != "") {
+          if ((allow_record || pending_division_added) && pending_division_left != "") {
+            has_division = 1
+            division_count++
+            division_lefts[division_count] = pending_division_left
+            division_rights[division_count] = right
+            emit_line = (pending_division_added ? pending_division_line : line_no)
+            division_lines[division_count] = emit_line
+            for (name in integer_names) division_integer_names[division_count SUBSEP name] = 1
+            for (name in null_guards) division_null_guards[division_count SUBSEP name] = null_guards[name]
+            for (name in zero_guards) division_zero_guards[division_count SUBSEP name] = zero_guards[name]
+            division_has_integer[division_count] = has_integer_parameter
+            if (division_line == 0) division_line = emit_line
+          }
+          pending_division_left = ""
+          pending_division_line = 0
+          pending_division_added = 0
+          if (text ~ /^[[:space:]]*\//) text = substr(text, slash + 1)
+          else text = ""
+        } else {
+          pending_division_left = ""
+          pending_division_line = 0
+          pending_division_added = 0
+        }
+      }
       search_at = 1
       while (search_at <= length(text)) {
         slash = find_division_slash(text, search_at)
@@ -3014,6 +3119,12 @@ collect_java_division_preflight() {
         left = left_text
         sub(/^.*[^A-Za-z0-9_]/, "", left)
         right = simple_right_operand(right_text)
+        if (left != "" && right == "") {
+          pending_division_left = left
+          pending_division_line = line_no
+          pending_division_added = allow_record
+          break
+        }
         if (allow_record && left != "" && right != "") {
           has_division = 1
           division_count++
@@ -3027,6 +3138,29 @@ collect_java_division_preflight() {
           if (division_line == 0) division_line = line_no
         }
         search_at = slash + 1
+      }
+      if (slash == 0 && text ~ /[A-Za-z0-9_)][[:space:]]*\/[[:space:]]*$/) {
+        left_text = text
+        sub(/[[:space:]]*\/[[:space:]]*$/, "", left_text)
+        gsub(/[^A-Za-z0-9_]+$/, "", left_text)
+        left = left_text
+        sub(/^.*[^A-Za-z0-9_]/, "", left)
+        if (left != "") {
+          pending_division_left = left
+          pending_division_line = line_no
+          pending_division_added = allow_record
+        }
+      }
+      if (slash == 0 && pending_division_left == "" && text ~ /(return|=|\(|,)[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/) {
+        trimmed = text
+        sub(/[[:space:]]*$/, "", trimmed)
+        left = trimmed
+        sub(/^.*[^A-Za-z0-9_]/, "", left)
+        if (left != "") {
+          pending_division_left = left
+          pending_division_line = line_no
+          pending_division_added = allow_record
+        }
       }
     }
     /^diff --git / {

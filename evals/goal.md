@@ -117,6 +117,7 @@
 - 同日补充真实 `platform-file:bc14e16` 配置留出，个人 profile 30 秒完整返回 clean；`${COMPUTERNAME:NY-TEST-LOCAL}` 在非 Windows 环境的共享集群名风险暂标为待人工确认 P2，不据此修改规则或统计正式召回率。
 - 同日修复 URL builder/别名状态边界：`.queryParam("token", userId)`、`String.format("...?token=%s", userId)` 等普通 ID 不再因为整行关键词被误报；令牌别名重赋为普通值后会清除旧状态。四个负例已接入 `test-preflight.sh`，不改变高置信 `java-token-url` 正例的覆盖范围。
 - 同日修复同一 hunk 内的 Java 方法串线：每个新增除法现在按当前源码快照独立绑定包含方法的 `Integer` 参数和 guard；`SameHunkMethodScopeDivide` 确认前一个 boxed 方法的 P1 不会复制到后一个同名 primitive 方法。
+- 同日补齐定位与跨行表达式回归：问题段第一行必须同时携带已变更路径和有效行号，逗号分隔的多个行号逐段校验；Java 除法覆盖 `a /` 与 `/ b` 跨行，URL 凭据覆盖跨行 `+` 和 `StringBuilder.append`。`test-preflight.sh`、完整确定性回归和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 均通过，未改变 fail-closed、全量展示和截断失败门禁。
 
 ## 失败处理原则
 

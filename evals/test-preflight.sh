@@ -309,6 +309,34 @@ final class SingleDivide {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/SplitDivisionSlashBefore.java" <<'EOF'
+package com.example.api.client;
+
+final class SplitDivisionSlashBefore {
+    int divide(Integer a, Integer b) {
+        return a
+            / b;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/SplitDivisionSlashBefore.java
+git -C "$repo" commit -qm split-division-slash-before-base
+sed -i '' 's|/ b;|/ b + 1;|' "$repo/src/main/java/com/example/api/client/SplitDivisionSlashBefore.java"
+
+cat >"$repo/src/main/java/com/example/api/client/SplitDivisionSlashAfter.java" <<'EOF'
+package com.example.api.client;
+
+final class SplitDivisionSlashAfter {
+    int divide(Integer a, Integer b) {
+        return a /
+            b;
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/SplitDivisionSlashAfter.java
+git -C "$repo" commit -qm split-division-slash-after-base
+sed -i '' 's|            b;|            b + 1;|' "$repo/src/main/java/com/example/api/client/SplitDivisionSlashAfter.java"
+
 cat >"$repo/src/main/java/com/example/api/client/CommentOnly.java" <<'EOF'
 package com.example.api.client;
 
@@ -678,6 +706,52 @@ final class FormatToken {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/AppendToken.java" <<'EOF'
+package com.example.api.client;
+
+final class AppendToken {
+    String build(String authToken) {
+        return new StringBuilder("https://internal.example/download?token=")
+            .append(authToken)
+            .toString();
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/AppendUserId.java" <<'EOF'
+package com.example.api.client;
+
+final class AppendUserId {
+    String build(String userId) {
+        return new StringBuilder("https://internal.example/download?token=")
+            .append(userId)
+            .toString();
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/CrossLineToken.java" <<'EOF'
+package com.example.api.client;
+
+final class CrossLineToken {
+    String build(String authToken) {
+        return "https://internal.example/download?token=" +
+            authToken;
+    }
+}
+EOF
+
+cat >"$repo/src/main/java/com/example/api/client/CrossLineUserId.java" <<'EOF'
+package com.example.api.client;
+
+final class CrossLineUserId {
+    String build(String userId) {
+        return "https://internal.example/download?token=" +
+            userId;
+    }
+}
+EOF
+
 cat >"$repo/src/main/java/com/example/api/client/QueryTokenAliasReassigned.java" <<'EOF'
 package com.example.api.client;
 
@@ -1011,8 +1085,17 @@ grep -F 'P1 src/main/java/com/example/api/client/FormatToken.java' "$capture" >/
   cat "$capture" >&2
   exit 1
 }
+for url_builder_fixture in AppendToken CrossLineToken; do
+  grep -F "P1 src/main/java/com/example/api/client/${url_builder_fixture}.java" "$capture" >/dev/null || {
+    echo "missing cross-line URL credential preflight for ${url_builder_fixture}" >&2
+    cat "$capture" >&2
+    exit 1
+  }
+done
 if grep -F 'P1 src/main/java/com/example/api/client/TokenBuilderUserId.java' "$capture" >/dev/null || \
-   grep -F 'P1 src/main/java/com/example/api/client/FormatUserId.java' "$capture" >/dev/null; then
+   grep -F 'P1 src/main/java/com/example/api/client/FormatUserId.java' "$capture" >/dev/null || \
+   grep -F 'P1 src/main/java/com/example/api/client/AppendUserId.java' "$capture" >/dev/null || \
+   grep -F 'P1 src/main/java/com/example/api/client/CrossLineUserId.java' "$capture" >/dev/null; then
   echo 'URL builder preflight treated an ordinary user id as a credential' >&2
   cat "$capture" >&2
   exit 1
@@ -1360,6 +1443,13 @@ chain_division_count="$(printf '%s\n' "$java_division_output" | grep -c 'P1 src/
   printf '%s\n' "$java_division_output" >&2
   exit 1
 }
+for split_division_fixture in SplitDivisionSlashBefore SplitDivisionSlashAfter; do
+  printf '%s\n' "$java_division_output" | grep -F "P1 src/main/java/com/example/api/client/${split_division_fixture}.java:" >/dev/null || {
+    echo "Java division preflight missed a cross-line division in ${split_division_fixture}" >&2
+    printf '%s\n' "$java_division_output" >&2
+    exit 1
+  }
+done
 
 # A vulnerable division that is already present in the parent must not be
 # reported again merely because a later, unrelated line changed in the same
@@ -2309,6 +2399,28 @@ printf '%s\n' "$compact_output" | grep -F '同行字段示例' >/dev/null || {
   printf '%s\n' "$compact_output" >&2
   exit 1
 }
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:1,999 - 逗号范围越界示例。\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'comma-separated out-of-range finding was incorrectly accepted' >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/Other.java:999 - 错误路径示例，影响 Consumer.java。\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'finding with an unrelated first-line path was incorrectly accepted' >&2
+  exit 1
+fi
 
 retry_count_file="$fixture_root/retry-count"
 cat >"$fake_bin/curl" <<'EOF'
