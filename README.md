@@ -108,6 +108,12 @@ Transient Ollama transport failures are retried up to two times within the total
 
 The output gate rejects generic or incomplete summaries: every finding paragraph must include a severity, a file/line location that matches a changed file or an explicitly supplied context file, and explicit `影响：`, `修复建议：`, and `验证方式：` fields. A basename is accepted only when it is unambiguous in the review set.
 
+Configuration findings are not suppressed merely for saying “may” or “if”.
+These words can describe the impact of a real defect. Structurally valid
+candidates remain visible for independent verification; passing the output
+gate does not confirm their correctness. Unknown paths, invalid line ranges,
+and missing required fields still fail the review rather than becoming clean.
+
 When a finding contains a parseable file line, the launcher also checks it against the actual current file or explicit context length; an out-of-range location fails the review instead of being treated as evidence. Deleted files are not forced through a current-worktree line check.
 
 Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during comparisons unless the evaluation record includes the override.

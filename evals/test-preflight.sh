@@ -2370,16 +2370,9 @@ for safe_schema_path in safe_schema.sql multiple_schema.sql create_only.sql; do
   fi
 done
 
-cat >"$fake_bin/curl" <<'EOF'
-#!/usr/bin/env bash
-printf '{"response":"P1 application-credential-long-default.yml:3 - 配置默认值从 `${TOKEN:old-default}` 变为 `new-default`，如果部署环境未配置该值可能导致连接失败。\\n影响：如果当前环境未按预期配置，可能导致服务失败。\\n修复建议：请确认部署参数。\\n验证方式：在目标环境验证配置。","done":true,"done_reason":"stop"}\n'
-EOF
-chmod +x "$fake_bin/curl"
-config_default_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
-if printf '%s\n' "$config_default_output" | grep -F '配置默认值从' >/dev/null; then
-  echo 'speculative configuration-default finding was not filtered' >&2
-  printf '%s\n' "$config_default_output" >&2
-  exit 1
-fi
+# Configuration report retention uses a fresh fixture. The add-dto commit
+# above already committed earlier config files, so they are not valid changed
+# paths here; testing their silent removal would bypass the location gate.
+bash "$repo_root/evals/test-config-findings.sh"
 
 printf 'preflight regression passed\n'
