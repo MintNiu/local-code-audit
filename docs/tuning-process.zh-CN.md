@@ -470,6 +470,8 @@ reserve 和 effective budget，方便后续复核。
 
 同日对未纳入上一轮配置留出的真实 `platform-workflow-service:beab22f3` 做个人 profile 复核：39 秒完整返回 clean。该提交只调整 Warm-Flow 租户关联 SQL 的 `utf8mb4_unicode_ci` 显式排序规则，并新增 SQL 合约测试；模型没有把 README 同步或排序规则变更泛化为问题。该结果仍需人工确认后才可进入正式 scorecard。
 
+同日又复核了 `platform-file:bc14e16`：个人 profile 30 秒完整返回 clean。差异新增 `${COMPUTERNAME:NY-TEST-LOCAL}` 作为 Nacos 集群名回退；在非 Windows 环境下它可能让多台机器共享集群名，但当前仓库没有明确部署契约证明该行为必然错误，因此只记录为待人工确认的 P2 候选，不自动扩展确定性预检或正式 scorecard。
+
 ### 2026-09-21：修复过滤导致的静默漏报与测试夹具串扰
 
 后续补正例时反复遇到路径校验失败。根因不是输出格式或随机性，而是大型预检测试中途的 `git add .`/commit 已把早期配置夹具提交；末尾再返回这些配置路径时，它们不属于待审查变更。删掉失败断言并不能证明过滤安全。
