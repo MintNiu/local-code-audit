@@ -111,6 +111,7 @@
 - 2026-09-19 修复“预检证据较多时首片预算低估”的可用性边界：真实 `platform-file:f6ce8f6` 首次因固定探测 9,095/11,264 token、实际首片 11,367 token 而在请求前失败；现在按分片路径和路由预检证据的实际增量动态提高 reserve，将有效分片预算从 3,000 调整为 2,004 字节。复跑后 8 个分片全部完成，309 秒内保留 8 条确定性凭据 P1；完整预检、分片、运行态校验通过，未改变默认 few-shot 或截断失败策略。
 - 同一 `f6ce8f6` holdout 还确认 `sql/platform_file.sql` 新增的 `CREATE DATABASE platform_file_db` 与保留的 `USE platform_db_file` 不一致；新增窄范围 SQL schema 预检，仅在单一 CREATE/USE 且至少一条为新增行时报告 P1，多 schema、同名、CREATE-only 和行尾注释负例保持 clean，回归已加入 `test-preflight.sh`。
 - 2026-09-19 将同一条 SQL schema 边界同步进 `config/Modelfile` 并重建 tuned 模型（复用已有基础层）；`SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 通过，除法、URL token、租户、迁移、凭据、预签名和 4 个 clean 负例均完成，截断故障仍按预期显式失败。运行态 SYSTEM SHA-256 为 `9aa021f8c50feaac17ab2556bbe4485e18d87a726ff0b848e3a5451e9f6c0274`。
+- 2026-09-20 在同一运行态上重新执行 5 轮完整合成门禁：`java-divide`、`java-token-url`、查询参数令牌、租户隔离、迁移删除、字面量凭据和预签名票据均 5/5 命中，20 个 clean 对照全部通过，所有样例的输出哈希在 5 轮内一致，截断路径按预期显式失败。另加入重复共享 token 的 5 处配置位置回归，确认预检不会因同一根因去重而隐藏受影响行；结果已提交为 `85e25ad` 并推送到公开仓库。阶段 1 的真实人工标签分母仍未扩大，不能据此宣称达到生产级召回目标。
 
 ## 失败处理原则
 
