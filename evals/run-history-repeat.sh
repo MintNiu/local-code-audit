@@ -113,7 +113,7 @@ for ((run = 2; run <= runs; run++)); do
     # signature.  Initial status rows carry elapsed time in their third field,
     # while per-chunk status rows carry it in their fourth field; those values
     # are expected to vary with machine load and must not be mistaken for
-    # model/configuration drift. Keep status, exit code and response byte
+    # model/configuration drift. Keep status, exit code and input diff byte
     # count so a real change still fails.
     baseline_signature="$(awk -F '\t' '
       $1 == "elapsed_seconds" || $1 == "result_file" { next }
