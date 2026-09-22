@@ -18,6 +18,19 @@ exit 0
 EOF
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${HISTORY_TEST_CURL_COUNT:-}" ]]; then
+  count=0
+  if [[ -f "$HISTORY_TEST_CURL_COUNT" ]]; then
+    count="$(<"$HISTORY_TEST_CURL_COUNT")"
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$HISTORY_TEST_CURL_COUNT"
+  # The repeatability checker must ignore this elapsed-time difference while
+  # still comparing the chunk outcome and response bytes.
+  if [[ "$count" -eq 2 ]]; then
+    sleep 1
+  fi
+fi
 printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
@@ -62,6 +75,7 @@ result_sha256="$(shasum -a 256 "$out_dir/$commit.txt" | awk '{print $1}')"
 grep -F $'# source_result_sha256\t'"$result_sha256" "$labels_out/$commit.labels.tsv" >/dev/null
 
 PATH="$fake_bin:$PATH" \
+  HISTORY_TEST_CURL_COUNT="$fixture_root/repeat-curl-count" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
