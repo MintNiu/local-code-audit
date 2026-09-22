@@ -24,6 +24,19 @@ EOF
 git -C "$repo" add .
 git -C "$repo" commit -qm base
 
+cat >"$repo/src/main/java/example/Missing.java" <<'EOF'
+package example;
+
+import example.dto.MissingAlpha;
+import example.dto.MissingBeta;
+
+final class Missing {
+    MissingAlpha call(MissingBeta value) {
+        return value;
+    }
+}
+EOF
+
 sed -i '' 's@return "ok";@return "https://internal.example/data?x-token=" + token;@' \
   "$repo/src/main/java/example/Large.java"
 sed -i '' '$d' "$repo/src/main/java/example/Large.java"
@@ -39,17 +52,31 @@ EOF
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-count=0
-if [[ -f "${LOCAL_REVIEW_COUNTER:?}" ]]; then count="$(<"$LOCAL_REVIEW_COUNTER")"; fi
-count=$((count + 1))
-printf '%s\n' "$count" >"$LOCAL_REVIEW_COUNTER"
-if (( count % 2 == 0 )); then
-  detail='同一风险的另一种措辞'
+payload=""
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "--data-binary" && "$argument" == @* ]]; then
+    payload="${argument#@}"
+    break
+  fi
+  previous="$argument"
+done
+prompt="$(jq -r '.prompt // empty' "$payload")"
+if grep -Fq 'diff --git a/src/main/java/example/Large.java b/src/main/java/example/Large.java' <<<"$prompt"; then
+  count=0
+  if [[ -f "${LOCAL_REVIEW_COUNTER:?}" ]]; then count="$(<"$LOCAL_REVIEW_COUNTER")"; fi
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$LOCAL_REVIEW_COUNTER"
+  if (( count % 2 == 0 )); then
+    detail='同一风险的另一种措辞'
+  else
+    detail='模型重复描述'
+  fi
+  printf '{"response":"P1 src/main/java/example/Large.java:5 - 认证令牌从 URL 查询参数读取，%s。\\n影响：请求参数中的 token 可能进入访问日志。\\n修复建议：仅使用受保护请求头。\\n验证方式：检查最终请求 URI 和网关日志。","done":true,"done_reason":"stop"}' "$detail"
+  printf '\n'
 else
-  detail='模型重复描述'
+  printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
 fi
-printf '{"response":"P1 src/main/java/example/Large.java:5 - 认证令牌从 URL 查询参数读取，%s。\\n影响：请求参数中的 token 可能进入访问日志。\\n修复建议：仅使用受保护请求头。\\n验证方式：检查最终请求 URI 和网关日志。","done":true,"done_reason":"stop"}' "$detail"
-printf '\n'
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
@@ -69,5 +96,21 @@ if [[ "$count" != 1 ]]; then
   printf '%s\n' "$output" >&2
   exit 1
 fi
+
+grep -F 'P1 src/main/java/example/Missing.java:3,4 - 当前提交快照缺少多个仓库内类型' <<<"$output" >/dev/null || {
+  echo 'comma-separated preflight finding was not routed to its shard' >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+grep -F 'example.dto.MissingAlpha（第 3 行）' <<<"$output" >/dev/null || {
+  echo 'routed preflight finding omitted the first missing type' >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+}
+grep -F 'example.dto.MissingBeta（第 4 行）' <<<"$output" >/dev/null || {
+  echo 'routed preflight finding omitted the second missing type' >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+}
 
 echo 'shard preflight routing regression passed'

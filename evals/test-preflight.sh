@@ -1016,6 +1016,17 @@ public interface Client {
 }
 EOF
 
+cat >"$repo/src/main/java/com/example/api/client/MultipleMissing.java" <<'EOF'
+package com.example.api.client;
+
+import com.example.api.dto.MissingAlpha;
+import com.example.api.dto.MissingBeta;
+
+public interface MultipleMissing {
+    MissingAlpha call(MissingBeta request);
+}
+EOF
+
 cat >"$fake_bin/fsmonitor" <<'EOF'
 #!/usr/bin/env bash
 touch "${FSMONITOR_MARKER:-/dev/null}"
@@ -1033,6 +1044,27 @@ PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" LOCAL_R
   "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null
 grep -F '当前提交快照缺少仓库内类型 com.example.api.dto.MissingDTO' "$capture" >/dev/null || {
   echo 'missing deterministic MissingDTO preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'P1 src/main/java/com/example/api/client/MultipleMissing.java:3,4' "$capture" >/dev/null || {
+  echo 'multiple missing imports were not aggregated with all affected lines' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'MissingAlpha（第 3 行）' "$capture" >/dev/null || {
+  echo 'aggregated build finding omitted the first missing type' >&2
+  cat "$capture" >&2
+  exit 1
+}
+grep -F 'MissingBeta（第 4 行）' "$capture" >/dev/null || {
+  echo 'aggregated build finding omitted the second missing type' >&2
+  cat "$capture" >&2
+  exit 1
+}
+multiple_missing_count="$(grep -o 'P1 src/main/java/com/example/api/client/MultipleMissing.java:' "$capture" | wc -l | tr -d '[:space:]')"
+[[ "$multiple_missing_count" == 1 ]] || {
+  echo 'multiple missing imports were counted as repeated root causes' >&2
   cat "$capture" >&2
   exit 1
 }

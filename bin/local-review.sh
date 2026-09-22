@@ -1729,9 +1729,10 @@ emit_preflight_failure_diagnostic() {
 collect_build_preflight() {
   local imports_file="$1"
   local output_file="$2"
-  local changed_path source_file package_name local_prefix import_line import_name type_name import_rel found source_index
+  local changed_path source_file package_name local_prefix import_line import_name type_name import_rel found source_index missing_file
 
   : >"$output_file"
+  missing_file="$(mktemp "${TMPDIR:-/tmp}/local-review-missing-imports.XXXXXX")"
   while IFS=$'\t' read -r changed_path import_name; do
     [[ "$changed_path" == *.java && -n "$import_name" ]] || continue
     found=false
@@ -1775,10 +1776,37 @@ collect_build_preflight() {
       done
     fi
     if [[ "$found" != true ]]; then
-      printf 'P1 %s:%s - 当前提交快照缺少仓库内类型 %s；该 import 会导致编译失败。\n影响：当前提交无法通过 Java 编译。\n修复建议：恢复该类型、修正 import，或补充有明确构建证据的依赖。\n验证方式：执行目标模块构建并确认该类型解析成功。\n\n' \
-        "$changed_path" "$import_line" "$import_name" >>"$output_file"
+      printf '%s\t%s\t%s\n' "$changed_path" "$import_line" "$import_name" >>"$missing_file"
     fi
   done <"$imports_file"
+  # Multiple missing imports in one changed Java file are one build-blocking
+  # root cause. Keep every affected line and type visible, but emit one
+  # canonical finding so scorecards do not count the same compile failure five
+  # times. A single missing import keeps the historical wording for callers.
+  awk -F '\t' '
+    {
+      path = $1
+      line = $2
+      type = $3
+      if (!(path in order)) order[++count] = path
+      lines[path] = (lines[path] == "" ? line : lines[path] "," line)
+      types[path] = (types[path] == "" ? type "（第 " line " 行）" : types[path] "、" type "（第 " line " 行）")
+      missing_count[path]++
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        path = order[i]
+        if (missing_count[path] == 1) {
+          type = types[path]
+          sub(/（第 .*/, "", type)
+          printf "P1 %s:%s - 当前提交快照缺少仓库内类型 %s；该 import 会导致编译失败。\n影响：当前提交无法通过 Java 编译。\n修复建议：恢复该类型、修正 import，或补充有明确构建证据的依赖。\n验证方式：执行目标模块构建并确认该类型解析成功。\n\n", path, lines[path], type
+        } else {
+          printf "P1 %s:%s - 当前提交快照缺少多个仓库内类型：%s；这些 import 无法解析并会导致编译失败。\n影响：当前提交无法通过 Java 编译，多个受影响类型会同时阻断构建。\n修复建议：恢复全部缺失类型、修正 import，或补充有明确构建证据的依赖。\n验证方式：执行目标模块构建，确认每个列出的类型均能解析并完成编译。\n\n", path, lines[path], types[path]
+        }
+      }
+    }
+  ' "$missing_file" >>"$output_file"
+  rm -f "$missing_file"
   dedup_preflight_blocks "$output_file"
 }
 
@@ -3592,7 +3620,9 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
       header = $0
       sub(/[\r\n].*$/, "", header)
       sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
-      sub(/:[0-9]+(-[0-9]+)?[[:space:]]+-.*$/, "", header)
+      # Keep comma-separated locations (for example `:3,4,5`) attached to
+      # the same path when routing aggregated deterministic findings.
+      sub(/:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*[[:space:]]+-.*$/, "", header)
       # Route the complete deterministic finding to every shard that contains
       # the path. A large file can span multiple shards; each shard needs the
       # evidence so its model duplicate is filtered locally. Final aggregation

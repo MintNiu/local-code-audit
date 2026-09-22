@@ -48,6 +48,10 @@
 
 在阶段 1 达标前，不宣称模型已经达到高可用生产标准。
 
+## 2026-09-22 进展：稳定根因聚合
+
+构建预检现在按变更文件聚合同一编译阻断：同一 Java 文件缺少多个仓库内类型时只计一条 P1 根因，但首行保留全部行号，正文保留每个缺失类型及其行号。这样不会隐藏用户必须修复的任何位置，也不会把一次编译失败错误计成多条独立问题。`evals/test-preflight.sh` 的 `MultipleMissing.java` 夹具和逗号行号分片路由回归均已通过；真实 `420ae70c` 复核确认最终只输出 1 个 P1 根因，保留 5 个 DTO 类型和 `3,4,5,6,7` 全部位置。
+
 ## 当前状态（2026-09-14）
 
 - 阶段 0：已通过。默认门禁完成 5/5 正例、5/5 负例；除法、URL 拼接凭证、URL 查询参数令牌、租户隔离、迁移删除、字面量凭据和预签名票据等正例每次全部命中，4 个 clean 负例没有 P0～P3，重复运行输出哈希保持一致，截断故障路径显式失败。无模型 `test-preflight.sh` 另外覆盖构建完整性、跨 hunk SSRF、URL builder、路径 API 别名、多处 Java 除法、配置凭据和 guard 边界；`run-synthetic.sh` 会先执行该门禁。
@@ -118,7 +122,7 @@
 - 同日修复 URL builder/别名状态边界：`.queryParam("token", userId)`、`String.format("...?token=%s", userId)` 等普通 ID 不再因为整行关键词被误报；令牌别名重赋为普通值后会清除旧状态。四个负例已接入 `test-preflight.sh`，不改变高置信 `java-token-url` 正例的覆盖范围。
 - 同日修复同一 hunk 内的 Java 方法串线：每个新增除法现在按当前源码快照独立绑定包含方法的 `Integer` 参数和 guard；`SameHunkMethodScopeDivide` 确认前一个 boxed 方法的 P1 不会复制到后一个同名 primitive 方法。
 - 同日补齐定位与跨行表达式回归：问题段第一行必须同时携带已变更路径和有效行号，逗号分隔的多个行号逐段校验；Java 除法覆盖 `a /` 与 `/ b` 跨行，URL 凭据覆盖跨行 `+` 和 `StringBuilder.append`。`test-preflight.sh`、完整确定性回归和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 均通过，未改变 fail-closed、全量展示和截断失败门禁。
-- 2026-09-22 修复历史重复评测把 `initial_status`/`chunk_status` 耗时误判为配置漂移的问题；现在只忽略耗时，仍比较退出码、分片差异字节数、路径、模型、规则和参数签名。回归夹具刻意制造两轮耗时差异后通过；当前 tuned 运行态对 `91bff253` clean、`63d520b` 的查询 token P1、`420ae70c` 的 5 条缺失 DTO P1 均完整复核，`63d520b` 两轮真实重复审查也通过。
+- 2026-09-22 修复历史重复评测把 `initial_status`/`chunk_status` 耗时误判为配置漂移的问题；现在只忽略耗时，仍比较退出码、分片差异字节数、路径、模型、规则和参数签名。回归夹具刻意制造两轮耗时差异后通过；当前 tuned 运行态对 `91bff253` clean、`63d520b` 的查询 token P1、`420ae70c` 的聚合构建阻断 P1 均完整复核，后者保留全部 5 个缺失 DTO 位置，`63d520b` 两轮真实重复审查也通过。
 
 ## 失败处理原则
 
