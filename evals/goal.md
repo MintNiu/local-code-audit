@@ -150,6 +150,8 @@
 
 文档提交 `2bf483b` 推送后又执行一次完整合成门禁：7 类正例均 exit=0 且各命中 1 次，4 个 clean 对照均无问题，所有响应完整，`num_predict` 截断路径按预期显式失败。该复跑只验证公开仓库、全局入口和本机 tuned 模型仍处于同一规则版本，不改变阶段 1 的真实人工标签分母。
 
+随后补充跨仓库登录路由留出 `platform-gateway:7592b4d`：提交只在三套 Nacos 配置中新增 `/mobile/login` 到认证服务路由和白名单；显式附带 `platform-auth` 的移动登录控制器与 Spring Security 配置后，个人 profile 两次均完整返回 clean。第一次默认 16K 窗口按预算门禁拒绝发送（固定提示词 11362/11264），没有静默截断；仅对该次把 `OLLAMA_REVIEW_NUM_CTX` 提高到 32768 后两次均成功。网关 `AiGatewayRouteContractTest`、`SaTokenAuthGlobalFilterTest`，以及认证服务 `LoginServiceImplTest`、`LoginControllerTest`、`SystemLoginSecurityIntegrationTest` 均通过。该样本补充跨服务认证路由覆盖，不增加已确认 P0/P1 根因；它也验证了跨仓库上下文应按需扩大窗口，而不是降低完整性门禁。
+
 ## 失败处理原则
 
 2026-09-21 更正：上述 `f0b3bcb` 配置措辞过滤已撤回。独立回归发现“端口 70000 + 可能启动失败”等完整报告被静默转为 clean，非法路径/行号/缺字段也被过滤绕过校验；修复前 7 个用例中 6 个失败，移除过滤后 7/7 通过。此前过滤后候选减少不能证明精度提升，真实样本中的配置推测仍待独立核实。该组回归通过 `test-preflight.sh` 进入 CI 和合成门禁，不扩大模型召回真值分母。
