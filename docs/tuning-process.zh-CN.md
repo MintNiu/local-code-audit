@@ -537,3 +537,5 @@ reserve 和 effective budget，方便后续复核。
 规则变更后的 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 通过：7 类正例全部命中，4 个 clean 对照通过，截断路径显式失败；随后完整快速回归也通过。该回归只证明既有高置信规则没有退化，不替代跨项目人工 holdout。
 
 另对跨服务 `platform-gateway:052b848` 做人工 clean holdout 复核：新增 workflow 路由应用绑定和目标租户授权测试与现有 Nacos 路由契约一致，未发现可由差异支持的 P0/P1/P2/P3 问题。当前结果完整返回 clean，scorecard 为 `gold=0`、`candidates=0`；它增加了跨服务 clean 覆盖，但不增加 P0/P1 召回分母。
+
+再对 `platform-hr-service:51709d1` 做并发/状态同步方向的人工 clean holdout 复核：外部人员 `active` 状态同步为 `ACTIVE/INACTIVE`，空值仍按历史兼容语义视为 active，新增的非活动人员断言通过，模块测试 `mvn -q -Dtest=DirectoryImportTransactionServiceTest test` 通过。模型结果完整 clean，scorecard 为 `gold=0`、`candidates=0`；该样本增加状态生命周期覆盖，但不增加 P0/P1 召回分母。
