@@ -125,14 +125,25 @@ while IFS= read -r label_file; do
     if ! awk -v want_path="$finding_path" -v want_line="$finding_line" '
       function range_start(value, fields) { split(value, fields, "-"); return fields[1] + 0 }
       function range_end(value, fields) { split(value, fields, "-"); return (fields[2] == "" ? fields[1] : fields[2]) + 0 }
+      function ranges_overlap(candidate, wanted, candidate_ranges, wanted_ranges, candidate_count, wanted_count, i, j) {
+        candidate_count = split(candidate, candidate_ranges, /[,，]/)
+        wanted_count = split(wanted, wanted_ranges, /[,，]/)
+        for (i = 1; i <= candidate_count; i++) {
+          for (j = 1; j <= wanted_count; j++) {
+            if (range_end(candidate_ranges[i]) >= range_start(wanted_ranges[j]) &&
+                range_end(wanted_ranges[j]) >= range_start(candidate_ranges[i])) return 1
+          }
+        }
+        return 0
+      }
       /^(P[0-3]|信息) / {
         location = $2
         candidate_path = location
-        sub(/:[0-9]+(-[0-9]+)?$/, "", candidate_path)
+        sub(/:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*$/, "", candidate_path)
         candidate_line = location
         sub(/^.*:/, "", candidate_line)
         if (candidate_path != want_path) next
-        if (range_end(candidate_line) >= range_start(want_line) && range_end(want_line) >= range_start(candidate_line)) found = 1
+        if (ranges_overlap(candidate_line, want_line)) found = 1
       }
       END { exit(found ? 0 : 1) }
     ' "$new_result"; then

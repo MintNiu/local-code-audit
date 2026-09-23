@@ -62,4 +62,20 @@ grep -F $'# source_result\t'"$new_result" "$out_dir/$equal_commit.labels.tsv" >/
 hash="$(shasum -a 256 "$new_result" | awk '{print $1}')"
 grep -F $'# source_result_sha256\t'"$hash" "$out_dir/$equal_commit.labels.tsv" >/dev/null
 
+comma_commit="0123456789abcdef0123456789abcdef01234568"
+printf 'P1 src/Multiple.java:3,4 - 同一编译阻断\n影响：示例。\n修复建议：示例。\n验证方式：示例。\n' >"$from_dir/$comma_commit.txt"
+cp "$from_dir/$comma_commit.txt" "$to_dir/$comma_commit.txt"
+{
+  printf '# commit\t%s\n' "$comma_commit"
+  printf '# source_result\t%s\n' "$from_dir/$comma_commit.txt"
+  printf '# review_status\tcomplete\n# verdict\tfindings\n'
+  printf '# finding_id\tseverity\tpath\tline\tstatus\tnotes\n'
+  printf 'comma-root\tP1\tsrc/Multiple.java\t3-4\tconfirmed\t两个位置属于同一个编译阻断根因\n'
+} >"$labels_dir/$comma_commit.labels.tsv"
+comma_out_dir="$tmp_dir/comma-labels-new"
+"$repo_root/evals/migrate-labels.sh" \
+  --labels-dir "$labels_dir" --from-results-dir "$from_dir" \
+  --to-results-dir "$to_dir" --out-labels-dir "$comma_out_dir" >/dev/null
+[[ -f "$comma_out_dir/$comma_commit.labels.tsv" ]]
+
 echo 'label migration regression passed'

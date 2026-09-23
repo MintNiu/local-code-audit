@@ -51,6 +51,40 @@ grep -Fx "$expected_header" "$output" >/dev/null
 grep -F "$commit" "$output" | grep -F $'\t1\t1\t2\t1\ttrue\t12' >/dev/null
 "$repo_root/evals/summarize-scorecard.sh" "$output" | grep -F 'p0_p1_recall=100.0%' >/dev/null
 
+comma_labels="$tmp_dir/comma-labels"
+comma_results="$tmp_dir/comma-results"
+mkdir -p "$comma_labels" "$comma_results"
+comma_commit="abcdef0123456789abcdef0123456789abcdef01"
+comma_result="$comma_results/$comma_commit.txt"
+cat >"$comma_result" <<'EOF'
+P1 src/Multiple.java:3,4 - 同一编译阻断涉及两个缺失类型
+影响：当前提交无法编译。
+修复建议：恢复缺失类型。
+验证方式：执行编译验证两个类型均可解析。
+EOF
+{
+  printf '# commit\t%s\n' "$comma_commit"
+  printf '# source_result\t%s\n' "$comma_result"
+  printf '# source_result_sha256\tPLACEHOLDER\n'
+  printf '# review_status\tcomplete\n# verdict\tfindings\n'
+  printf '# finding_id\tseverity\tpath\tline\tstatus\tnotes\n'
+  printf '%s-root\tP1\tsrc/Multiple.java\t3-4\tconfirmed\t两个 import 属于同一个编译阻断根因\n' "$comma_commit"
+} >"$comma_labels/$comma_commit.labels.tsv"
+comma_hash="$(shasum -a 256 "$comma_result" | awk '{print $1}')"
+perl -0pi -e "s/PLACEHOLDER/$comma_hash/" "$comma_labels/$comma_commit.labels.tsv"
+cat >"$comma_results/$comma_commit.meta.tsv" <<'EOF'
+resolved_model	devstral-small-2-review-tuned
+temperature	0
+seed	42
+num_ctx	16384
+status	completed
+exit_code	0
+elapsed_seconds	0
+EOF
+comma_output="$tmp_dir/comma-scorecard.tsv"
+"$repo_root/evals/build-scorecard.sh" --labels-dir "$comma_labels" --results-dir "$comma_results" --out "$comma_output" >/dev/null
+grep -F "$comma_commit" "$comma_output" | grep -F $'\t1\t1\t1\t0\ttrue\t0' >/dev/null
+
 missed_labels="$tmp_dir/missed-labels"
 mkdir -p "$missed_labels"
 cp "$labels_dir/$commit.labels.tsv" "$missed_labels/$commit.labels.tsv"
