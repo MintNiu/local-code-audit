@@ -505,3 +505,6 @@ reserve 和 effective budget，方便后续复核。
 ### 2026-09-23：聚合修复后的五轮稳定性复核
 
 在 `5cb0efe` 推送后，使用同一 tuned 运行态执行 `SYNTHETIC_REVIEW_RUNS=5 ./evals/run-synthetic.sh`：除法、URL 凭据、查询参数令牌、租户隔离、迁移删除、字面量凭据和预签名票据 7 类正例均 5/5 成功，20 个 clean 对照全部通过；每个样例五轮输出 SHA-256 一致，`done_reason=length` 截断路径仍按失败处理。该证据说明逗号行号聚合和分片路由修复没有改变既有高置信规则的召回或 clean 边界，但仍不能替代更大的人工历史 holdout。
+
+随后对真实 `platform-api:420ae70c` 做两轮完整重复审查：两轮均 8 个分片、exit=0，耗时分别 81 秒和 52 秒；最终文本 SHA-256 同为
+`0d1da3ce59fd07e72b6c6370a99082b7738e807af919a4695b8c0f83d3ed07fe`，且每轮都只有一个 `HrDirectoryClient.java:3,4,5,6,7` 的聚合 P1。重复评测门禁通过，说明耗时变化不会掩盖结果漂移，聚合后的稳定根因可以安全用于人工 scorecard。
