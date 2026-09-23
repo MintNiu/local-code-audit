@@ -510,3 +510,5 @@ reserve 和 effective budget，方便后续复核。
 `0d1da3ce59fd07e72b6c6370a99082b7738e807af919a4695b8c0f83d3ed07fe`，且每轮都只有一个 `HrDirectoryClient.java:3,4,5,6,7` 的聚合 P1。重复评测门禁通过，说明耗时变化不会掩盖结果漂移，聚合后的稳定根因可以安全用于人工 scorecard。
 
 这次复核还补齐了评测层的同一位置语义：scorecard 构建和标签迁移现在会把候选中的逗号行号列表与人工标签的单行/范围做区间交集，而不是把 `:3,4,5` 当成路径的一部分。新增回归覆盖聚合候选、标签迁移和非法标签拒绝，避免审查器已经正确聚合但质量指标仍因定位解析失败而失真。
+
+基于该规则在本机生成的 `platform-api:420ae70c` 聚合标签 scorecard 为 `gold=1`、`found=1`、`candidates=1`、`false_positive=0`；旧的五行标签仍作为历史记录保留，不覆盖原始人工证据。新的聚合标签、结果和 scorecard 均位于 `~/.local/share/local-review/evals`，不进入公开仓库。
