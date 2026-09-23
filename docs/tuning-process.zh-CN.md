@@ -524,3 +524,14 @@ reserve 和 effective budget，方便后续复核。
 `37535a8313cbb463efef560e7e87c36e60f528cc3e0263bf23fcd89f3a24b186`。重复门禁因此确认耗时变化没有造成候选集合或定位漂移，私有重复结果仍不进入公开仓库。
 
 这次复核也验证了当前边界：模型发现必须全部展示，误报通过人工标签进入 scorecard，不能再用没有证据的关键词过滤静默删除。下一步优先增加与配置凭据无关的并发、权限和数据生命周期 holdout，避免继续在同一根因族上重复优化。
+
+### 2026-09-23：补齐跨平台 Nacos 集群隔离漏报
+
+真实 `platform-file:bc14e16` 的原始个人 profile 复核在 32 秒内返回 clean，但差异新增的
+`${NACOS_DISCOVERY_CLUSTER:${COMPUTERNAME:NY-TEST-LOCAL}}` 与“按计算机名隔离”的注释不一致：macOS/Linux 通常没有 `COMPUTERNAME`，多台开发机可能回退到相同 clusterName。该问题属于 P2 兼容性/联调隔离风险，不能仅凭模型 clean 结论忽略。
+
+现在加入窄范围确定性预检：只对新增配置中的 `cluster-name` 与 `COMPUTERNAME` fallback 组合报告 P2，显式 `HOSTNAME` fallback 和普通环境变量不触发。复跑结果稳定为唯一一条 `src/main/resources/application-localhost.yml:16` P2，exit=0，耗时 45 秒，结果 SHA-256 为 `580c568d367cc5b22b1c32bcd99dba509f22afa5540b81aa89fd9fec11840896`。同时修复了预检与模型相同措辞在尾部空白不同情况下的重复输出；回归确认该 finding 只展示一次。
+
+这条样本的 P0/P1 scorecard 分母为 0，因此不虚报召回率；P2 真值单独保存在本机标签中。它说明阶段 1 不能只统计 P0/P1，还要持续保留可定位的兼容性问题和模型漏报证据。
+
+规则变更后的 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 通过：7 类正例全部命中，4 个 clean 对照通过，截断路径显式失败；随后完整快速回归也通过。该回归只证明既有高置信规则没有退化，不替代跨项目人工 holdout。

@@ -185,6 +185,21 @@ cache:
   host: ${REDIS_HOST:192.168.30.241}
   password: ${REDIS_PASSWORD:wanzhiTestRedisPlatform}
 EOF
+cat >"$repo/application-cluster-platform.yml" <<'EOF'
+spring:
+  cloud:
+    nacos:
+      discovery:
+        # 按机器名隔离本地集群，但 COMPUTERNAME 只在 Windows 默认存在。
+        cluster-name: ${NACOS_DISCOVERY_CLUSTER:${COMPUTERNAME:NY-TEST-LOCAL}}
+EOF
+cat >"$repo/application-cluster-cross-platform-safe.yml" <<'EOF'
+spring:
+  cloud:
+    nacos:
+      discovery:
+        cluster-name: ${NACOS_DISCOVERY_CLUSTER:${HOSTNAME:LOCAL}}
+EOF
 
 cat >"$repo/src/main/java/com/example/api/client/TokenProxy.java" <<'EOF'
 package com.example.api.client;
@@ -1187,6 +1202,22 @@ grep -F 'P1 application-credential-remote-default.yml' "$capture" >/dev/null || 
   cat "$capture" >&2
   exit 1
 }
+grep -F 'P2 application-cluster-platform.yml:' "$capture" >/dev/null || {
+  echo 'missing cross-platform Nacos cluster fallback preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+cluster_fallback_count="$(grep -o 'P2 application-cluster-platform.yml:' "$capture" | wc -l | tr -d '[:space:]')"
+[[ "$cluster_fallback_count" == 1 ]] || {
+  echo 'cross-platform Nacos finding was duplicated instead of exact-deduplicated' >&2
+  cat "$capture" >&2
+  exit 1
+}
+if grep -F 'P2 application-cluster-cross-platform-safe.yml:' "$capture" >/dev/null; then
+  echo 'cross-platform Nacos preflight reported an explicit HOSTNAME fallback' >&2
+  cat "$capture" >&2
+  exit 1
+fi
 if grep -F 'P1 application-credential-safe.yml' "$capture" >/dev/null; then
   echo 'hardcoded credential preflight reported placeholder/comment negative fixture' >&2
   cat "$capture" >&2

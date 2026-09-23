@@ -591,7 +591,16 @@ dedup_exact_findings() {
         }
       }
       for (i = 1; i <= count; i++) {
-        if (!skipped[i] && !seen[bodies[i]]++) {
+        if (!skipped[i]) {
+          # Model and deterministic preflight paths can carry different
+          # numbers of separator-only lines. Normalize only those trailing
+          # separators for exact deduplication; never normalize finding text,
+          # locations, or independent risk families.
+          normalized_body = bodies[i]
+          gsub(/\r/, "", normalized_body)
+          sub(/[[:space:]]+$/, "", normalized_body)
+        }
+        if (!skipped[i] && !seen[normalized_body]++) {
           if (printed) printf "\n"
           printf "%s", blocks[i]
           printed = 1
@@ -1950,6 +1959,53 @@ collect_context_tenant_preflight() {
       }
     }
     END { emit_candidate() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_cross_platform_config_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # `${COMPUTERNAME:...}` is a Windows-specific environment fallback.  When
+  # it is used as a Nacos cluster-name fallback, macOS/Linux processes usually
+  # take the same literal fallback and lose the per-machine isolation promised
+  # by the surrounding comment. Keep this deliberately narrow: only an added
+  # cluster-name line in a supported config file is evidence; generic
+  # COMPUTERNAME references and explicit HOSTNAME fallbacks are left to the
+  # model/context review.
+  awk '
+    function emit_cluster(path, line) {
+      printf "P2 %s:%d - Nacos 集群名在非 Windows 环境可能回退到固定值；该配置使用 COMPUTERNAME 作为机器名来源，但 macOS/Linux 通常不会提供该变量，多台本机可能共享同一集群名并削弱同集群隔离。\n影响：本地服务发现可能把请求负载到其他开发机实例，造成联调结果漂移或跨机器访问。\n修复建议：使用跨平台的 HOSTNAME/显式 NACOS_DISCOVERY_CLUSTER 注入，并为缺失变量设置不会与其他机器复用的安全策略。\n验证方式：在 macOS/Linux 上分别启动两台实例，检查 Nacos 注册的 clusterName 是否唯一且负载均衡只选择目标集群。\n\n", path, line
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && path ~ /\.(ya?ml|properties|conf|ini|toml)$/ &&
+          text !~ /^[[:space:]]*(#|\/\/|\/\*)/ &&
+          text ~ /(^|[^[:alnum:]_-])cluster[-_]?name([^[:alnum:]_-]|$)/ &&
+          text ~ /\$\{[^}]*COMPUTERNAME[[:space:]]*:/) {
+        emit_cluster(path, line_no)
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
   ' "$diff_file" >>"$output_file"
   dedup_preflight_blocks "$output_file"
 }
@@ -3488,6 +3544,7 @@ else
   : >"$java_main_source_index"
 fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
+collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
