@@ -154,6 +154,8 @@
 
 随后复核 `platform-integration:18ea173` 的 HR 目录下游失败传播：变更为批次创建、分片上传和批次完成统一保留下游错误码与消息，并显式附带 `platform-api` 的 `HrDirectoryClient` 契约上下文。个人 profile 两次均完整返回 clean；`HrDirectoryPublisherTest` 通过。该样本补充外部调用错误处理和跨仓库契约覆盖，不增加已确认 P0/P1 根因。
 
+继续复核 `platform-hr-service:c54baaf` 的内部人员树查询：提交新增组织树、当前有效任职挂载、关键词裁剪和账号状态范围；个人 profile 两次均完整返回 clean，分片预算在固定提示词较大时自动收紧到 2616 字节。人工核对确认人员查询最终进入带租户条件的 `HrPersonMapper`，并通过 System-HR 的 ACTIVE employment 范围限制可见账号；`HrPersonnelDirectoryApplicationTest`、`HrControllerContractTest` 通过。该样本补充人员目录的租户、状态和容量边界覆盖，不增加已确认 P0/P1 根因。
+
 ## 失败处理原则
 
 2026-09-21 更正：上述 `f0b3bcb` 配置措辞过滤已撤回。独立回归发现“端口 70000 + 可能启动失败”等完整报告被静默转为 clean，非法路径/行号/缺字段也被过滤绕过校验；修复前 7 个用例中 6 个失败，移除过滤后 7/7 通过。此前过滤后候选减少不能证明精度提升，真实样本中的配置推测仍待独立核实。该组回归通过 `test-preflight.sh` 进入 CI 和合成门禁，不扩大模型召回真值分母。

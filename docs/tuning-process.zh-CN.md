@@ -549,3 +549,5 @@ reserve 和 effective budget，方便后续复核。
 随后补充跨仓库登录路由留出 `platform-gateway:7592b4d`：提交只在三套 Nacos 配置中新增 `/mobile/login` 到认证服务路由和白名单；显式附带 `platform-auth` 的移动登录控制器与 Spring Security 配置后，个人 profile 两次均完整返回 clean。第一次默认 16K 窗口按预算门禁拒绝发送（固定提示词 11362/11264），没有静默截断；仅对该次把 `OLLAMA_REVIEW_NUM_CTX` 提高到 32768 后两次均成功。网关 `AiGatewayRouteContractTest`、`SaTokenAuthGlobalFilterTest`，以及认证服务 `LoginServiceImplTest`、`LoginControllerTest`、`SystemLoginSecurityIntegrationTest` 均通过。该样本补充跨服务认证路由覆盖，不增加已确认 P0/P1 根因；它也验证了跨仓库上下文应按需扩大窗口，而不是降低完整性门禁。
 
 随后复核 `platform-integration:18ea173` 的 HR 目录下游失败传播：变更为批次创建、分片上传和批次完成统一保留下游错误码与消息，并显式附带 `platform-api` 的 `HrDirectoryClient` 契约上下文。个人 profile 两次均完整返回 clean；`HrDirectoryPublisherTest` 通过。该样本补充外部调用错误处理和跨仓库契约覆盖，不增加已确认 P0/P1 根因。
+
+继续复核 `platform-hr-service:c54baaf` 的内部人员树查询：提交新增组织树、当前有效任职挂载、关键词裁剪和账号状态范围；个人 profile 两次均完整返回 clean，分片预算在固定提示词较大时自动收紧到 2616 字节。人工核对确认人员查询最终进入带租户条件的 `HrPersonMapper`，并通过 System-HR 的 ACTIVE employment 范围限制可见账号；`HrPersonnelDirectoryApplicationTest`、`HrControllerContractTest` 通过。该样本补充人员目录的租户、状态和容量边界覆盖，不增加已确认 P0/P1 根因。
