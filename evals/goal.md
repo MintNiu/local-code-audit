@@ -148,6 +148,8 @@
 
 同日继续复核发布服务更近的提交 `platform-publishing-service:129a244`：该提交新增印刷页标、重复表头配置，并同步质量报告、问题证据和页级复核链路。当前个人 profile 连续两次完整结束（均 exit=0，均返回 clean），未出现截断、空响应或路径定位失败；人工逐文件检查确认新增字段在确定性执行器、持久化同步、查询 VO 和示例契约之间保持一致。`TypesetEvidenceApplicationTest`、`DeterministicTypesetExecutionHandlerTest`、`TypesetProfileApplicationTest` 和 `ProfileExamplesContractTest` 均通过（仅有 Mockito/Byte Buddy 动态 agent 警告）。该样本补充了跨服务、跨时间的 clean 稳定性证据，但没有新增已确认 P0/P1 根因，不计入召回率分母。
 
+文档提交 `2bf483b` 推送后又执行一次完整合成门禁：7 类正例均 exit=0 且各命中 1 次，4 个 clean 对照均无问题，所有响应完整，`num_predict` 截断路径按预期显式失败。该复跑只验证公开仓库、全局入口和本机 tuned 模型仍处于同一规则版本，不改变阶段 1 的真实人工标签分母。
+
 ## 失败处理原则
 
 2026-09-21 更正：上述 `f0b3bcb` 配置措辞过滤已撤回。独立回归发现“端口 70000 + 可能启动失败”等完整报告被静默转为 clean，非法路径/行号/缺字段也被过滤绕过校验；修复前 7 个用例中 6 个失败，移除过滤后 7/7 通过。此前过滤后候选减少不能证明精度提升，真实样本中的配置推测仍待独立核实。该组回归通过 `test-preflight.sh` 进入 CI 和合成门禁，不扩大模型召回真值分母。
