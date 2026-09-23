@@ -140,6 +140,8 @@
 
 该规则变更后的 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 通过：7 类正例全部命中、4 个 clean 对照通过，截断路径显式失败；预检、分片、scorecard、标签迁移和运行态校验快速门禁也全部通过。
 
+同时完成跨服务 `platform-gateway:052b848` clean holdout 人工复核：workflow 路由绑定和租户授权测试与现有 Nacos 路由契约一致，当前结果完整 clean，scorecard `gold=0`、`candidates=0`。该样本只增加跨服务 clean 覆盖，不增加 P0/P1 召回分母。
+
 ## 失败处理原则
 
 2026-09-21 更正：上述 `f0b3bcb` 配置措辞过滤已撤回。独立回归发现“端口 70000 + 可能启动失败”等完整报告被静默转为 clean，非法路径/行号/缺字段也被过滤绕过校验；修复前 7 个用例中 6 个失败，移除过滤后 7/7 通过。此前过滤后候选减少不能证明精度提升，真实样本中的配置推测仍待独立核实。该组回归通过 `test-preflight.sh` 进入 CI 和合成门禁，不扩大模型召回真值分母。
