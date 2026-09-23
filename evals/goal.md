@@ -123,6 +123,7 @@
 - 同日修复同一 hunk 内的 Java 方法串线：每个新增除法现在按当前源码快照独立绑定包含方法的 `Integer` 参数和 guard；`SameHunkMethodScopeDivide` 确认前一个 boxed 方法的 P1 不会复制到后一个同名 primitive 方法。
 - 同日补齐定位与跨行表达式回归：问题段第一行必须同时携带已变更路径和有效行号，逗号分隔的多个行号逐段校验；Java 除法覆盖 `a /` 与 `/ b` 跨行，URL 凭据覆盖跨行 `+` 和 `StringBuilder.append`。`test-preflight.sh`、完整确定性回归和 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh` 均通过，未改变 fail-closed、全量展示和截断失败门禁。
 - 2026-09-22 修复历史重复评测把 `initial_status`/`chunk_status` 耗时误判为配置漂移的问题；现在只忽略耗时，仍比较退出码、分片差异字节数、路径、模型、规则和参数签名。回归夹具刻意制造两轮耗时差异后通过；当前 tuned 运行态对 `91bff253` clean、`63d520b` 的查询 token P1、`420ae70c` 的聚合构建阻断 P1 均完整复核，后者保留全部 5 个缺失 DTO 位置，`63d520b` 两轮真实重复审查也通过。
+- 2026-09-23 在 `5cb0efe` 推送后重新执行 5 轮合成门禁：7 类正例均 5/5 命中，20 个 clean 对照全部通过，所有样例五轮输出哈希一致，截断路径显式失败。该结果验证聚合与分片路由修复未改变既有高置信规则，但不扩大真实人工 holdout 的召回率分母。
 
 ## 失败处理原则
 
