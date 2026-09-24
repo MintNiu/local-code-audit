@@ -158,6 +158,12 @@
 
 随后把真实提交 `platform-file:7eb92a1` 重新放回其父提交快照做正式留出（避免误把后续 HEAD 的配置一起纳入）：当前 tuned profile 精确报告 `nacos-config/platform-file-localhost.yml:98-99` 的 OSS 凭据字面量，人工按同一泄漏根因聚合为 1 条 P1，scorecard 为 `gold=1`、`found=1`、`candidates=2`、`false_positive=0`、完整运行 50 秒。两轮历史重复审查均 exit=0，文本 SHA-256 同为 `8ac50a65fd723a73b481ad3f764c5e60902922a12eae16e6425443006d5581ca`，重复门禁通过。该样本增加一个真实 P1 根因，但仍属于已有配置凭据族，不代表通用代码审计召回率。
 
+## 2026-09-24 进展：补充跨服务超时与调度关闭 clean 留出
+
+为避免真实 holdout 只集中在配置凭据族，新增两个不同运行边界的提交并按各自父提交快照审查：`platform-integration:d7cda2c` 调整 HR 批次完成阶段的读取超时和直连地址，个人 tuned profile 43 秒完整返回 clean；`platform-hr-service:4d5e974` 允许关闭 XXL-JOB 客户端时仍保存待注册生命周期动作，37 秒完整返回 clean。两份人工 scorecard 均为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`，因此不虚增 P0/P1 召回分母。
+
+`d7cda2c` 随后完成两轮历史重复审查，均 exit=0、结果 clean，重复门禁通过；两轮耗时不同但候选集合和运行签名稳定。当前 tuned profile 也重新执行了 1 轮完整合成门禁：7 类正例均命中，4 个 clean 对照通过，截断路径显式失败。新增证据只扩大了跨服务和生命周期 clean 覆盖，仍不能替代至少 20 个经人工确认且包含多种真实 P0/P1 根因的独立留出集。
+
 ## 失败处理原则
 
 2026-09-21 更正：上述 `f0b3bcb` 配置措辞过滤已撤回。独立回归发现“端口 70000 + 可能启动失败”等完整报告被静默转为 clean，非法路径/行号/缺字段也被过滤绕过校验；修复前 7 个用例中 6 个失败，移除过滤后 7/7 通过。此前过滤后候选减少不能证明精度提升，真实样本中的配置推测仍待独立核实。该组回归通过 `test-preflight.sh` 进入 CI 和合成门禁，不扩大模型召回真值分母。

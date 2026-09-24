@@ -553,3 +553,9 @@ reserve 和 effective budget，方便后续复核。
 继续复核 `platform-hr-service:c54baaf` 的内部人员树查询：提交新增组织树、当前有效任职挂载、关键词裁剪和账号状态范围；个人 profile 两次均完整返回 clean，分片预算在固定提示词较大时自动收紧到 2616 字节。人工核对确认人员查询最终进入带租户条件的 `HrPersonMapper`，并通过 System-HR 的 ACTIVE employment 范围限制可见账号；`HrPersonnelDirectoryApplicationTest`、`HrControllerContractTest` 通过。该样本补充人员目录的租户、状态和容量边界覆盖，不增加已确认 P0/P1 根因。
 
 随后把真实提交 `platform-file:7eb92a1` 重新放回其父提交快照做正式留出（避免误把后续 HEAD 的配置一起纳入）：当前 tuned profile 精确报告 `nacos-config/platform-file-localhost.yml:98-99` 的 OSS 凭据字面量，人工按同一泄漏根因聚合为 1 条 P1，scorecard 为 `gold=1`、`found=1`、`candidates=2`、`false_positive=0`、完整运行 50 秒。两轮历史重复审查均 exit=0，文本 SHA-256 同为 `8ac50a65fd723a73b481ad3f764c5e60902922a12eae16e6425443006d5581ca`，重复门禁通过。该样本增加一个真实 P1 根因，但仍属于已有配置凭据族，不代表通用代码审计召回率。
+
+### 2026-09-24：补充跨服务超时与调度关闭 clean 留出
+
+为避免真实 holdout 只集中在配置凭据族，新增两个不同运行边界的提交并按各自父提交快照审查：`platform-integration:d7cda2c` 调整 HR 批次完成阶段的读取超时和直连地址，个人 tuned profile 43 秒完整返回 clean；`platform-hr-service:4d5e974` 允许关闭 XXL-JOB 客户端时仍保存待注册生命周期动作，37 秒完整返回 clean。两份人工 scorecard 均为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`，因此不虚增 P0/P1 召回分母。
+
+`d7cda2c` 随后完成两轮历史重复审查，均 exit=0、结果 clean，重复门禁通过；两轮耗时不同但候选集合和运行签名稳定。当前 tuned profile 也重新执行了 1 轮完整合成门禁：7 类正例均命中，4 个 clean 对照通过，截断路径显式失败。新增证据只扩大了跨服务和生命周期 clean 覆盖，仍不能替代至少 20 个经人工确认且包含多种真实 P0/P1 根因的独立留出集。
