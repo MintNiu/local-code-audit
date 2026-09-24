@@ -47,7 +47,14 @@ final class Listener {
 }
 EOF
 printf '%s\n' 'legacy placeholder' >"$repo/legacy.txt"
+cat >"$repo/security.yml" <<'EOF'
+aliyun:
+  oss:
+    access-key-id: OLD_ACCESS_KEY_VALUE
+    access-key-secret: OLD_SECRET_VALUE
+EOF
 git -C "$repo" add application.yml Listener.java legacy.txt
+git -C "$repo" add security.yml
 git -C "$repo" commit -qm base
 cat >"$repo/application.yml" <<'EOF'
 # The listener accepts ports from 1 to 65535 inclusive.
@@ -58,7 +65,12 @@ cat >"$repo/new-settings.yml" <<'EOF'
 # The listener accepts ports from 1 to 65535 inclusive.
 port: 70000
 EOF
-
+cat >"$repo/security.yml" <<'EOF'
+aliyun:
+  oss:
+    access-key-id: ${ALIYUN_OSS_ACCESS_KEY_ID}
+    access-key-secret: ${ALIYUN_OSS_ACCESS_KEY_SECRET}
+EOF
 failures=0
 cases=0
 run_case() {
@@ -74,6 +86,9 @@ run_case() {
       failures=$((failures + 1))
     fi
   elif [[ "$status" == 0 ]]; then
+    if [[ "$expected" == "clean" ]] && [[ "$(<"$output")" == "未发现阻塞问题" ]]; then
+      return
+    fi
     printf 'FAIL %s: invalid finding was accepted as complete\n' "$name" >&2
     cat "$output" >&2
     failures=$((failures + 1))
@@ -145,6 +160,28 @@ run_case ambiguous-deleted-basename reject <<'EOF'
 影响：如果外部流程仍读取该文件，删除后可能导致发布或初始化失败。
 修复建议：确认所有消费者已迁移到替代文件或明确记录删除契约。
 验证方式：在全新检出和升级路径分别执行部署脚本，确认没有读取该文件的步骤。
+EOF
+
+cat >"$repo/security.yml" <<'EOF'
+aliyun:
+  oss:
+    access-key-id: ${ALIYUN_OSS_ACCESS_KEY_ID}
+    access-key-secret: ${ALIYUN_OSS_ACCESS_KEY_SECRET}
+EOF
+run_case resolved-credential-replacement clean <<'EOF'
+P1 security.yml:3-4 - 删除旧凭据并改用环境变量占位符
+影响：旧凭据已从文件中移除，当前状态已移除旧凭据。
+修复建议：无需额外修复，但确保环境变量注入机制正常工作。
+验证方式：检查文件中不再包含字面量凭据。
+EOF
+cat >>"$repo/security.yml" <<'EOF'
+    legacy-token: ACTIVE_SECRET_VALUE
+EOF
+run_case replacement-with-independent-secret retain <<'EOF'
+P1 security.yml:5 - 另一份凭据仍在配置中
+影响：旧凭据已经移除，但新增的 legacy-token 仍在当前文件中保留字面量秘密。
+修复建议：删除该字面量并改用无默认值的环境变量或密钥管理服务。
+验证方式：检查当前文件和 Git 历史，确认所有凭据字段均由运行时注入。
 EOF
 
 [[ "$failures" == 0 ]] || {

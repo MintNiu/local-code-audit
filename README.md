@@ -114,6 +114,13 @@ candidates remain visible for independent verification; passing the output
 gate does not confirm their correctness. Unknown paths, invalid line ranges,
 and missing required fields still fail the review rather than becoming clean.
 
+The only configuration exception is an evidence-backed contradiction guard:
+when the diff removes literal credential values, every current credential line
+uses an environment placeholder, and the model itself says the old value was
+removed with no further fix needed, that self-contradictory paragraph is
+treated as clean. A real literal retained in an added/context line, or any
+independent security/compatibility finding, remains visible.
+
 When a finding contains a parseable file line, the launcher also checks it against the actual current file or explicit context length; an out-of-range location fails the review instead of being treated as evidence. Deleted files are not forced through a current-worktree line check.
 
 Sampling defaults are `top_k=40` and `top_p=0.9`; keep them unchanged during comparisons unless the evaluation record includes the override.
