@@ -1307,7 +1307,12 @@ validate_response() {
       }
       close(changed_file)
       while ((getline path < deleted_file) > 0) {
-        if (path != "") deleted_paths[path] = 1
+        if (path != "") {
+          deleted_paths[path] = 1
+          basename = path
+          sub(/^.*\//, "", basename)
+          deleted_basename_counts[basename]++
+        }
       }
       close(deleted_file)
     }
@@ -1348,7 +1353,7 @@ validate_response() {
         }
         basename = path
         sub(/^.*\//, "", basename)
-        if (has_token(text, basename)) return 1
+        if (deleted_basename_counts[basename] == 1 && has_token(text, basename)) return 1
       }
       return 0
     }
