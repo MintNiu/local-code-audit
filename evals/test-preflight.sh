@@ -2653,6 +2653,44 @@ for safe_schema_path in safe_schema.sql multiple_schema.sql create_only.sql; do
   fi
 done
 
+cat >"$repo/sql/trigger_migration.sql" <<'EOF'
+DROP TRIGGER IF EXISTS trg_example_forbid_delete;
+CREATE TRIGGER trg_example_forbid_delete
+BEFORE DELETE ON example_table
+FOR EACH ROW
+BEGIN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'history cannot be deleted';
+END;
+EOF
+cat >"$repo/sql/safe_trigger.sql" <<'EOF'
+DROP TRIGGER IF EXISTS trg_safe_forbid_delete;
+CREATE TRIGGER trg_safe_forbid_delete
+BEFORE DELETE ON safe_table
+FOR EACH ROW
+BEGIN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'history cannot be deleted';
+END;
+EOF
+git -C "$repo" add sql/trigger_migration.sql sql/safe_trigger.sql
+git -C "$repo" commit -qm trigger-base
+sed -i '' 's/CREATE TRIGGER trg_example_forbid_delete/CREATE TRIGGER prefixtrg_example_forbid_delete/' "$repo/sql/trigger_migration.sql"
+sql_trigger_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$sql_trigger_output" | grep -F 'SQL 迁移删除的触发器名称与重新创建的名称不一致' >/dev/null || {
+  echo 'missing SQL trigger rename mismatch preflight' >&2
+  printf '%s\n' "$sql_trigger_output" >&2
+  exit 1
+}
+printf '%s\n' "$sql_trigger_output" | grep -F 'trigger_migration.sql' >/dev/null || {
+  echo 'missing SQL trigger mismatch path' >&2
+  printf '%s\n' "$sql_trigger_output" >&2
+  exit 1
+}
+if printf '%s\n' "$sql_trigger_output" | grep -F 'safe_trigger.sql' >/dev/null; then
+  echo 'SQL trigger preflight reported a safe same-name replacement' >&2
+  printf '%s\n' "$sql_trigger_output" >&2
+  exit 1
+fi
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.

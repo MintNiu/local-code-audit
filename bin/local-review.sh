@@ -1296,7 +1296,7 @@ validate_response() {
     NF { print }
   ')"
 
-  if ! LC_ALL=C awk -v changed_file="$paths_file" -v repo_root="$repo_root" '
+  if ! LC_ALL=C awk -v changed_file="$paths_file" -v deleted_file="$deleted_types_file" -v repo_root="$repo_root" '
     BEGIN {
       while ((getline path < changed_file) > 0) {
         changed_paths[path] = 1
@@ -1306,6 +1306,10 @@ validate_response() {
         require_changed_path = 1
       }
       close(changed_file)
+      while ((getline path < deleted_file) > 0) {
+        if (path != "") deleted_paths[path] = 1
+      }
+      close(deleted_file)
     }
     function token_boundary(character) {
       return (character == "" || character !~ /[[:alnum:]_.\/-]/)
@@ -1334,6 +1338,17 @@ validate_response() {
         if (basename_counts[basename] == 1 && has_token(text, basename)) {
           return 1
         }
+      }
+      return 0
+    }
+    function paragraph_has_deleted_path(text,    path, basename) {
+      for (path in deleted_paths) {
+        if (has_token(text, path) || has_token(text, "./" path) || has_token(text, "a/" path) || has_token(text, "b/" path)) {
+          return 1
+        }
+        basename = path
+        sub(/^.*\//, "", basename)
+        if (has_token(text, basename)) return 1
       }
       return 0
     }
@@ -1377,7 +1392,10 @@ validate_response() {
       sub(/\n.*/, "", first_line)
       explicit_line_pattern = "((行号|[Ll][Ii][Nn][Ee][Ss]?|[Ll])[[:space:]]*[:：]?[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*|第[[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*[[:space:]]*行)"
       first_line_pattern = "^(P[0-3]|信息)[[:space:]:：]+"
-      has_location = (first_line ~ explicit_line_pattern || paragraph_has_adjacent_location(first_line))
+      # A deleted file has no current line range to validate.  Preserve a
+      # finding that identifies the deleted path, while still requiring an
+      # explicit line/location for every existing or untracked file.
+      has_location = (first_line ~ explicit_line_pattern || paragraph_has_adjacent_location(first_line) || paragraph_has_deleted_path(first_line))
       has_changed_path = paragraph_has_changed_path(first_line)
       has_impact = (paragraph ~ /(^|[[:space:]\n])*(影响|[Ii]mpact)[：:]/)
       has_fix = (paragraph ~ /(^|[[:space:]\n])*(修复建议|修复|[Ff]ix|[Rr]emediation)[：:]/)
@@ -3474,6 +3492,116 @@ collect_sql_schema_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sql_trigger_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # A migration that drops one trigger and recreates a nearly identical name
+  # is almost always a typo, not an intentional rename.  Keep this narrow:
+  # both statements must be visible in the same SQL file, one side must be a
+  # changed line, and the names must differ only by a prefix/suffix.  This
+  # catches rerun failures without guessing across files or unrelated trigger
+  # renames.
+  awk '
+    function reset_file() {
+      drop_count = 0
+      create_count = 0
+      delete drop_name
+      delete drop_line
+      delete drop_changed
+      delete create_name
+      delete create_line
+      delete create_changed
+    }
+    function normalized_name(value) {
+      gsub(/[`;"'"'"'()]/, "", value)
+      return tolower(value)
+    }
+    function record_drop(text, is_added, at_line, normalized, fields, count, name) {
+      normalized = text
+      gsub(/[[:space:]]+/, " ", normalized)
+      sub(/^[[:space:]]+/, "", normalized)
+      sub(/[[:space:]]+(--|#).*/, "", normalized)
+      sub(/[[:space:]]+$/, "", normalized)
+      if (tolower(normalized) !~ /^drop[[:space:]]+trigger[[:space:]]+(if[[:space:]]+exists[[:space:]]+)?/) return
+      count = split(normalized, fields, " ")
+      if (tolower(fields[3]) == "if") name = fields[5]
+      else name = fields[3]
+      name = normalized_name(name)
+      if (name == "") return
+      drop_count++
+      drop_name[drop_count] = name
+      drop_line[drop_count] = at_line
+      drop_changed[drop_count] = is_added
+    }
+    function record_create(text, is_added, at_line, normalized, fields, count, name) {
+      normalized = text
+      gsub(/[[:space:]]+/, " ", normalized)
+      sub(/^[[:space:]]+/, "", normalized)
+      sub(/[[:space:]]+(--|#).*/, "", normalized)
+      sub(/[[:space:]]+$/, "", normalized)
+      if (tolower(normalized) !~ /^create[[:space:]]+trigger[[:space:]]+/) return
+      count = split(normalized, fields, " ")
+      if (count < 3) return
+      name = normalized_name(fields[3])
+      if (name == "") return
+      create_count++
+      create_name[create_count] = name
+      create_line[create_count] = at_line
+      create_changed[create_count] = is_added
+    }
+    function is_suffix(longer, shorter) {
+      return length(longer) > length(shorter) &&
+             substr(longer, length(longer) - length(shorter) + 1) == shorter
+    }
+    function emit_file(    i, j, create, drop, line) {
+      if (path == "" || path !~ /\.sql$/) return
+      for (i = 1; i <= create_count; i++) {
+        create = create_name[i]
+        for (j = 1; j <= drop_count; j++) {
+          drop = drop_name[j]
+          if (create == drop || !(is_suffix(create, drop) || is_suffix(drop, create))) continue
+          if (!(create_changed[i] || drop_changed[j])) continue
+          line = (create_changed[i] ? create_line[i] : drop_line[j])
+          printf "P1 %s:%d - SQL 迁移删除的触发器名称与重新创建的名称不一致（DROP %s、CREATE %s），重复执行时可能留下旧触发器并在创建阶段失败。\n影响：升级脚本可能只在首次执行成功，重试或回滚重放时因触发器仍存在而中止，导致数据库结构和应用版本不一致。\n修复建议：统一 DROP TRIGGER 与 CREATE TRIGGER 的名称，或显式记录有意改名并先删除旧名称。\n验证方式：在同一数据库连续执行迁移两次，确认两次都成功且 information_schema.TRIGGERS 中只保留预期名称。\n\n", path, line, drop, create
+          break
+        }
+      }
+    }
+    /^diff --git / {
+      emit_file()
+      path = $4
+      sub(/^b\//, "", path)
+      reset_file()
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      if (path == "" || path !~ /\.sql$/) next
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" || prefix == "-" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        record_drop(text, prefix == "+", line_no)
+        record_create(text, prefix == "+", line_no)
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { emit_file() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
@@ -3549,6 +3677,7 @@ collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$repo_ro
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
+collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames

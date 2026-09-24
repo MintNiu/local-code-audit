@@ -559,3 +559,11 @@ reserve 和 effective budget，方便后续复核。
 为避免真实 holdout 只集中在配置凭据族，新增两个不同运行边界的提交并按各自父提交快照审查：`platform-integration:d7cda2c` 调整 HR 批次完成阶段的读取超时和直连地址，个人 tuned profile 43 秒完整返回 clean；`platform-hr-service:4d5e974` 允许关闭 XXL-JOB 客户端时仍保存待注册生命周期动作，37 秒完整返回 clean。两份人工 scorecard 均为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`，因此不虚增 P0/P1 召回分母。
 
 `d7cda2c` 随后完成两轮历史重复审查，均 exit=0、结果 clean，重复门禁通过；两轮耗时不同但候选集合和运行签名稳定。当前 tuned profile 也重新执行了 1 轮完整合成门禁：7 类正例均命中，4 个 clean 对照通过，截断路径显式失败。新增证据只扩大了跨服务和生命周期 clean 覆盖，仍不能替代至少 20 个经人工确认且包含多种真实 P0/P1 根因的独立留出集。
+
+### 2026-09-24：迁移脚本预检与删除文件输出门禁
+
+大提交 `platform-hr-service:a8bf560` 的完整个人 profile 复核在 `num_ctx=32768`、9KB 分片下 exit=0；模型候选包含 1 条真实 OSS/内部令牌 P1，但人工还确认迁移脚本中 `DROP trg_hr_employee_event_forbid_delete` 与 `CREATE hr_projection_outboxtrg_hr_employee_event_forbid_delete` 名称不一致，原始 scorecard 为 `gold_p0_p1=2`、`p0_p1_found=1`、`predicted_candidates=19`、`false_positive=6`，即 1/2（50%）召回。另一次 15KB 分片尝试在第 16 个分片连续超时，按 fail-closed 处理，不计入 scorecard；这再次证明扩大分片不能作为默认提速手段。
+
+为避免模型对已删除文件给出“真实路径但无当前行号”的信息时整次结果失败，输出门禁现在只对确实已删除的路径允许缺省行号，现有/未跟踪文件仍要求可验证行号；新增配置留出回归为 8/8。新增窄范围 SQL 触发器预检：同一 SQL 文件中 DROP/CREATE 名称仅差前后缀且至少一侧为新增行时，直接报告重放失败 P1；正负夹具已通过。对 `a8bf560` 的失败诊断已确认该预检准确定位 `sql/hr_assignment_history_integrity_upgrade.sql:33`，但由于完整模型重跑超时，尚未把修复后的结果替换为正式 scorecard。
+
+当前 tuned profile 重新执行 1 轮完整合成门禁仍通过：7 类正例全部命中、4 个 clean 对照通过、截断路径显式失败。上述修复提高了“发现必须可见”和迁移类高置信证据覆盖，但阶段 1 仍不能宣称达到生产级高可用，真实 P0/P1 留出分母需要继续扩大并避免同一凭据族重复计数。

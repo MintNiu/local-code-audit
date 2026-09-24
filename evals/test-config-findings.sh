@@ -46,7 +46,8 @@ final class Listener {
     }
 }
 EOF
-git -C "$repo" add application.yml Listener.java
+printf '%s\n' 'legacy placeholder' >"$repo/legacy.txt"
+git -C "$repo" add application.yml Listener.java legacy.txt
 git -C "$repo" commit -qm base
 cat >"$repo/application.yml" <<'EOF'
 # The listener accepts ports from 1 to 65535 inclusive.
@@ -125,6 +126,13 @@ P1 application.yml:999 - 端口默认值可能导致启动失败。
 EOF
 run_case incomplete-fields reject <<'EOF'
 P1 application.yml:2 - 端口默认值可能导致启动失败。
+EOF
+git -C "$repo" rm -q legacy.txt
+run_case deleted-file-without-current-line retain <<'EOF'
+信息 legacy.txt - 删除了历史占位文件，需确认部署或脚本仍不依赖该路径。
+影响：如果外部流程仍读取该文件，删除后可能导致发布或初始化失败。
+修复建议：确认所有消费者已迁移到替代文件或明确记录删除契约。
+验证方式：在全新检出和升级路径分别执行部署脚本，确认没有读取该文件的步骤。
 EOF
 
 [[ "$failures" == 0 ]] || {
