@@ -584,6 +584,8 @@ reserve 和 effective budget，方便后续复核。
 
 同日重新复核此前对象生命周期漏报提交 `platform-file:a9a1d4a`：当前 tuned profile 两次均完整结束，分别耗时 56/24 秒，文本 SHA-256 完全一致；两次都报告 `FileApplicationService.java:99-108` 删除数据库元数据却移除 `fileStorageService.delete(...)`，人工确认这是会留下 OSS/本地孤儿对象的真实 P1。当前独立 scorecard 为 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=1`、`false_positive=0`。该样本补充了不同于凭据、租户和迁移脚本的对象生命周期根因族；它仍是单提交证据，不外推为生产召回率。
 
+随后复核迁移兼容性提交 `platform-file:896dca8`：当前 tuned profile 两次完整结束，耗时 82/52 秒，结果 SHA-256 一致，均报告删除版本化 `V20260725__file_upload_session.sql` 导致已有数据库升级路径中断。README 同步删除迁移说明与 SQL 删除属于同一根因，人工将 3 个候选聚合为 1 条 P1，scorecard 为 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=3`、`false_positive=2`。该样本补充了对象生命周期之外的迁移兼容性根因族；没有现成迁移集成测试，因此只把父/子树差异和重复审查稳定性作为证据，不把测试缺口升级为 finding。
+
 ### 2026-09-25：新增按中台用户批量解析的租户隔离留出
 
 对新真实提交 `platform-system:3b90a2e` 做父提交快照审查。该提交增加按中台用户 ID 批量查询 HR 绑定关系的内部接口、应用服务和 MyBatis 查询；模型 54 秒完整返回 clean，两轮重复审查均 exit=0、文本和运行签名一致。人工逐行复核确认：应用层拒绝空列表、非正 ID 和超过 200 条输入并在查询前去重；SQL 同时约束映射与用户的 `tenant_id`、来源系统、逻辑删除状态，并通过参数化 `IN` 列表查询。当前没有可由差异直接证明的 P0/P1/P2/P3；私有 scorecard 为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`。当前合并树中的应用、控制器契约和 SQL 合约测试通过。该样本增加了不同于凭据族的真实租户/批量查询 clean 覆盖，但不增加 P0/P1 召回分母。

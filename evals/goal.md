@@ -64,6 +64,8 @@
 
 同日重新复核对象生命周期漏报提交 `platform-file:a9a1d4a`：当前 tuned profile 两次完整运行结果 SHA-256 一致，均命中删除元数据但移除对象存储清理的 P1；人工 scorecard 为 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=1`、`false_positive=0`。该证据补充独立对象生命周期根因族，但仍不足以替代更大规模的跨项目人工 holdout。
 
+随后复核迁移兼容性提交 `platform-file:896dca8`：当前 tuned profile 两次完整运行结果 SHA-256 一致，均命中删除版本化 `V20260725__file_upload_session.sql` 导致已有数据库升级路径中断的 P1；README 与 SQL 删除是同一根因，人工 scorecard 为 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=3`、`false_positive=2`。该样本补充迁移兼容性根因族，但没有迁移集成测试，仍只作为人工差异证据和稳定性留出。
+
 ### 2026-09-25 最新真实 clean 留出
 
 新增 `platform-system:3b90a2e` 租户/批量查询留出：模型完整返回 clean，两轮重复稳定；人工确认输入上限、去重、租户条件和逻辑删除条件均有直接证据，私有 scorecard 为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`。该样本扩展了非凭据类 clean 覆盖，但阶段 1 仍需要更多真实 P0/P1 根因，不能据此宣称达到生产级高可用。
