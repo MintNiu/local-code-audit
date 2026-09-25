@@ -62,6 +62,8 @@
 
 `platform-hr-service:a8bf560` 在 `num_ctx=32768`、9KB 分片下重新完整运行：28 个分片、554 秒、无截断。个人 tuned profile 命中两个经人工确认的 P1：配置中的字面量内部/OSS 令牌，以及 `sql/hr_assignment_history_integrity_upgrade.sql:33` 的触发器 DROP/CREATE 名称不一致。12 个候选中 8 个被人工确认误报，2 个因删除文件聚合和跨文件生成列定位不足标为 uncertain；新 scorecard 为 `gold_p0_p1=2`、`p0_p1_found=2`、`predicted_candidates=12`、`false_positive=8`、`output_complete=true`，该提交自身的 P0/P1 召回为 100%。这不是通用生产指标，且 554 秒延迟不适合日常默认审查；15KB 分片超时和旧 scorecard 继续保留作失败对照。
 
+同日重新复核对象生命周期漏报提交 `platform-file:a9a1d4a`：当前 tuned profile 两次完整运行结果 SHA-256 一致，均命中删除元数据但移除对象存储清理的 P1；人工 scorecard 为 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=1`、`false_positive=0`。该证据补充独立对象生命周期根因族，但仍不足以替代更大规模的跨项目人工 holdout。
+
 ### 2026-09-25 最新真实 clean 留出
 
 新增 `platform-system:3b90a2e` 租户/批量查询留出：模型完整返回 clean，两轮重复稳定；人工确认输入上限、去重、租户条件和逻辑删除条件均有直接证据，私有 scorecard 为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`。该样本扩展了非凭据类 clean 覆盖，但阶段 1 仍需要更多真实 P0/P1 根因，不能据此宣称达到生产级高可用。

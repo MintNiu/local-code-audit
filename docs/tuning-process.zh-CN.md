@@ -582,6 +582,8 @@ reserve 和 effective budget，方便后续复核。
 
 这次复测还暴露了评测层的一个可改进点：模型可以报告没有当前行号的已删除文件聚合候选，但人工 scorecard 目前只能将这类定位不足的候选记为 uncertain，不能安全地把它们计入 false-positive。后续若扩展标签解析，必须保持“定位不明确不计入指标”的 fail-closed 原则。
 
+同日重新复核此前对象生命周期漏报提交 `platform-file:a9a1d4a`：当前 tuned profile 两次均完整结束，分别耗时 56/24 秒，文本 SHA-256 完全一致；两次都报告 `FileApplicationService.java:99-108` 删除数据库元数据却移除 `fileStorageService.delete(...)`，人工确认这是会留下 OSS/本地孤儿对象的真实 P1。当前独立 scorecard 为 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=1`、`false_positive=0`。该样本补充了不同于凭据、租户和迁移脚本的对象生命周期根因族；它仍是单提交证据，不外推为生产召回率。
+
 ### 2026-09-25：新增按中台用户批量解析的租户隔离留出
 
 对新真实提交 `platform-system:3b90a2e` 做父提交快照审查。该提交增加按中台用户 ID 批量查询 HR 绑定关系的内部接口、应用服务和 MyBatis 查询；模型 54 秒完整返回 clean，两轮重复审查均 exit=0、文本和运行签名一致。人工逐行复核确认：应用层拒绝空列表、非正 ID 和超过 200 条输入并在查询前去重；SQL 同时约束映射与用户的 `tenant_id`、来源系统、逻辑删除状态，并通过参数化 `IN` 列表查询。当前没有可由差异直接证明的 P0/P1/P2/P3；私有 scorecard 为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`。当前合并树中的应用、控制器契约和 SQL 合约测试通过。该样本增加了不同于凭据族的真实租户/批量查询 clean 覆盖，但不增加 P0/P1 召回分母。
