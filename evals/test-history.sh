@@ -30,6 +30,9 @@ if [[ -n "${HISTORY_TEST_CURL_COUNT:-}" ]]; then
   if [[ "$count" -eq 2 ]]; then
     sleep 1
   fi
+  if [[ "$count" -eq 1 ]]; then
+    printf 'transient transport warning\n' >&2
+  fi
 fi
 printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
 EOF
@@ -55,6 +58,7 @@ commit="$(git -C "$repo" rev-parse HEAD)"
 
 stderr_file="$fixture_root/stderr"
 PATH="$fake_bin:$PATH" \
+  HISTORY_TEST_CURL_COUNT="$fixture_root/first-curl-count" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
@@ -65,9 +69,15 @@ grep -F "跳过重复提交清单行：$commit" "$stderr_file" >/dev/null
 grep -F $'status\tcompleted' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'configured_max_diff_bytes\t60000' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'chunk_count\t1' "$out_dir/$commit.meta.tsv" >/dev/null
+grep -F $'stderr_file\t' "$out_dir/$commit.meta.tsv" >/dev/null
 awk -F '\t' '$1 == "effective_max_diff_bytes" && $2 ~ /^[0-9]+$/ && $2 <= 60000 { found = 1 } END { exit(found ? 0 : 1) }' \
   "$out_dir/$commit.meta.tsv"
 [[ -s "$out_dir/$commit.txt" ]]
+if grep -F 'transient transport warning' "$out_dir/$commit.txt" >/dev/null; then
+  echo 'history result incorrectly contains stderr diagnostics' >&2
+  exit 1
+fi
+grep -F 'transient transport warning' "$out_dir/$commit.stderr.log" >/dev/null
 
 "$repo_root/evals/prepare-history-labels.sh" \
   --manifest "$manifest" --results "$out_dir" --labels-dir "$labels_out" >/dev/null

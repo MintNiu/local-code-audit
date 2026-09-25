@@ -251,6 +251,10 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   resolved_model_file="$temp_root/$commit.resolved-model"
   resolved_chunk_bytes_file="$temp_root/$commit.chunk-budget"
   resolved_trace_file="$temp_root/$commit.trace"
+  review_stdout_file="$temp_root/$commit.stdout"
+  review_stderr_file="$temp_root/$commit.stderr"
+  : >"$review_stdout_file"
+  : >"$review_stderr_file"
   resolved_model="unresolved"
   review_context_files=()
   context_hashes=()
@@ -288,7 +292,30 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_file" \
     OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE="$resolved_chunk_bytes_file" \
     OLLAMA_REVIEW_TRACE_FILE="$resolved_trace_file" \
-      "$review_script" "${review_args[@]}" >"$result_file" 2>&1 || exit_code=$?
+      "$review_script" "${review_args[@]}" >"$review_stdout_file" 2>"$review_stderr_file" || exit_code=$?
+    if [[ "$exit_code" -eq 0 ]]; then
+      # A successful retry may still have diagnostics from an earlier failed
+      # transport attempt. Keep the review result machine-readable: stderr is
+      # diagnostic metadata, never part of the finding text.
+      cp "$review_stdout_file" "$result_file"
+    else
+      # Preserve both streams for failed runs so the private result remains
+      # useful for diagnosis, while the non-zero status keeps it out of a
+      # scorecard.
+      {
+        cat "$review_stderr_file"
+        cat "$review_stdout_file"
+      } >"$result_file"
+      if [[ -s "$review_stderr_file" ]]; then
+        cat "$review_stderr_file" >&2
+      fi
+    fi
+  fi
+  stderr_log_file="$output_dir/$commit.stderr.log"
+  if [[ -s "$review_stderr_file" ]]; then
+    cp "$review_stderr_file" "$stderr_log_file"
+  else
+    rm -f "$stderr_log_file"
   fi
   end="$(date +%s)"
   if [[ "$context_prepare_failed" == false && -f "$result_file" && ${#review_context_files[@]} -gt 0 ]]; then
@@ -358,6 +385,12 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'exit_code\t%s\n' "$exit_code"
     printf 'elapsed_seconds\t%s\n' "$((end - start))"
     printf 'result_sha256\t%s\n' "$result_sha256"
+    if [[ -f "$stderr_log_file" ]]; then
+      printf 'stderr_sha256\t%s\n' "$(shasum -a 256 "$stderr_log_file" | awk '{print $1}')"
+      printf 'stderr_file\t%s\n' "$stderr_log_file"
+    else
+      printf 'stderr_sha256\t%s\n' ""
+    fi
     printf 'result_file\t%s\n' "$result_file"
   } >"$metadata_file"
 

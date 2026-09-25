@@ -109,20 +109,21 @@ for ((run = 2; run <= runs; run++)); do
       echo "历史评测 metadata 缺失: $relative_file（run-1 vs run-${run}）" >&2
       exit 1
     }
-    # elapsed_seconds is intentionally excluded from the repeatability
+    # elapsed_seconds and stderr diagnostics are intentionally excluded from
+    # the repeatability
     # signature.  Initial status rows carry elapsed time in their third field,
     # while per-chunk status rows carry it in their fourth field; those values
     # are expected to vary with machine load and must not be mistaken for
     # model/configuration drift. Keep status, exit code and input diff byte
     # count so a real change still fails.
     baseline_signature="$(awk -F '\t' '
-      $1 == "elapsed_seconds" || $1 == "result_file" { next }
+      $1 == "elapsed_seconds" || $1 == "result_file" || $1 == "stderr_sha256" || $1 == "stderr_file" { next }
       $1 == "initial_status" && NF >= 3 { printf "%s\t%s\n", $1, $2; next }
       $1 == "chunk_status" && NF >= 5 { printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $5; next }
       { print }
     ' "$baseline_meta")"
     current_signature="$(awk -F '\t' '
-      $1 == "elapsed_seconds" || $1 == "result_file" { next }
+      $1 == "elapsed_seconds" || $1 == "result_file" || $1 == "stderr_sha256" || $1 == "stderr_file" { next }
       $1 == "initial_status" && NF >= 3 { printf "%s\t%s\n", $1, $2; next }
       $1 == "chunk_status" && NF >= 5 { printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $5; next }
       { print }

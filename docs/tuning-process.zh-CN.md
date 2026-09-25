@@ -593,3 +593,9 @@ reserve 和 effective budget，方便后续复核。
 另对 `platform-erp-service:2c12dc9` 做资金充值幂等/并发留出：变更让相同账户、幂等号、金额和支付方式的重复请求返回 409，而不再重复确认凭证；人工复核确认凭证 `FOR UPDATE`、流水唯一键、账户余额更新和事务回滚顺序一致，未发现可由差异证明的 P0/P1/P2/P3。模型两轮均在 14 秒内完整返回 clean，私有 scorecard 为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`。该仓库当前没有充值专用并发集成测试，因此只把它记录为验证限制，不把“缺少测试”升级为代码问题；该样本补充了资金幂等与并发 clean 覆盖。
 
 同一 ERP 服务的 `e5c6aab` 串码替换提交也完成两轮留出：它新增直接确认时释放旧串码、占用新串码和草稿更新路径，模型两轮分别在 29/30 秒内完整返回 clean。人工逐条核对预览与确认的事务边界、旧占用释放、无串占用池和新串码状态校验后，未发现可由差异证明的 P0/P1/P2/P3；私有 scorecard 为 `gold_p0_p1=0`、`predicted_candidates=0`、`false_positive=0`。该仓库没有对应的串码替换集成测试，因此只记录为验证限制，不将测试缺口本身报告为 finding。
+
+### 2026-09-25：二十个历史提交的干净评测与诊断流隔离
+
+修复 `evals/run-history.sh` 的输出流处理：审查脚本现在把标准输出（可评分的 finding 文本）和标准错误（传输重试、诊断信息）分开保存。成功重试只把标准输出写入 `.txt`，诊断写入同一提交的私有 `.stderr.log` 并在 metadata 中记录 `stderr_sha256`；失败运行仍合并两条流以便排障，同时以非零退出码 fail-closed。这样一次暂时的 curl/Ollama 传输告警不会污染结果文本、改变候选数或误报 scorecard。`evals/test-history.sh` 新增“标准错误不进入成功结果、但保留诊断日志”的回归，重复评测签名明确忽略耗时与诊断日志路径/哈希，但继续比较结果文本、退出码、分片状态和配置签名。
+
+在该修复后，以当前 `devstral-small-2-review-tuned`（temperature=0、seed=42、num_ctx=16384）对 `platform-api` 20 个历史提交完成两轮完整复测：40 次运行全部 exit=0、输出完整，`run-history-repeat.sh` 的稳定性门禁通过。人工聚合同一风险根因后，当前 scorecard 为 `gold_p0_p1=3`、`p0_p1_found=3`、P0/P1 召回 100%、`predicted_candidates=12`、`false_positive=9`；三个确认根因分别是缺失 DTO 导致的构建阻断，以及两处从 URL 查询参数读取 `x-token`。`cbe47ea0` 单提交 8 条候选均为误报且耗时约 308 秒，说明当前稳定性已达标但误报和尾延迟仍是主要优化方向。20 个提交、3 个独立 P0/P1 根因的分母仍过小，不能宣称已达到生产级高可用，后续继续增加跨仓库、并发、权限和生命周期的人工 holdout。
