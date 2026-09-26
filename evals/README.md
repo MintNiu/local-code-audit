@@ -89,6 +89,17 @@ SQL 迁移预检还会识别同一文件内 DROP/CREATE 触发器名称仅差前
 
 构建器只输出 `review_status=complete` 且运行成功的提交；它会校验标签中的 `# source_result_sha256` 与所选结果文件内容完全一致，并逐条校验 confirmed/false-positive 的文件和行号与结果候选重叠，允许安全搬迁同一结果，拒绝把旧 profile/旧运行的标签套到不同结果上。`missed` 是人工记录的 false negative，必须使用 P0/P1、真实路径、正数行号和证据备注，并且不能与所选结果中的任何候选范围重叠；否则标签与结果矛盾，构建器会 fail-closed。`uncertain` 不计入指标。缺少结果、元数据或字段不完整会 fail-closed；失败时不会留下半成品输出。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
 
+对于跨事务/行锁风险，运行器会把受限的源码上下文送入 prompt，并额外执行一个窄范围的确定性反向锁序预检。预检只报告“候选”：它要求两个带 `@Transactional` 的源码段直接调用相同 `*ForUpdate` 接收者且顺序相反，并且至少一侧属于变更文件；它不证明相同数据库资源、调用可达性或真实死锁。候选在模型结果后合并，避免 prompt 重复；请用人工调用链审计和真实数据库并发测试确认，不要把候选直接当作最终真值。
+
+阶段一门禁用于阻止“样本不足却宣称高可用” ：
+
+```bash
+./evals/stage1-gate.sh \
+  --scorecard ~/.local/share/local-review/evals/stage1-scorecard.tsv
+```
+
+输入必须额外包含 `split`、`feature_cluster`、`location_accurate`、`output_complete` 和 `repeat_stable` 列。默认要求至少 20 个提交、至少 20 个 holdout P0/P1 根因、holdout 召回率和定位准确率不低于 90%、误报率不高于 10%，并拒绝不完整运行、重复提交和跨 split 功能簇泄漏。当前公开仓库的回归夹具会验证通过与失败路径；真实 scorecard 仍必须保存在私有目录并先完成人工标注。
+
 1. 固定至少 20 个真实历史提交作为评测集，并按提交切分训练示例和留出评测集。
    不要随机打散相邻提交；优先按功能簇（例如同一接口迁移、同一安全修复链）整体分配到 train/dev/holdout，避免相邻提交泄漏。
 2. P0/P1 真实问题召回率目标不低于 90%；如果样本不足，记录实际样本数，不得用主观印象替代指标。

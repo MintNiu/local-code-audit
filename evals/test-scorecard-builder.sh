@@ -39,6 +39,7 @@ seed	42
 num_ctx	16384
 status	completed
 exit_code	0
+output_complete	true
 elapsed_seconds	12
 EOF
 result_sha256="$(shasum -a 256 "$result_file" | awk '{print $1}')"
@@ -50,6 +51,35 @@ expected_header=$'commit\tmodel\ttemperature\tseed\tnum_ctx\tgold_p0_p1\tp0_p1_f
 grep -Fx "$expected_header" "$output" >/dev/null
 grep -F "$commit" "$output" | grep -F $'\t1\t1\t2\t1\ttrue\t12' >/dev/null
 "$repo_root/evals/summarize-scorecard.sh" "$output" | grep -F 'p0_p1_recall=100.0%' >/dev/null
+
+clean_with_finding_labels="$tmp_dir/clean-with-finding-labels"
+mkdir -p "$clean_with_finding_labels"
+cp "$labels_dir/$commit.labels.tsv" "$clean_with_finding_labels/$commit.labels.tsv"
+perl -0pi -e 's/^# verdict\tfindings$/# verdict\tclean/m' "$clean_with_finding_labels/$commit.labels.tsv"
+clean_with_finding_output="$tmp_dir/clean-with-finding.tsv"
+if "$repo_root/evals/build-scorecard.sh" --labels-dir "$clean_with_finding_labels" --results-dir "$results_dir" --out "$clean_with_finding_output" >/dev/null 2>&1; then
+  echo 'scorecard builder accepted verdict=clean with finding labels' >&2
+  exit 1
+fi
+[[ ! -e "$clean_with_finding_output" ]] || {
+  echo 'scorecard builder left output after verdict consistency failure' >&2
+  exit 1
+}
+
+incomplete_results="$tmp_dir/incomplete-results"
+mkdir -p "$incomplete_results"
+cp "$results_dir/$commit.txt" "$incomplete_results/$commit.txt"
+cp "$results_dir/$commit.meta.tsv" "$incomplete_results/$commit.meta.tsv"
+perl -0pi -e 's/^output_complete\ttrue$/output_complete\tfalse/m' "$incomplete_results/$commit.meta.tsv"
+incomplete_output="$tmp_dir/incomplete-scorecard.tsv"
+if "$repo_root/evals/build-scorecard.sh" --labels-dir "$labels_dir" --results-dir "$incomplete_results" --out "$incomplete_output" >/dev/null 2>&1; then
+  echo 'scorecard builder accepted output_complete=false' >&2
+  exit 1
+fi
+[[ ! -e "$incomplete_output" ]] || {
+  echo 'scorecard builder left output after incomplete-run rejection' >&2
+  exit 1
+}
 
 comma_labels="$tmp_dir/comma-labels"
 comma_results="$tmp_dir/comma-results"
@@ -79,6 +109,7 @@ seed	42
 num_ctx	16384
 status	completed
 exit_code	0
+output_complete	true
 elapsed_seconds	0
 EOF
 comma_output="$tmp_dir/comma-scorecard.tsv"

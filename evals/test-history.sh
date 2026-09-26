@@ -67,6 +67,7 @@ PATH="$fake_bin:$PATH" \
 
 grep -F "跳过重复提交清单行：$commit" "$stderr_file" >/dev/null
 grep -F $'status\tcompleted' "$out_dir/$commit.meta.tsv" >/dev/null
+grep -F $'output_complete\ttrue' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'configured_max_diff_bytes\t60000' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'chunk_count\t1' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'stderr_file\t' "$out_dir/$commit.meta.tsv" >/dev/null
@@ -141,6 +142,7 @@ if (( empty_status != 0 )); then
   exit 1
 fi
 grep -F $'status\tfailed' "$empty_out/$commit.meta.tsv" >/dev/null
+grep -F $'output_complete\tfalse' "$empty_out/$commit.meta.tsv" >/dev/null
 grep -F $'failure_reason\tempty-review-output' "$empty_out/$commit.meta.tsv" >/dev/null
 grep -F 'exit 0 但没有非空审查结果' "$empty_out/$commit.stderr.log" >/dev/null
 printf 'history empty-output fail-closed regression passed\n'

@@ -56,5 +56,7 @@ abcdef3	model	0	42	1	2	3	1	0	true	1	found exceeds gold"
 assert_rejected bad-boolean "$header
 abcdef4	model	0	42	1	0	0	0	0	maybe	1	bad boolean"
 assert_rejected bad-header $'commit\tmodel\tgold_p0_p1\tp0_p1_found'
+assert_rejected incomplete "$header
+abcdef6	model	0	42	1	1	1	1	0	false	1	incomplete"
 
 echo 'scorecard regression passed'

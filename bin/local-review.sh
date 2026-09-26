@@ -1684,28 +1684,36 @@ merge_preflight_findings() {
   local output_file="$1"
   local kind_file="$2"
   local preflight_file="$3"
+  local deterministic_file="${4:-}"
   local merged_file finding_preflight_file
 
-  [[ -s "$preflight_file" ]] || return 0
+  if [[ ! -s "$preflight_file" && ! -s "$deterministic_file" ]]; then
+    return 0
+  fi
   finding_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-finding-preflight.XXXXXX")"
   # Some preflight blocks are prompt-only context. They must reach the model
   # but must never be merged into the final finding stream or change a clean
   # response into an empty successful result.
-  awk '
-    BEGIN { RS = ""; ORS = "\n\n" }
-    index($0, "跨事务/行锁文本序列") == 0 { print }
-  ' "$preflight_file" >"$finding_preflight_file"
-  if [[ ! -s "$finding_preflight_file" ]]; then
-    rm -f "$finding_preflight_file"
-    return 0
+  if [[ -s "$preflight_file" ]]; then
+    awk '
+      BEGIN { RS = ""; ORS = "\n\n" }
+      index($0, "跨事务/行锁文本序列") == 0 { print }
+    ' "$preflight_file" >"$finding_preflight_file"
   fi
-  filter_security_preflight_duplicates "$output_file" "$finding_preflight_file"
+  if [[ -s "$finding_preflight_file" ]]; then
+    filter_security_preflight_duplicates "$output_file" "$finding_preflight_file"
+  fi
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
   {
     if grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$output_file"; then
       cat "$output_file"
     fi
-    cat "$finding_preflight_file"
+    if [[ -s "$finding_preflight_file" ]]; then
+      cat "$finding_preflight_file"
+    fi
+    if [[ -s "$deterministic_file" ]]; then
+      cat "$deterministic_file"
+    fi
   } | dedup_exact_findings | sort_findings_by_severity >"$merged_file"
   cat "$merged_file" >"$output_file"
   rm -f "$merged_file"
@@ -1831,9 +1839,11 @@ $(cat "$changed_paths_file")
 
 emit_preflight_failure_diagnostic() {
   local preflight_file="$1"
-  [[ -s "$preflight_file" ]] || return 0
+  local deterministic_file="${2:-}"
+  [[ -s "$preflight_file" || -s "$deterministic_file" ]] || return 0
   echo "本地代码审查未完成；以下是已确定的预检发现（整次审查仍按失败处理，不能视为完整结果）：" >&2
-  cat "$preflight_file" >&2
+  [[ -s "$preflight_file" ]] && cat "$preflight_file" >&2
+  [[ -s "$deterministic_file" ]] && cat "$deterministic_file" >&2
 }
 
 collect_build_preflight() {
@@ -3691,9 +3701,50 @@ collect_transaction_lock_preflight() {
   local repo_root="$3"
   local changed_path source_file changed_java_paths receiver_file receivers
   local candidate_paths_file candidate_dedup_file
-  local java_path java_file matches receiver_pattern changed_marker receiver_name related_receiver_count
-  local scanned_files=0 emitted_files=0
-  local max_files=8 max_lines=18
+  local java_path java_file matches sequence receiver_pattern changed_marker receiver_name related_receiver_count
+  local scanned_files=0 emitted_changed_files=0 emitted_related_files=0
+  local max_changed_files=8 max_related_files=8 max_lines=24
+
+  render_transaction_lock_context() {
+    local context_file="$1"
+    local context_limit="$2"
+    # Show source line numbers and a small window around every lock/transaction
+    # marker.  The previous implementation emitted only the matching line,
+    # which hid the method boundary and the order of adjacent lock calls from
+    # the model.  This remains prompt-only evidence; it is not a finding.
+    awk -v max_lines="$context_limit" '
+      {
+        source[NR] = $0
+      }
+      END {
+        emitted = 0
+        for (line_no = 1; line_no <= NR && emitted < max_lines; line_no++) {
+          if (source[line_no] !~ /@Transactional|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/) continue
+          start = line_no - 5
+          if (start < 1) start = 1
+          finish = line_no + 5
+          if (finish > NR) finish = NR
+          for (cursor = start; cursor <= finish && emitted < max_lines; cursor++) {
+            if (seen[cursor]++) continue
+            printf "  %d: %s\n", cursor, source[cursor]
+            emitted++
+          }
+        }
+      }
+    ' "$context_file"
+  }
+
+  render_transaction_lock_sequence() {
+    local sequence_file="$1"
+    # Keep a compact, complete list of lock calls even when context windows
+    # are capped.  This prevents an early method in a large service from
+    # hiding a later confirmation path that reverses the lock order.
+    awk '/[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/ {
+      text = $0
+      sub(/^[[:space:]]+/, "", text)
+      printf "  %d: %s\n", NR, text
+    }' "$sequence_file"
+  }
 
   # This is deliberately evidence, not a finding.  Text alone cannot prove
   # that two methods share a table, transaction, or reachable interleaving.
@@ -3747,7 +3798,7 @@ collect_transaction_lock_preflight() {
 
   while IFS= read -r java_path; do
     [[ -n "$java_path" ]] || continue
-    if (( scanned_files >= 120 || emitted_files >= max_files )); then
+    if (( scanned_files >= 500 )); then
       break
     fi
     ((scanned_files++))
@@ -3756,6 +3807,9 @@ collect_transaction_lock_preflight() {
     changed_marker='未变更关联文件'
     if printf '%s\n' "$changed_java_paths" | grep -Fxq -- "$java_path"; then
       changed_marker='变更文件'
+      if (( emitted_changed_files >= max_changed_files )); then
+        continue
+      fi
     fi
     if [[ -n "$receivers" ]]; then
       receiver_pattern="($receivers)"
@@ -3771,6 +3825,9 @@ collect_transaction_lock_preflight() {
           fi
         done < <(printf '%s\n' "$receivers" | tr '|' '\n')
         (( related_receiver_count >= 2 )) || continue
+        if (( emitted_related_files >= max_related_files )); then
+          continue
+        fi
       fi
     elif ! rg -q '@Transactional|find[A-Za-z0-9_]*ForUpdate|FOR[[:space:]]+UPDATE' "$java_file" 2>/dev/null; then
       continue
@@ -3778,14 +3835,157 @@ collect_transaction_lock_preflight() {
     if (( $(date +%s) >= review_deadline_epoch )); then
       break
     fi
-    matches="$(rg -n '@Transactional|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE' "$java_file" 2>/dev/null | head -n "$max_lines" || true)"
-    [[ -n "$matches" ]] || continue
+    matches="$(render_transaction_lock_context "$java_file" "$max_lines")"
+    sequence="$(render_transaction_lock_sequence "$java_file")"
+    [[ -n "$matches" || -n "$sequence" ]] || continue
     printf '%s（%s）：\n' "$java_path" "$changed_marker" >>"$output_file"
-    printf '%s\n' "$matches" | sed 's/^/  /' >>"$output_file"
-    ((emitted_files++))
+    if [[ -n "$sequence" ]]; then
+      printf '%s\n' '  锁调用顺序摘要（仅文本顺序，需结合方法边界核验）：' >>"$output_file"
+      printf '%s\n' "$sequence" >>"$output_file"
+    fi
+    printf '%s\n' "$matches" >>"$output_file"
+    if [[ "$changed_marker" == '变更文件' ]]; then
+      emitted_changed_files=$((emitted_changed_files + 1))
+    else
+      emitted_related_files=$((emitted_related_files + 1))
+    fi
   done <"$candidate_paths_file"
   rm -f "$candidate_paths_file"
   printf '%s\n\n' '--- 跨事务/行锁文本证据结束 ---' >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_transaction_lock_order_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local repo_root="$3"
+  local changed_java_paths candidate_paths_file records_file pairs_file
+  local java_path java_file
+
+  # This is intentionally narrower than a general deadlock proof: it only
+  # emits a candidate when the current snapshot contains two transaction-marked
+  # Java files/methods with the same direct ForUpdate receivers in opposite
+  # source order.  The finding keeps the uncertainty (same resource and
+  # reachable concurrency still need human confirmation) but prevents a model
+  # clean response from hiding a directly visible lock-order cycle.
+  changed_java_paths="$(awk '
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, ""); if (path ~ /\.java$/) print path }
+  ' "$diff_file" | LC_ALL=C sort -u)"
+  [[ -n "$changed_java_paths" ]] || return 0
+
+  candidate_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-candidates.XXXXXX")"
+  records_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-records.XXXXXX")"
+  pairs_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-pairs.XXXXXX")"
+  {
+    printf '%s\n' "$changed_java_paths"
+    lock_order_scan_remaining_seconds=$((review_deadline_epoch - $(date +%s)))
+    if (( lock_order_scan_remaining_seconds > 0 )); then
+      (
+        cd "$repo_root"
+        perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$lock_order_scan_remaining_seconds" \
+          rg -l --glob '*.java' '@Transactional|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(' . 2>/dev/null \
+          | sed 's#^\./##' || true
+      )
+    fi
+  } | awk 'NF && !seen[$0]++ { print }' >"$candidate_paths_file"
+
+  while IFS= read -r java_path; do
+    [[ -n "$java_path" ]] || continue
+    java_file="$repo_root/$java_path"
+    [[ -f "$java_file" ]] || continue
+    awk -v source_path="$java_path" '
+      /@Transactional/ { transaction_segment++ }
+      transaction_segment > 0 {
+        remaining = $0
+        while (match(remaining, /[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(/)) {
+          token = substr(remaining, RSTART, RLENGTH)
+          sub(/\..*/, "", token)
+          if (token != "this") printf "%s\t%d\t%d\t%s\n", source_path, FNR, transaction_segment, token
+          remaining = substr(remaining, RSTART + RLENGTH)
+        }
+      }
+    ' "$java_file" >>"$records_file"
+  done <"$candidate_paths_file"
+  if [[ ! -s "$records_file" ]]; then
+    rm -f "$candidate_paths_file" "$records_file" "$pairs_file"
+    return 0
+  fi
+  LC_ALL=C sort -t $'\t' -k1,1 -k3,3n -k2,2n -u "$records_file" -o "$records_file"
+
+  awk -F '\t' '
+    function flush(    i, j) {
+      if (path == "" || segment == "" || receiver_count < 2) {
+        path = ""; segment = ""; receiver_count = 0; delete receiver; delete first_line
+        return
+      }
+      for (i = 1; i <= receiver_count; i++) {
+        for (j = i + 1; j <= receiver_count; j++) {
+          printf "%s\t%s\t%s\t%s\t%s\t%s\n", path, segment, receiver[i], receiver[j], first_line[receiver[i]], first_line[receiver[j]]
+        }
+      }
+      path = ""; segment = ""; receiver_count = 0; delete receiver; delete first_line
+    }
+    {
+      if ($1 != path || $3 != segment) flush()
+      path = $1
+      segment = $3
+      if (!($4 in first_line)) {
+        receiver[++receiver_count] = $4
+        first_line[$4] = $2
+      }
+    }
+    END { flush() }
+  ' "$records_file" >"$pairs_file"
+  if [[ ! -s "$pairs_file" ]]; then
+    rm -f "$candidate_paths_file" "$records_file" "$pairs_file"
+    return 0
+  fi
+
+  awk -F '\t' -v changed_paths="$changed_java_paths" '
+    BEGIN {
+      split(changed_paths, changed_list, "\n")
+      for (i in changed_list) if (changed_list[i] != "") changed[changed_list[i]] = 1
+    }
+    {
+      key = $3 SUBSEP $4
+      reverse = $4 SUBSEP $3
+      if (reverse in path_by_pair && !(path_by_pair[reverse] == $1 && segment_by_pair[reverse] == $2)) {
+        primary_path = ""
+        primary_first = primary_second = ""
+        other_path = path_by_pair[reverse]
+        other_first = first_by_pair[reverse]
+        other_second = second_by_pair[reverse]
+        counterpart_path = other_path
+        if ($1 in changed) {
+          primary_path = $1
+          primary_first = $5
+          primary_second = $6
+        } else if (other_path in changed) {
+          primary_path = other_path
+          primary_first = other_first
+          primary_second = other_second
+          counterpart_path = $1
+          swap = $3
+          $3 = $4
+          $4 = swap
+        }
+        if (primary_path != "") {
+          pair_name = ($3 < $4 ? $3 SUBSEP $4 : $4 SUBSEP $3)
+          dedup_key = primary_path SUBSEP pair_name
+          if (!(dedup_key in emitted) && emitted_count < 8) {
+            emitted[dedup_key] = 1
+            printf "P1 %s:%s,%s - 事务内行锁存在反向锁序候选：%s 中按 %s→%s 获取锁，而 %s 中按 %s→%s 获取锁。\n影响：如果这些接收者代表相同数据库资源且两条事务路径可并发，可能形成循环等待、死锁或长时间阻塞；当前证据仍需确认资源映射和可达调用链。\n修复建议：统一所有事务对共享资源的锁定顺序，或按稳定键排序后再获取锁，并补充并发回归。\n验证方式：在真实数据库中并发执行两条路径，检查死锁/锁等待日志，并验证统一顺序后请求均能完成。\n\n", primary_path, primary_first, primary_second, primary_path, $3, $4, counterpart_path, $4, $3
+            emitted_count++
+          }
+        }
+      }
+      path_by_pair[key] = $1
+      segment_by_pair[key] = $2
+      first_by_pair[key] = $5
+      second_by_pair[key] = $6
+    }
+  ' "$pairs_file" >>"$output_file"
+  rm -f "$candidate_paths_file" "$records_file" "$pairs_file"
   dedup_preflight_blocks "$output_file"
 }
 
@@ -3800,11 +4000,12 @@ cross_file_evidence_reserve_tokens=0
 changed_imports_file="$(mktemp "${TMPDIR:-/tmp}/local-review-imports.XXXXXX")"
 deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX")"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
+deterministic_lock_order_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-findings.XXXXXX")"
 java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
@@ -3936,6 +4137,7 @@ collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
 collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
+collect_transaction_lock_order_preflight "$chunk_input_file" "$deterministic_lock_order_file" "$repo_root"
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames
@@ -3950,7 +4152,7 @@ if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   exit 1
 fi
 if ! resolve_chunk_budget "$max_diff_bytes"; then
-  emit_preflight_failure_diagnostic "$build_preflight_file"
+  emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
   exit 1
 fi
 needs_split=false
@@ -3966,12 +4168,12 @@ if [[ "$needs_split" != true ]]; then
   write_review_trace "$trace_line"
   if [[ "$initial_status" -eq 0 ]]; then
     write_review_trace $'chunk_count\t1'
-    merge_preflight_findings "$response_output_file" "$response_kind_file" "$build_preflight_file"
+    merge_preflight_findings "$response_output_file" "$response_kind_file" "$build_preflight_file" "$deterministic_lock_order_file"
     cat "$response_output_file"
     exit 0
   fi
   if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 && "$initial_status" -ne 13 ]]; then
-    emit_preflight_failure_diagnostic "$build_preflight_file"
+    emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
     exit 1
   fi
 fi
@@ -3981,7 +4183,7 @@ chunk_count="$(cat "$chunk_dir/count")"
 printf -v trace_line 'chunk_count\t%s' "$chunk_count"
 write_review_trace "$trace_line"
 if [[ "$(cat "$chunk_dir/oversized")" == true ]]; then
-  emit_preflight_failure_diagnostic "$build_preflight_file"
+  emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
   echo "本地代码审查失败：存在无法在 ${effective_max_diff_bytes} 字节预算内拆分的单个文件/hunk；请缩小 diff、提供上下文或提高 OLLAMA_REVIEW_MAX_DIFF_BYTES 后重试。" >&2
   if [[ -s "$chunk_dir/oversized-details" ]]; then
     echo "无法拆分的分片单元（仅诊断）: $(cat "$chunk_dir/oversized-details")" >&2
@@ -3990,10 +4192,10 @@ if [[ "$(cat "$chunk_dir/oversized")" == true ]]; then
 fi
 if [[ "$chunk_count" -le 1 ]]; then
   if [[ "$needs_split" == true ]]; then
-    emit_preflight_failure_diagnostic "$build_preflight_file"
+    emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
     echo "本地代码审查失败：差异超过 ${effective_max_diff_bytes} 字节，但无法按文件分片；请使用 --context 或缩小 diff 后重试。" >&2
   else
-    emit_preflight_failure_diagnostic "$build_preflight_file"
+    emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
   fi
   exit 1
 fi
@@ -4001,7 +4203,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
@@ -4130,7 +4332,7 @@ $(cat "$changed_paths_file")
   write_review_trace "$trace_line"
   num_predict="$original_num_predict"
   if [[ "$chunk_status" -ne 0 ]]; then
-    emit_preflight_failure_diagnostic "$build_preflight_file"
+    emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
     echo "本地代码审查失败：以下是已完成分片的原始结果（仅供定位，整次审查不完整，不能视为通过）：" >&2
     for completed_output in "$chunk_output_dir"/*.txt; do
       [[ -f "$completed_output" ]] || continue
@@ -4140,7 +4342,7 @@ $(cat "$changed_paths_file")
     echo "本地代码审查失败：分片 $chunk_name 未完成，整次审查失败；已完成分片仅作诊断，不作为完整结果返回。" >&2
     exit 1
   fi
-  merge_preflight_findings "$chunk_output" "$chunk_kind" "$chunk_preflight_file"
+  merge_preflight_findings "$chunk_output" "$chunk_kind" "$chunk_preflight_file" "$deterministic_lock_order_file"
 done
 
 has_findings=false

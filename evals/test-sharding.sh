@@ -37,7 +37,11 @@ request_file=""
 for ((i = 1; i <= $#; i++)); do
   if [[ "${!i}" == @* ]]; then
     request_file="${!i#@}"
-    cat "$request_file" >>"$LOCAL_REVIEW_CAPTURE"
+    if jq -e '.input // .prompt // empty' "$request_file" >/dev/null 2>&1; then
+      jq -r '.input // .prompt // empty' "$request_file" >>"$LOCAL_REVIEW_CAPTURE"
+    else
+      cat "$request_file" >>"$LOCAL_REVIEW_CAPTURE"
+    fi
     printf '\n--- request boundary ---\n' >>"$LOCAL_REVIEW_CAPTURE"
   fi
 done
@@ -203,8 +207,9 @@ grep -F 'PlatformProperties.java：跨文件符号文本索引显示 requireInte
 }
 
 # Transaction/row-lock evidence must include unchanged related operations so
-# the model can compare lock sequences across files without turning text
-# matches into automatic findings.
+# the model can compare lock sequences across files. A directly visible
+# reverse sequence is also emitted as a conservative deterministic candidate;
+# the prompt-only evidence itself must never leak into the final output.
 lock_repo="$fixture_root/lock-repo"
 lock_capture="$fixture_root/lock-requests"
 mkdir -p "$lock_repo/src/main/java/com/example"
@@ -259,8 +264,8 @@ lock_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$lock_capture" \
   OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
   OLLAMA_REVIEW_NUM_CTX=16384 \
   "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
-[[ "$lock_output" == '未发现阻塞问题' ]] || {
-  echo 'prompt-only lock evidence changed a clean result' >&2
+grep -F 'P1 src/main/java/com/example/ReturnService.java:9,10 - 事务内行锁存在反向锁序候选' <<<"$lock_output" >/dev/null || {
+  echo 'deterministic reverse lock-order candidate was not emitted' >&2
   printf '%s\n' "$lock_output" >&2
   exit 1
 }
@@ -278,6 +283,27 @@ grep -F 'InspectionService.java（未变更关联文件）' "$lock_capture" >/de
 }
 grep -F 'findByIdForUpdate' "$lock_capture" >/dev/null || {
   echo 'transaction lock evidence did not include row-lock calls' >&2
+  exit 1
+}
+extract_lock_block() {
+  local target="$1"
+  awk -v target="$target" '
+    index($0, target "（") { in_block = 1; next }
+    in_block && /^--- 跨事务\/行锁文本证据结束 ---/ { exit }
+    in_block && /\.java（/ { exit }
+    in_block { print }
+  ' "$lock_capture"
+}
+return_order="$(extract_lock_block 'ReturnService.java' | grep -oE '[a-z][A-Za-z0-9_]*Repository\.findByIdForUpdate' | sed 's/\.findByIdForUpdate$//' | awk '!seen[$0]++' | paste -sd '>' -)"
+[[ "$return_order" == 'salesOrderRepository>returnRepository' ]] || {
+  echo 'changed transaction lock order was not preserved in evidence' >&2
+  printf '%s\n' "$return_order" >&2
+  exit 1
+}
+inspection_order="$(extract_lock_block 'InspectionService.java' | grep -oE '[a-z][A-Za-z0-9_]*Repository\.findByIdForUpdate' | sed 's/\.findByIdForUpdate$//' | awk '!seen[$0]++' | paste -sd '>' -)"
+[[ "$inspection_order" == 'inspectionRepository>returnRepository>salesOrderRepository' ]] || {
+  echo 'unchanged transaction lock order was not preserved in evidence' >&2
+  printf '%s\n' "$inspection_order" >&2
   exit 1
 }
 echo 'diff sharding regression passed'

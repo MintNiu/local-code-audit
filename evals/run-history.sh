@@ -399,6 +399,10 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     exit_code=12
     failure_reason="missing-resolved-model"
   fi
+  output_complete=false
+  if [[ "$exit_code" -eq 0 && -f "$result_file" ]] && LC_ALL=C grep -q '[^[:space:]]' "$result_file"; then
+    output_complete=true
+  fi
   result_sha256="unavailable"
   if [[ -f "$result_file" ]]; then
     result_sha256="$(shasum -a 256 "$result_file" | awk '{print $1}')"
@@ -458,6 +462,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
       printf 'status\tfailed\n'
     fi
     printf 'exit_code\t%s\n' "$exit_code"
+    printf 'output_complete\t%s\n' "$output_complete"
     printf 'failure_reason\t%s\n' "$failure_reason"
     printf 'elapsed_seconds\t%s\n' "$((end - start))"
     printf 'result_sha256\t%s\n' "$result_sha256"

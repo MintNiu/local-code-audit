@@ -76,6 +76,23 @@ while IFS= read -r label_file; do
   [[ -f "$label_file" ]] || continue
   review_status="$(awk -F '\t' '$1 == "# review_status" { print $2; exit }' "$label_file")"
   [[ "$review_status" == "complete" ]] || continue
+  verdict="$(awk -F '\t' '$1 == "# verdict" { print $2; exit }' "$label_file")"
+  case "$verdict" in
+    clean|findings) ;;
+    *)
+      echo "标签缺少有效 verdict（必须是 clean 或 findings）: $label_file" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$verdict" == "clean" ]]; then
+    if awk -F '\t' '$1 !~ /^#/ && NF > 0 { found = 1 } END { exit(found ? 0 : 1) }' "$label_file"; then
+      echo "verdict=clean 不能包含 finding 标签行: $label_file" >&2
+      exit 1
+    fi
+  elif ! awk -F '\t' '$1 !~ /^#/ && NF >= 6 && ($5 == "confirmed" || $5 == "missed" || $5 == "false-positive") { found = 1 } END { exit(found ? 0 : 1) }' "$label_file"; then
+    echo "verdict=findings 至少需要一条 confirmed、missed 或 false-positive 标签: $label_file" >&2
+    exit 1
+  fi
   commit="$(awk -F '\t' '$1 == "# commit" { print $2; exit }' "$label_file")"
   [[ "$commit" =~ ^[0-9a-fA-F]{7,64}$ ]] || {
     echo "标签缺少有效 commit: $label_file" >&2
@@ -110,6 +127,11 @@ while IFS= read -r label_file; do
   exit_code="$(awk -F '\t' '$1 == "exit_code" { print $2; exit }' "$meta_file")"
   [[ "$status" == "completed" && "$exit_code" == "0" ]] || {
     echo "标签标为 complete 但运行未成功: $commit" >&2
+    exit 1
+  }
+  output_complete="$(awk -F '\t' '$1 == "output_complete" { print $2; exit }' "$meta_file")"
+  [[ "$output_complete" == "true" ]] || {
+    echo "标签标为 complete 但结果没有 output_complete=true: $commit" >&2
     exit 1
   }
 

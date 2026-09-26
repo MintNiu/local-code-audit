@@ -52,6 +52,7 @@ awk -F '\t' '
       if ($metric_column !~ /^[0-9]+$/) fail("指标必须是非负整数，第 " NR " 行第 " metric_column " 列: " $metric_column)
     }
     if ($complete_column != "true" && $complete_column != "false") fail("output_complete 必须是 true 或 false，第 " NR " 行: " $complete_column)
+    if ($complete_column != "true") fail("不完整运行不能进入召回汇总，第 " NR " 行: " $commit_column)
     if ($elapsed_column !~ /^[0-9]+$/) fail("elapsed_seconds 必须是非负整数，第 " NR " 行: " $elapsed_column)
     if (($found_column + 0) > ($gold_column + 0)) fail("p0_p1_found 不能大于 gold_p0_p1，第 " NR " 行")
     if (($false_positive_column + 0) > ($candidates_column + 0)) fail("false_positive_count 不能大于 predicted_candidates，第 " NR " 行")
