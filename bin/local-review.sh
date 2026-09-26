@@ -1684,19 +1684,32 @@ merge_preflight_findings() {
   local output_file="$1"
   local kind_file="$2"
   local preflight_file="$3"
-  local merged_file
+  local merged_file finding_preflight_file
 
   [[ -s "$preflight_file" ]] || return 0
-  filter_security_preflight_duplicates "$output_file" "$preflight_file"
+  finding_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-finding-preflight.XXXXXX")"
+  # Some preflight blocks are prompt-only context. They must reach the model
+  # but must never be merged into the final finding stream or change a clean
+  # response into an empty successful result.
+  awk '
+    BEGIN { RS = ""; ORS = "\n\n" }
+    index($0, "跨事务/行锁文本序列") == 0 { print }
+  ' "$preflight_file" >"$finding_preflight_file"
+  if [[ ! -s "$finding_preflight_file" ]]; then
+    rm -f "$finding_preflight_file"
+    return 0
+  fi
+  filter_security_preflight_duplicates "$output_file" "$finding_preflight_file"
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
   {
     if grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$output_file"; then
       cat "$output_file"
     fi
-    cat "$preflight_file"
+    cat "$finding_preflight_file"
   } | dedup_exact_findings | sort_findings_by_severity >"$merged_file"
   cat "$merged_file" >"$output_file"
   rm -f "$merged_file"
+  rm -f "$finding_preflight_file"
   printf 'findings\n' >"$kind_file"
 }
 
@@ -3672,6 +3685,110 @@ collect_sql_trigger_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_transaction_lock_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local repo_root="$3"
+  local changed_path source_file changed_java_paths receiver_file receivers
+  local candidate_paths_file candidate_dedup_file
+  local java_path java_file matches receiver_pattern changed_marker receiver_name related_receiver_count
+  local scanned_files=0 emitted_files=0
+  local max_files=8 max_lines=18
+
+  # This is deliberately evidence, not a finding.  Text alone cannot prove
+  # that two methods share a table, transaction, or reachable interleaving.
+  # It is nevertheless useful for the model when a changed transaction locks
+  # a resource that is also locked by an unchanged operation elsewhere.
+  changed_java_paths="$(awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); if (path ~ /\.java$/) print path }
+  ' "$diff_file" | LC_ALL=C sort -u)"
+  [[ -n "$changed_java_paths" ]] || return 0
+
+  receiver_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-receivers.XXXXXX")"
+  while IFS= read -r changed_path; do
+    [[ -n "$changed_path" ]] || continue
+    source_file="$repo_root/$changed_path"
+    [[ -f "$source_file" ]] || continue
+    rg -o '[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(' "$source_file" 2>/dev/null \
+      | sed -E 's/\..*$//' >>"$receiver_file" || true
+    if rg -q '@Transactional|find[A-Za-z0-9_]*ForUpdate|FOR[[:space:]]+UPDATE' "$source_file" 2>/dev/null; then
+      printf '%s\n' '__transaction_or_lock_text__' >>"$receiver_file"
+    fi
+  done <<<"$changed_java_paths"
+  LC_ALL=C sort -u -o "$receiver_file" "$receiver_file"
+  if [[ ! -s "$receiver_file" ]]; then
+    rm -f "$receiver_file"
+    return 0
+  fi
+  receivers="$(grep -v '^__transaction_or_lock_text__$' "$receiver_file" | sed '/^$/d' | head -n 8 | paste -sd '|' -)"
+  rm -f "$receiver_file"
+
+  printf '%s\n' '--- 构建预检（确定性证据：跨事务/行锁文本序列；仅供模型核验） ---' >>"$output_file"
+  printf '%s\n' '说明：以下仅表示源码中的事务注解与 FOR UPDATE 调用文本，不能单独证明同表、同事务或可达并发；不得仅凭此段自动升级为问题。' >>"$output_file"
+
+  candidate_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-candidates.XXXXXX")"
+  {
+    printf '%s\n' "$changed_java_paths"
+    lock_scan_remaining_seconds=$((review_deadline_epoch - $(date +%s)))
+    if (( lock_scan_remaining_seconds > 0 )); then
+      (
+        cd "$repo_root"
+        perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$lock_scan_remaining_seconds" \
+          rg -l --glob '*.java' \
+          '@Transactional|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE' \
+          . 2>/dev/null | sed 's#^\./##' || true
+      )
+    fi
+  } >"$candidate_paths_file"
+  candidate_dedup_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-candidates-dedup.XXXXXX")"
+  awk 'NF && !seen[$0]++ { print }' "$candidate_paths_file" >"$candidate_dedup_file"
+  mv "$candidate_dedup_file" "$candidate_paths_file"
+
+  while IFS= read -r java_path; do
+    [[ -n "$java_path" ]] || continue
+    if (( scanned_files >= 120 || emitted_files >= max_files )); then
+      break
+    fi
+    ((scanned_files++))
+    java_file="$repo_root/$java_path"
+    [[ -f "$java_file" ]] || continue
+    changed_marker='未变更关联文件'
+    if printf '%s\n' "$changed_java_paths" | grep -Fxq -- "$java_path"; then
+      changed_marker='变更文件'
+    fi
+    if [[ -n "$receivers" ]]; then
+      receiver_pattern="($receivers)"
+      # Always keep changed lock-bearing files; unchanged files must share a
+      # pair of receivers with the changed set or they would add unrelated
+      # lock noise from an otherwise unrelated transaction.
+      if [[ "$changed_marker" != '变更文件' ]]; then
+        related_receiver_count=0
+        while IFS= read -r receiver_name; do
+          [[ -n "$receiver_name" ]] || continue
+          if rg -q "${receiver_name}[[:space:]]*\." "$java_file" 2>/dev/null; then
+            related_receiver_count=$((related_receiver_count + 1))
+          fi
+        done < <(printf '%s\n' "$receivers" | tr '|' '\n')
+        (( related_receiver_count >= 2 )) || continue
+      fi
+    elif ! rg -q '@Transactional|find[A-Za-z0-9_]*ForUpdate|FOR[[:space:]]+UPDATE' "$java_file" 2>/dev/null; then
+      continue
+    fi
+    if (( $(date +%s) >= review_deadline_epoch )); then
+      break
+    fi
+    matches="$(rg -n '@Transactional|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE' "$java_file" 2>/dev/null | head -n "$max_lines" || true)"
+    [[ -n "$matches" ]] || continue
+    printf '%s（%s）：\n' "$java_path" "$changed_marker" >>"$output_file"
+    printf '%s\n' "$matches" | sed 's/^/  /' >>"$output_file"
+    ((emitted_files++))
+  done <"$candidate_paths_file"
+  rm -f "$candidate_paths_file"
+  printf '%s\n\n' '--- 跨事务/行锁文本证据结束 ---' >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
@@ -3818,6 +3935,7 @@ collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$re
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
+collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames
@@ -3960,6 +4078,16 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
     {
       header = $0
       sub(/[\r\n].*$/, "", header)
+      # The lock-order block is prompt-only evidence rather than a finding
+      # tied to one path.  Route it to Java shards, including the unchanged
+      # related files named inside the block, so split reviews can compare
+      # transaction/row-lock sequences across files.
+      if (index(header, "跨事务/行锁文本序列") > 0) {
+        for (path in allowed) if (path ~ /\.java$/) {
+          print $0
+          next
+        }
+      }
       sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
       # Keep comma-separated locations (for example `:3,4,5`) attached to
       # the same path when routing aggregated deterministic findings.

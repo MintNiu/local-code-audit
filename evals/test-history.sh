@@ -95,3 +95,88 @@ PATH="$fake_bin:$PATH" \
 grep -F 'history repeat stability passed: runs=2, commits=1' "$fixture_root/repeat-stdout" >/dev/null
 cmp -s "$repeat_out/run-1/$commit.txt" "$repeat_out/run-2/$commit.txt"
 printf 'history duplicate regression passed\n'
+
+# Parent validation is fail-closed and must happen before any model transport.
+invalid_manifest="$fixture_root/invalid-parent.tsv"
+invalid_out="$fixture_root/invalid-parent-results"
+invalid_old_parent="$commit"
+printf 'commit\tparent\tdate\tsubject\tstatus\n%s\t%s\t2026-09-14\tinvalid parent\tpending-human-label\n' "$commit" "$invalid_old_parent" >"$invalid_manifest"
+invalid_curl_count="$fixture_root/invalid-curl-count"
+PATH="$fake_bin:$PATH" \
+  HISTORY_TEST_CURL_COUNT="$invalid_curl_count" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/evals/run-history.sh" \
+    --repo "$repo" --manifest "$invalid_manifest" --out-dir "$invalid_out" >/dev/null 2>"$fixture_root/invalid-stderr"
+grep -F $'status\tinvalid-range' "$invalid_out/$commit.meta.tsv" >/dev/null
+grep -F $'failure_reason\tparent-is-not-a-direct-parent' "$invalid_out/$commit.meta.tsv" >/dev/null
+[[ ! -e "$invalid_curl_count" ]]
+grep -F '未调用审计器' "$fixture_root/invalid-stderr" >/dev/null
+printf 'history invalid-parent fail-closed regression passed\n'
+
+# An exit-0 reviewer with only whitespace is not a completed review.
+fake_workflow="$fixture_root/workflow"
+mkdir -p "$fake_workflow/bin" "$fake_workflow/evals"
+git -C "$fake_workflow" init -q
+cp "$repo_root/evals/run-history.sh" "$fake_workflow/evals/run-history.sh"
+chmod +x "$fake_workflow/evals/run-history.sh"
+cat >"$fake_workflow/bin/local-review.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "fake-core" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"
+printf '   \n\t\n'
+EOF
+cat >"$fake_workflow/bin/local-review-local.sh" <<'EOF'
+#!/usr/bin/env bash
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-review.sh" "$@"
+EOF
+chmod +x "$fake_workflow/bin/"*.sh
+empty_out="$fixture_root/empty-results"
+empty_status=0
+PATH="$fake_bin:$PATH" \
+  OLLAMA_REVIEW_MODEL=fake \
+  "$fake_workflow/evals/run-history.sh" \
+    --repo "$repo" --manifest "$manifest" --out-dir "$empty_out" >/dev/null 2>"$fixture_root/empty-stderr" || empty_status=$?
+if (( empty_status != 0 )); then
+  cat "$fixture_root/empty-stderr" >&2
+  echo "empty-output history fixture exited unexpectedly: $empty_status" >&2
+  exit 1
+fi
+grep -F $'status\tfailed' "$empty_out/$commit.meta.tsv" >/dev/null
+grep -F $'failure_reason\tempty-review-output' "$empty_out/$commit.meta.tsv" >/dev/null
+grep -F 'exit 0 但没有非空审查结果' "$empty_out/$commit.stderr.log" >/dev/null
+printf 'history empty-output fail-closed regression passed\n'
+
+# The reviewer is copied before execution. Mutating source scripts while the
+# frozen run is sleeping must not change its output or recorded hashes.
+cat >"$fake_workflow/bin/local-review-local.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 1
+printf '%s\n' "fake-core" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"
+printf 'FROZEN-REVIEW\n'
+EOF
+chmod +x "$fake_workflow/bin/local-review-local.sh"
+race_out="$fixture_root/race-results"
+(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=fake \
+  "$fake_workflow/evals/run-history.sh" \
+    --repo "$repo" --manifest "$manifest" --out-dir "$race_out" >"$fixture_root/race-stdout" 2>"$fixture_root/race-stderr") &
+history_pid=$!
+sleep 0.2
+cat >"$fake_workflow/bin/local-review-local.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "fake-mutated" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"
+printf 'MUTATED-REVIEW\n'
+EOF
+cat >"$fake_workflow/bin/local-review.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "fake-mutated" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"
+printf 'MUTATED-CORE\n'
+EOF
+chmod +x "$fake_workflow/bin/"*.sh
+wait "$history_pid"
+grep -Fx 'FROZEN-REVIEW' "$race_out/$commit.txt" >/dev/null
+if grep -Fx 'MUTATED-REVIEW' "$race_out/$commit.txt" >/dev/null; then
+  echo 'frozen history result unexpectedly used mutated wrapper' >&2
+  exit 1
+fi
+grep -F $'review_scripts_snapshot\ttrue' "$race_out/$commit.meta.tsv" >/dev/null
+grep -F $'review_script\tbin/local-review-local.sh\tsha256=' "$race_out/$commit.meta.tsv" >/dev/null
+printf 'history reviewer snapshot race regression passed\n'

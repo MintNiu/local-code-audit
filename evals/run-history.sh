@@ -20,6 +20,7 @@ usage() {
 选项:
   --repo <dir>       本地 Git 仓库，只读读取提交和差异
   --manifest <file>  私有 TSV 清单，第一行必须是表头
+                     parent 必须是 commit 的直接父；合并提交可选任一直接父
   --out-dir <dir>    私有结果目录，不要指向公开仓库
   --limit <n>        只运行前 n 个 pending-human-label 提交
   --commit <sha>     只运行指定的 pending-human-label 提交
@@ -155,6 +156,38 @@ workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v shasum >/dev/null 2>&1 || { echo "历史评测需要 shasum 记录审计器版本。" >&2; exit 2; }
 workflow_git_revision="$(git -C "$workflow_root" rev-parse HEAD 2>/dev/null || printf 'not-a-git-checkout')"
 workflow_dirty="$(git -C "$workflow_root" status --short 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+# Freeze the wrapper and its sibling implementation together. Executing an
+# already-open shell script is not a snapshot: shells can read later sections
+# after another process has edited the file, and wrappers resolve siblings at
+# exec time. All commits in this invocation must use these exact same bytes.
+review_snapshot="$temp_root/reviewer"
+mkdir -p "$review_snapshot/bin"
+reviewer_script_manifest() {
+  local script_path
+  for script_path in "$1"/*.sh; do
+    [[ -f "$script_path" ]] || continue
+    printf '%s\t%s\n' "${script_path##*/}" "$(shasum -a 256 "$script_path" | awk '{print $1}')"
+  done | LC_ALL=C sort
+}
+reviewer_script_manifest "$workflow_root/bin" >"$temp_root/reviewer-before.tsv"
+for script_path in "$workflow_root/bin"/*.sh; do
+  [[ -f "$script_path" ]] || continue
+  cp -p "$script_path" "$review_snapshot/bin/"
+done
+reviewer_script_manifest "$review_snapshot/bin" >"$temp_root/reviewer-snapshot.tsv"
+reviewer_script_manifest "$workflow_root/bin" >"$temp_root/reviewer-after.tsv"
+if ! cmp -s "$temp_root/reviewer-before.tsv" "$temp_root/reviewer-snapshot.tsv" || \
+   ! cmp -s "$temp_root/reviewer-after.tsv" "$temp_root/reviewer-snapshot.tsv"; then
+  echo "历史评测无效：冻结审计器期间 bin 脚本发生变化，请在编辑完成后重试。" >&2
+  exit 12
+fi
+[[ -x "$review_snapshot/bin/local-review.sh" && -x "$review_snapshot/bin/local-review-local.sh" ]] || {
+  echo "历史评测无效：审计器快照缺少可执行的 core 或 personal wrapper。" >&2
+  exit 12
+}
+chmod a-w "$review_snapshot/bin/"*.sh
+review_scripts_sha256="$(shasum -a 256 "$temp_root/reviewer-snapshot.tsv" | awk '{print $1}')"
+review_core_sha256="$(shasum -a 256 "$review_snapshot/bin/local-review.sh" | awk '{print $1}')"
 modelfile_path="$workflow_root/config/Modelfile"
 modelfile_sha256="unavailable"
 system_sha256="unavailable"
@@ -172,28 +205,46 @@ if [[ -f "$modelfile_path" ]]; then
   fi
 fi
 if [[ "$profile" == "personal" ]]; then
-  review_script="$workflow_root/bin/local-review-local.sh"
+  review_script="$review_snapshot/bin/local-review-local.sh"
   profile_num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
   profile_num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
   profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
   profile_chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-4096}"
   profile_keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-5m}"
 else
-  review_script="$workflow_root/bin/local-review.sh"
+  review_script="$review_snapshot/bin/local-review.sh"
   profile_num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
   profile_num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
   profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
   profile_chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
   profile_keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
 fi
+review_script_sha256="$(shasum -a 256 "$review_script" | awk '{print $1}')"
 review_model="${OLLAMA_REVIEW_MODEL:-auto:tuned→review→base}"
 review_temperature="${OLLAMA_REVIEW_TEMPERATURE:-0}"
 review_seed="${OLLAMA_REVIEW_SEED:-42}"
 review_top_k="${OLLAMA_REVIEW_TOP_K:-40}"
 review_top_p="${OLLAMA_REVIEW_TOP_P:-0.9}"
 count=0
+manifest_row=1
+
+record_invalid_range() {
+  local invalid_id="$commit"
+  # Invalid input must not be used as an output path (or overwrite a prior
+  # successful result through path traversal).
+  [[ "$invalid_id" =~ ^[0-9a-fA-F]{7,64}$ ]] || invalid_id="manifest-row-$manifest_row"
+  : >"$output_dir/$invalid_id.txt"
+  {
+    printf 'commit\t%s\nparent\t%s\nsubject\t%s\n' "$commit" "$parent" "$subject"
+    printf 'parent_policy\tany-direct-parent\n'
+    printf 'status\tinvalid-range\nexit_code\t12\nfailure_reason\t%s\n' "$1"
+    printf 'resolved_model\tnot-invoked\n'
+  } >"$output_dir/$invalid_id.meta.tsv"
+  echo "本次历史评测无效：$1 ($commit / $parent)，未调用审计器。" >&2
+}
 
 while IFS=$'\t' read -r commit parent date subject status _rest; do
+  manifest_row=$((manifest_row + 1))
   [[ "$commit" == "commit" || -z "$commit" ]] && continue
   [[ "$status" == "pending-human-label" ]] || continue
   [[ -z "$commit_filter" || "$commit" == "$commit_filter" ]] || continue
@@ -207,13 +258,22 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   fi
 
   if [[ ! "$commit" =~ ^[0-9a-fA-F]{7,64}$ || ! "$parent" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
-    echo "跳过无效清单行：commit/parent 必须是十六进制 Git 提交号 ($commit / $parent)。" >&2
+    record_invalid_range "non-hex-commit-or-parent"
     count=$((count + 1))
     continue
   fi
-  if ! git -c core.fsmonitor=false -C "$repo_root" cat-file -e "$commit^{commit}" 2>/dev/null || \
-     ! git -c core.fsmonitor=false -C "$repo_root" cat-file -e "$parent^{commit}" 2>/dev/null; then
-    echo "跳过无效清单行：commit 或 parent 不存在于 --repo ($commit / $parent)。" >&2
+  if ! resolved_commit="$(git -c core.fsmonitor=false -C "$repo_root" rev-parse --verify "$commit^{commit}" 2>/dev/null)" || \
+     ! resolved_parent="$(git -c core.fsmonitor=false -C "$repo_root" rev-parse --verify "$parent^{commit}" 2>/dev/null)"; then
+    record_invalid_range "unresolvable-commit-or-parent"
+    count=$((count + 1))
+    continue
+  fi
+  # Use the commit object's parent list, not merge-base/ancestor membership.
+  # A range spanning multiple commits is not a single-commit evaluation.
+  # For a merge, selecting either direct parent is intentional and recorded.
+  actual_parents="$(git --no-replace-objects -c core.fsmonitor=false -C "$repo_root" show -s --format=%P "$resolved_commit")"
+  if [[ " $actual_parents " != *" $resolved_parent "* ]]; then
+    record_invalid_range "parent-is-not-a-direct-parent"
     count=$((count + 1))
     continue
   fi
@@ -225,7 +285,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   : >"$result_file"
   mkdir -p "$worktree"
 
-  if ! git -c core.fsmonitor=false -C "$repo_root" archive "$parent" | tar -xf - -C "$worktree"; then
+  if ! git --no-replace-objects -c core.fsmonitor=false -C "$repo_root" archive "$resolved_parent" | tar -xf - -C "$worktree"; then
     printf 'commit\t%s\nstatus\tarchive-failed\nsubject\t%s\n' "$commit" "$subject" >"$metadata_file"
     count=$((count + 1))
     continue
@@ -237,7 +297,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     -c user.name='local-review evaluation' \
     -c user.email='local-review-evaluation@localhost' \
     commit -qm 'evaluation parent snapshot'
-  git -c core.fsmonitor=false -C "$repo_root" diff --binary --no-ext-diff --no-textconv "$parent" "$commit" >"$patch_file"
+  git --no-replace-objects -c core.fsmonitor=false -C "$repo_root" diff --binary --no-ext-diff --no-textconv "$resolved_parent" "$resolved_commit" >"$patch_file"
   diff_sha256="$(shasum -a 256 "$patch_file" | awk '{print $1}')"
 
   if ! git -C "$worktree" apply --whitespace=nowarn "$patch_file"; then
@@ -248,6 +308,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
 
   start="$(date +%s)"
   exit_code=0
+  failure_reason=""
   resolved_model_file="$temp_root/$commit.resolved-model"
   resolved_chunk_bytes_file="$temp_root/$commit.chunk-budget"
   resolved_trace_file="$temp_root/$commit.trace"
@@ -288,11 +349,17 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   fi
   if [[ "$context_prepare_failed" == true ]]; then
     exit_code=12
+    failure_reason="context-snapshot-failed"
   else
     LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_file" \
     OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE="$resolved_chunk_bytes_file" \
     OLLAMA_REVIEW_TRACE_FILE="$resolved_trace_file" \
       "$review_script" "${review_args[@]}" >"$review_stdout_file" 2>"$review_stderr_file" || exit_code=$?
+    if [[ "$exit_code" -eq 0 ]] && ! LC_ALL=C grep -q '[^[:space:]]' "$review_stdout_file"; then
+      printf '本次历史评测无效：审计器 exit 0 但没有非空审查结果。\n' >>"$review_stderr_file"
+      exit_code=12
+      failure_reason="empty-review-output"
+    fi
     if [[ "$exit_code" -eq 0 ]]; then
       # A successful retry may still have diagnostics from an earlier failed
       # transport attempt. Keep the review result machine-readable: stderr is
@@ -330,6 +397,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   elif [[ "$exit_code" -eq 0 ]]; then
     echo "本次历史评测无效：审查成功但未记录实际模型名。" >&2
     exit_code=12
+    failure_reason="missing-resolved-model"
   fi
   result_sha256="unavailable"
   if [[ -f "$result_file" ]]; then
@@ -338,13 +406,20 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   {
     printf 'commit\t%s\n' "$commit"
     printf 'parent\t%s\n' "$parent"
+    printf 'resolved_commit\t%s\nresolved_parent\t%s\n' "$resolved_commit" "$resolved_parent"
+    printf 'parent_policy\tany-direct-parent\nparent_validation\tdirect-parent\n'
     printf 'date\t%s\n' "$date"
     printf 'subject\t%s\n' "$subject"
     printf 'diff_sha256\t%s\n' "$diff_sha256"
     printf 'profile\t%s\n' "$profile"
     printf 'workflow_git_revision\t%s\n' "$workflow_git_revision"
     printf 'workflow_dirty_state_sha256\t%s\n' "$workflow_dirty"
-    printf 'review_script_sha256\t%s\n' "$(shasum -a 256 "$review_script" | awk '{print $1}')"
+    printf 'review_script_sha256\t%s\n' "$review_script_sha256"
+    printf 'review_core_sha256\t%s\n' "$review_core_sha256"
+    printf 'review_scripts_sha256\t%s\nreview_scripts_snapshot\ttrue\n' "$review_scripts_sha256"
+    while IFS=$'\t' read -r script_name script_hash; do
+      printf 'review_script\tbin/%s\tsha256=%s\n' "$script_name" "$script_hash"
+    done <"$temp_root/reviewer-snapshot.tsv"
     printf 'modelfile_sha256\t%s\n' "$modelfile_sha256"
     printf 'system_sha256\t%s\n' "$system_sha256"
     printf 'model\t%s\n' "$review_model"
@@ -383,6 +458,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
       printf 'status\tfailed\n'
     fi
     printf 'exit_code\t%s\n' "$exit_code"
+    printf 'failure_reason\t%s\n' "$failure_reason"
     printf 'elapsed_seconds\t%s\n' "$((end - start))"
     printf 'result_sha256\t%s\n' "$result_sha256"
     if [[ -f "$stderr_log_file" ]]; then

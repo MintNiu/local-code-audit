@@ -201,4 +201,83 @@ grep -F 'PlatformProperties.java：跨文件符号文本索引显示 requireInte
   echo 'cross-file require* evidence was not indexed or routed' >&2
   exit 1
 }
+
+# Transaction/row-lock evidence must include unchanged related operations so
+# the model can compare lock sequences across files without turning text
+# matches into automatic findings.
+lock_repo="$fixture_root/lock-repo"
+lock_capture="$fixture_root/lock-requests"
+mkdir -p "$lock_repo/src/main/java/com/example"
+git -C "$lock_repo" init -q
+git -C "$lock_repo" config user.email test@example.invalid
+git -C "$lock_repo" config user.name lock-evidence-test
+cat >"$lock_repo/src/main/java/com/example/ReturnService.java" <<'EOF'
+package com.example;
+
+final class ReturnService {
+    private final SalesOrderRepository salesOrderRepository;
+    private final ReturnRepository returnRepository;
+
+    @Transactional
+    void submit(long id) {
+        salesOrderRepository.findByIdForUpdate(id);
+        returnRepository.findByIdForUpdate(id);
+    }
+}
+EOF
+cat >"$lock_repo/src/main/java/com/example/InspectionService.java" <<'EOF'
+package com.example;
+
+final class InspectionService {
+    private final InspectionRepository inspectionRepository;
+    private final ReturnRepository returnRepository;
+    private final SalesOrderRepository salesOrderRepository;
+
+    @Transactional
+    void confirm(long id) {
+        inspectionRepository.findByIdForUpdate(id);
+        returnRepository.findByIdForUpdate(id);
+        refresh(id);
+    }
+
+    private void refresh(long id) {
+        salesOrderRepository.findByIdForUpdate(id);
+    }
+}
+EOF
+git -C "$lock_repo" add .
+git -C "$lock_repo" commit -qm base
+printf '\n    // changed transaction path\n' >>"$lock_repo/src/main/java/com/example/ReturnService.java"
+for line in $(seq 1 160); do
+  printf '    // filler-%03d\n' "$line" >>"$lock_repo/src/main/java/com/example/ReturnService.java"
+done
+lock_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$lock_capture" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_FAKE_CLEAN=true \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
+  OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
+  OLLAMA_REVIEW_NUM_CTX=16384 \
+  "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
+[[ "$lock_output" == '未发现阻塞问题' ]] || {
+  echo 'prompt-only lock evidence changed a clean result' >&2
+  printf '%s\n' "$lock_output" >&2
+  exit 1
+}
+if printf '%s\n' "$lock_output" | grep -F '跨事务/行锁文本序列' >/dev/null; then
+  echo 'prompt-only lock evidence leaked into final findings' >&2
+  exit 1
+fi
+grep -F '构建预检（确定性证据：跨事务/行锁文本序列；仅供模型核验）' "$lock_capture" >/dev/null || {
+  echo 'transaction lock evidence heading was not included' >&2
+  exit 1
+}
+grep -F 'InspectionService.java（未变更关联文件）' "$lock_capture" >/dev/null || {
+  echo 'unchanged lock-related Java file was not included in evidence' >&2
+  exit 1
+}
+grep -F 'findByIdForUpdate' "$lock_capture" >/dev/null || {
+  echo 'transaction lock evidence did not include row-lock calls' >&2
+  exit 1
+}
 echo 'diff sharding regression passed'
