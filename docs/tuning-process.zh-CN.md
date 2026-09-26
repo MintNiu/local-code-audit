@@ -601,3 +601,11 @@ reserve 和 effective budget，方便后续复核。
 在该修复后，以当前 `devstral-small-2-review-tuned`（temperature=0、seed=42、num_ctx=16384）对 `platform-api` 20 个历史提交完成两轮完整复测：40 次运行全部 exit=0、输出完整，`run-history-repeat.sh` 的稳定性门禁通过。人工聚合同一风险根因后，当前 scorecard 为 `gold_p0_p1=3`、`p0_p1_found=3`、P0/P1 召回 100%、`predicted_candidates=12`、`false_positive=9`；三个确认根因分别是缺失 DTO 导致的构建阻断，以及两处从 URL 查询参数读取 `x-token`。`cbe47ea0` 单提交 8 条候选均为误报且耗时约 308 秒，说明当前稳定性已达标但误报和尾延迟仍是主要优化方向。20 个提交、3 个独立 P0/P1 根因的分母仍过小，不能宣称已达到生产级高可用，后续继续增加跨仓库、并发、权限和生命周期的人工 holdout。
 
 同日将三个已完成人工复核、且没有与 `platform-api` 结果重复的跨项目留出加入私有汇总：`platform-file:a9a1d4a` 的对象生命周期 P1、`platform-file:896dca8` 的版本化迁移删除 P1，以及 `platform-hr-service:a8bf560` 的令牌泄漏和迁移触发器名称不一致两个 P1。23 个完整提交的聚合 scorecard 为 `gold_p0_p1=7`、`p0_p1_found=7`、`predicted_candidates=28`、`false_positive=19`、`incomplete_runs=0`，即当前样本内 7/7 命中；其中前 20 个提交已完成双跑稳定性门禁，`a9a1d4a` 和 `896dca8` 也有独立双跑，`a8bf560` 只有一次完整复测，不能把额外三条样本全部宣称稳定。该汇总仍按提交/根因证据人工去重，重复的配置凭据族没有继续扩大分母；7 个 P0/P1 实例和跨项目分布仍不足以代表生产召回率。
+
+### 2026-09-26：分片跨文件证据与预算降级
+
+针对 `cbe47ea0` 中“每个文件分片看不到同一提交其他文件”的误报簇，运行器增加了一个受限的跨文件符号预检。仅当差异需要分片时，它才在当前快照一次性建立 Java 文本索引，向对应分片补充 `@Data`/`@Getter`/`@Setter`/`@ConfigurationProperties` 和 `require*` 的文本匹配计数；证据明确标记为“可能包含声明/注释”，不能单独证明语义。小差异的整提交请求不做全仓扫描，扫描也受整次审查总超时约束。
+
+预算探测按最大单路径证据和分片正文安全余量计算，避免同一证据重复预留；若固定提示词过大，优先跳过这段可选证据并继续缩小分片，仍由实际请求预算门禁阻止静默截断。分片路径改为解析 `diff --git` 头的精确路径，避免文件名前缀误路由；第二阶段退出钩子同时清理未跟踪差异临时文件。新增无模型夹具验证跨文件 `requireInternalToken()` 证据进入分片请求，`test-sharding.sh` 已覆盖并纳入现有 CI。
+
+验证结果：完整确定性回归、`scripts/verify-runtime.sh` 和 `SYNTHETIC_REVIEW_RUNS=5 ./evals/run-synthetic.sh` 均通过，运行态 SYSTEM SHA-256 仍为 `91e90255a065ec858f4b92cfbb349ed519e5d97077bb2921345087cfa169cd8c`。同一 tuned 模型下，`cbe47ea0` 两次复跑均为 8 个分片、27～55 秒、clean；已知真实根因 `420ae70c`（缺失 DTO）、`a1284658` 和 `63d520b`（URL 查询 token）均完整返回对应 P1。`63d520b` 因预算不足跳过可选跨文件证据但仍完成审查，说明降级不会把可选优化变成阻断。上述是针对性回归证据，不改变 23 个跨项目人工样本、7 个确认 P0/P1 根因的阶段 1 统计，也不能据此宣称达到生产级高可用。

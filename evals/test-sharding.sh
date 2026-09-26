@@ -33,13 +33,21 @@ if [[ -f "$count_file" ]]; then
 fi
 count=$((count + 1))
 printf '%s\n' "$count" >"$count_file"
+request_file=""
 for ((i = 1; i <= $#; i++)); do
   if [[ "${!i}" == @* ]]; then
-    cat "${!i#@}" >>"$LOCAL_REVIEW_CAPTURE"
+    request_file="${!i#@}"
+    cat "$request_file" >>"$LOCAL_REVIEW_CAPTURE"
     printf '\n--- request boundary ---\n' >>"$LOCAL_REVIEW_CAPTURE"
   fi
 done
-printf '{"response":"P1 A.txt:1 - 认证令牌从 URL 查询参数读取，分片变体 %s。影响：令牌可能进入访问日志。修复建议：改用受保护的请求头。验证方式：检查代理日志。","done":true,"done_reason":"stop"}\n' "$count"
+if [[ "${LOCAL_REVIEW_FAKE_CLEAN:-}" == true ]] || {
+  [[ -n "$request_file" ]] && grep -Eq 'access-key-id|PlatformProperties\.java' "$request_file";
+}; then
+  printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
+  exit 0
+fi
+printf '{"response":"P1 A.txt:1 - 认证令牌从 URL 查询参数读取，分片变体 %s。\\n影响：令牌可能进入访问日志。\\n修复建议：改用受保护的请求头。\\n验证方式：检查代理日志。","done":true,"done_reason":"stop"}\n' "$count"
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
@@ -127,6 +135,7 @@ EOF
 PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_FAKE_CLEAN=true \
   OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
   OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
   OLLAMA_REVIEW_NUM_CTX=16384 \
@@ -138,4 +147,58 @@ grep -E '^chunk_budget_preflight_reserve_tokens[[:space:]]+[5-9][0-9][0-9]$|^chu
   exit 1
 }
 
+# Cross-file symbol evidence must be deterministic, scoped to the current
+# snapshot, and routed only to shards containing the changed Java path. This
+# fixture keeps the caller unchanged while growing the properties file enough
+# to force the split path; the fake model makes the assertion independent of
+# Ollama quality or availability.
+evidence_repo="$fixture_root/evidence-repo"
+evidence_capture="$fixture_root/evidence-requests"
+mkdir -p "$evidence_repo/src/main/java/com/example"
+git -C "$evidence_repo" init -q
+git -C "$evidence_repo" config user.email test@example.invalid
+git -C "$evidence_repo" config user.name cross-file-evidence-test
+cat >"$evidence_repo/src/main/java/com/example/PlatformProperties.java" <<'EOF'
+package com.example;
+
+import lombok.Data;
+
+@Data
+final class PlatformProperties {
+    private String internalToken;
+
+    String requireInternalToken() {
+        return internalToken;
+    }
+}
+EOF
+cat >"$evidence_repo/src/main/java/com/example/Caller.java" <<'EOF'
+package com.example;
+
+final class Caller {
+    String read(PlatformProperties properties) {
+        return properties.requireInternalToken();
+    }
+}
+EOF
+git -C "$evidence_repo" add .
+git -C "$evidence_repo" commit -qm base
+for field in $(seq 1 160); do
+  printf '    private String field%03d;\n' "$field" >>"$evidence_repo/src/main/java/com/example/PlatformProperties.java"
+done
+PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$evidence_capture" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
+  OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
+  OLLAMA_REVIEW_NUM_CTX=16384 \
+  "$repo_root/bin/local-review.sh" --repo "$evidence_repo" >/dev/null
+grep -F '构建预检（确定性证据：跨文件符号文本索引）' "$evidence_capture" >/dev/null || {
+  echo 'cross-file evidence heading was not routed to a shard request' >&2
+  exit 1
+}
+grep -F 'PlatformProperties.java：跨文件符号文本索引显示 requireInternalToken()' "$evidence_capture" >/dev/null || {
+  echo 'cross-file require* evidence was not indexed or routed' >&2
+  exit 1
+}
 echo 'diff sharding regression passed'

@@ -1117,6 +1117,20 @@ build_prompt() {
   if [[ "${2:-with-examples}" == "without-examples" && -n "$chunk_status_file" ]]; then
     printf '\n--- 当前审查分片文件列表 ---\n'
     cat "$chunk_status_file"
+    chunk_cross_file_evidence=""
+    if [[ "$chunk_status_file" != "${chunk_budget_status_file:-}" && -s "${cross_file_evidence_file:-}" ]]; then
+      while IFS= read -r chunk_status_path; do
+        chunk_status_path="${chunk_status_path# M }"
+        [[ -n "$chunk_status_path" ]] || continue
+        chunk_cross_file_evidence+="$(grep -F -- "${chunk_status_path}：" "$cross_file_evidence_file" || true)"
+        chunk_cross_file_evidence+=$'\n'
+      done <"$chunk_status_file"
+    fi
+    if [[ -n "${chunk_cross_file_evidence//$'\n'/}" ]]; then
+      printf '\n--- 构建预检（确定性证据：跨文件符号文本索引） ---\n'
+      printf '%s' "$chunk_cross_file_evidence"
+      printf '%s\n' '--- 跨文件符号证据结束 ---'
+    fi
   fi
   if [[ -n "$preflight_file" && -s "$preflight_file" ]]; then
     printf '\n--- 构建预检（确定性证据） ---\n'
@@ -1756,13 +1770,36 @@ $(cat "$changed_paths_file")
   probe_base_tokens="$(estimate_prompt_tokens "$probe_base_prompt")"
   probe_variable_tokens=$(( $(estimate_prompt_tokens "$probe_variable_prompt") - probe_base_tokens ))
   if (( probe_variable_tokens < 0 )); then probe_variable_tokens=0; fi
-  dynamic_reserve_tokens=$((probe_variable_tokens + 128))
+  # probe_variable_prompt includes the routed status/preflight section, while
+  # build_prompt intentionally suppresses cross-file evidence for this budget
+  # probe. Reserve that optional text separately below, but never count the
+  # status/preflight section twice.
+  # Leave a conservative margin for the actual diff body and transport
+  # framing. The probe intentionally contains no diff text, while the real
+  # shard does; without this margin a near-cap hunk can pass the probe and be
+  # rejected only after several earlier shards have already run.
+  dynamic_reserve_tokens=$((probe_variable_tokens + 300 + cross_file_evidence_reserve_tokens))
   if (( dynamic_reserve_tokens > chunk_budget_preflight_reserve_tokens )); then
     chunk_budget_preflight_reserve_tokens="$dynamic_reserve_tokens"
   fi
   # Leave room for the shard-local evidence and a small amount of prompt-shape
   # variance. The actual request still passes check_prompt_budget.
   remaining_tokens=$((available_tokens - probe_tokens - chunk_budget_preflight_reserve_tokens))
+  # Cross-file evidence is an optimization, not a reason to reject a review.
+  # If the fixed prompt plus its evidence would leave less than the minimum
+  # 1000-byte shard, retry the budget calculation without that optional block.
+  # The diff is still reviewed in smaller shards and deterministic preflight
+  # findings remain available.
+  if (( remaining_tokens < 400 )) && (( cross_file_evidence_reserve_tokens > 0 )); then
+    : >"$cross_file_evidence_file"
+    cross_file_evidence_reserve_tokens=0
+    # With the optional block removed, the probe already accounts for the
+    # routed status/preflight section; only a small framing margin is needed.
+    dynamic_reserve_tokens=$((probe_variable_tokens + 128))
+    chunk_budget_preflight_reserve_tokens="$dynamic_reserve_tokens"
+    remaining_tokens=$((available_tokens - probe_tokens - chunk_budget_preflight_reserve_tokens))
+    echo "本地代码审查：输入预算不足以携带跨文件符号文本索引，已跳过该可选证据并继续分片审查。" >&2
+  fi
   budget_bytes=$((remaining_tokens * 3))
   if (( budget_bytes < 1000 )); then
     echo "本地代码审查失败：分片固定提示词仅剩 ${remaining_tokens} 个输入 token，不足以容纳最小 1000 字节分片；为避免静默截断，本次请求未发送。" >&2
@@ -3640,6 +3677,9 @@ response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
 chunk_input_file="$(mktemp "${TMPDIR:-/tmp}/local-review-diff.XXXXXX")"
 changed_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths.XXXXXX")"
+cross_file_evidence_file="$(mktemp "${TMPDIR:-/tmp}/local-review-cross-file-evidence.XXXXXX")"
+cross_file_symbol_index="$(mktemp "${TMPDIR:-/tmp}/local-review-cross-file-symbol-index.XXXXXX")"
+cross_file_evidence_reserve_tokens=0
 changed_imports_file="$(mktemp "${TMPDIR:-/tmp}/local-review-imports.XXXXXX")"
 deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX")"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
@@ -3647,9 +3687,10 @@ java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
+review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z
@@ -3680,6 +3721,72 @@ if (( ${#context_files[@]} > 0 )); then
   done
 fi
 LC_ALL=C sort -u -o "$changed_paths_file" "$changed_paths_file"
+# Cross-file evidence is only needed for the split path. For a small diff the
+# initial request already sees the complete diff; scanning the whole checkout
+# would add latency without adding review scope. Build one bounded text index
+# instead of running a repository-wide search once per changed method.
+diff_bytes="$(wc -c <"$chunk_input_file" | tr -d ' ')"
+if (( diff_bytes > max_diff_bytes )); then
+  if (( $(date +%s) < review_deadline_epoch )); then
+    (
+      cd "$repo_root"
+      index_remaining_seconds=$((review_deadline_epoch - $(date +%s)))
+      if (( index_remaining_seconds > 0 )); then
+        perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$index_remaining_seconds" \
+          rg -n --glob '*.java' --glob '!target/**' \
+          '(^[[:space:]]*@(Data|Getter|Setter|ConfigurationProperties)\b|\brequire[A-Z][A-Za-z0-9_]*[[:space:]]*\()' \
+          . 2>/dev/null || true
+      fi
+    ) >"$cross_file_symbol_index"
+  fi
+  {
+    while IFS= read -r changed_path; do
+      [[ "$changed_path" == *.java ]] || continue
+      if (( $(date +%s) >= review_deadline_epoch )); then
+        break
+      fi
+      source_file="$repo_root/$changed_path"
+      [[ -f "$source_file" ]] || continue
+      annotations="$(rg -n '^[[:space:]]*@(Data|Getter|Setter|ConfigurationProperties)\b' "$source_file" 2>/dev/null || true)"
+      if [[ -n "$annotations" ]]; then
+        # Keep only stable locations. Full source lines can contain generated
+        # schemas or long annotations and would make the evidence itself
+        # dominate the shard input budget.
+        annotation_text="$(printf '%s\n' "$annotations" | head -n 4 | sed -E 's/:.*$//' | paste -sd ' | ' -)"
+        printf '%s：变更文件存在配置/属性注解文本匹配（需结合差异核验）：%s\n' \
+          "$changed_path" "$annotation_text"
+      fi
+      while IFS= read -r required_method; do
+        [[ "$required_method" =~ ^require[A-Z][A-Za-z0-9_]*$ ]] || continue
+        if (( $(date +%s) >= review_deadline_epoch )); then
+          break
+        fi
+        references="$(grep -E "[.]?${required_method}[[:space:]]*\\(" "$cross_file_symbol_index" 2>/dev/null | head -n 6 || true)"
+        if [[ -n "$references" ]]; then
+          reference_count="$(grep -E -c "[.]?${required_method}[[:space:]]*\\(" "$cross_file_symbol_index" 2>/dev/null || true)"
+          printf '%s：跨文件符号文本索引显示 %s() 有 %s 条匹配（仅文本证据，可能包含声明/注释）。\n' \
+            "$changed_path" "$required_method" "$reference_count"
+        fi
+      done < <(rg -o --no-filename 'require[A-Z][A-Za-z0-9_]*[[:space:]]*\(' "$source_file" 2>/dev/null | sed -E 's/[[:space:]]*\($//' | LC_ALL=C sort -u || true)
+    done <"$changed_paths_file"
+  } | LC_ALL=C sort -u >"$cross_file_evidence_file"
+fi
+if [[ -s "$cross_file_evidence_file" ]]; then
+  # A shard carries evidence only for its own paths. Reserve the largest
+  # per-path contribution (not the repository-wide sum), plus the fixed
+  # safety margin above; reserving every path would reject otherwise valid
+  # multi-file commits before the splitter can do its job.
+  system_prompt_tokens="$(estimate_prompt_tokens "")"
+  while IFS= read -r changed_path; do
+    [[ -n "$changed_path" ]] || continue
+    path_evidence="$(grep -F -- "${changed_path}：" "$cross_file_evidence_file" || true)"
+    [[ -n "$path_evidence" ]] || continue
+    path_evidence_tokens=$(( $(estimate_prompt_tokens "$path_evidence") - system_prompt_tokens ))
+    if (( path_evidence_tokens > cross_file_evidence_reserve_tokens )); then
+      cross_file_evidence_reserve_tokens="$path_evidence_tokens"
+    fi
+  done <"$changed_paths_file"
+fi
 awk '
   /^diff --git / { path = $4; sub(/^b\//, "", path); next }
   /^\+\+\+ b\// { path = substr($0, 7); next }
@@ -3720,12 +3827,10 @@ collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
 } | awk '$1 == "D" { print $2 }' | LC_ALL=C sort -u >"$deleted_types_file"
 collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"
 collect_context_tenant_preflight "$chunk_input_file" "$build_preflight_file"
-review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   echo "本地代码审查失败：检测到 combined diff（diff --cc/diff --combined），当前分片器不会猜测合并冲突语义；请先展开为普通文件 diff 后重试。" >&2
   exit 1
 fi
-diff_bytes="$(wc -c <"$chunk_input_file" | tr -d ' ')"
 if ! resolve_chunk_budget "$max_diff_bytes"; then
   emit_preflight_failure_diagnostic "$build_preflight_file"
   exit 1
@@ -3778,7 +3883,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
@@ -3795,7 +3900,24 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   : >"$chunk_paths_file"
   while IFS= read -r candidate_path; do
     [[ -n "$candidate_path" ]] || continue
-    if grep -Fq -- "$candidate_path" "$chunk_file"; then
+    if awk -v wanted="$candidate_path" '
+      /^diff --git / {
+        path = $4
+        sub(/^b\//, "", path)
+        if (path == wanted) found = 1
+      }
+      /^\+\+\+ b\// {
+        path = substr($0, 7)
+        sub(/[[:space:]]+$/, "", path)
+        if (path == wanted) found = 1
+      }
+      /^--- a\// {
+        path = substr($0, 6)
+        sub(/[[:space:]]+$/, "", path)
+        if (path == wanted) found = 1
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$chunk_file"; then
       printf '%s\n' "$candidate_path" >>"$chunk_paths_file"
     fi
   done <"$changed_paths_file"
