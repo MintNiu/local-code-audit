@@ -646,3 +646,5 @@ reserve 和 effective budget，方便后续复核。
 
 本轮还收紧了 Git 路径和所有源码快照入口：变更列表改用 `git ... -z` 的 NUL 安全解析，含换行/回车、绝对路径或父目录组件的路径直接 fail-closed，避免行式索引把合法换行文件名重解释成 `../outside`；Java 变更、跨文件索引、构建/锁序/安全/除法/预签名预检在遇到任一符号链接组件时不读取其目标。仓库内 `AGENTS.md`、README 和显式 `--context` 的符号链接也只告警并跳过，不把仓库外内容注入 prompt。新增 changed-java-symlink、symlink-rules 和 newline-path 回归，且空白/控制字符响应、缺失或错误 `done_reason` 现在均显式失败；完整确定性套件和运行态校验继续作为提交门禁。
 锁文本索引和反向锁序扫描也不再静默吞掉超时或扫描错误；在总超时内无法完成时整次审查直接失败，避免把不完整的并发证据伪装成 clean。
+
+随后在当前 `devstral-small-2-review-tuned:latest` 运行态重新执行五轮合成门禁：`java-divide`、URL 拼接凭证、URL 查询令牌、租户隔离、迁移删除、字面量凭据和预签名票据正例均 5/5 命中；5 类 clean 共 25/25，无 P0～P3；所有结果哈希稳定，`num_predict=1` 截断路径显式失败。该运行只验证本轮运行器完整性修复未改变模型正负例边界，不扩大真实人工 holdout 的召回率分母。

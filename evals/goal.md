@@ -234,6 +234,8 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 
 路径安全补充：当前变更路径的最终文件或任一目录组件是符号链接时，过滤器及依赖完整源码快照的确定性预检不再加载其目标；Git 路径索引使用 NUL 安全解析，换行/回车、绝对路径和父目录组件会 fail-closed。仓库内 `AGENTS.md`、README 和显式 `--context` 符号链接不会跟随读取外部目标；差异本身仍继续审查。changed-java-symlink、symlink-rules 和 newline-path 夹具、完整确定性回归、`git diff --check` 和运行态 SYSTEM 校验均通过。
 
+2026-09-27：`bbc767a` 后使用当前 tuned 模型重新执行 `SYNTHETIC_REVIEW_RUNS=5 ./evals/run-synthetic.sh`，7 类正例全部 5/5 命中，5 类 clean 共 25/25 通过，所有结果 SHA-256 在五轮内一致，`num_predict=1` 截断路径显式失败。此次运行同时验证空/错误 `done_reason`、路径边界和锁扫描 fail-closed 改动没有削弱现有正负例边界；真实阶段 1 的人工 holdout 分母仍未因此扩大。
+
 ## 失败处理原则
 
 2026-09-21 更正：上述 `f0b3bcb` 配置措辞过滤已撤回。独立回归发现“端口 70000 + 可能启动失败”等完整报告被静默转为 clean，非法路径/行号/缺字段也被过滤绕过校验；修复前 7 个用例中 6 个失败，移除过滤后 7/7 通过。此前过滤后候选减少不能证明精度提升，真实样本中的配置推测仍待独立核实。该组回归通过 `test-preflight.sh` 进入 CI 和合成门禁，不扩大模型召回真值分母。
