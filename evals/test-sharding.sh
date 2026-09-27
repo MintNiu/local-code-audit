@@ -255,6 +255,22 @@ perl -0pi -e 's/salesOrderRepository\.findByIdForUpdate\(id\);/salesOrderReposit
 for line in $(seq 1 160); do
   printf '    // filler-%03d\n' "$line" >>"$lock_repo/src/main/java/com/example/ReturnService.java"
 done
+cat >"$lock_repo/src/main/java/com/example/HelperService.java" <<'EOF'
+package com.example;
+
+final class HelperService {
+    private final ReturnRepository returnRepository;
+
+    @Transactional
+    void submit(long id) {
+        lockReturn(id);
+    }
+
+    private void lockReturn(long id) {
+        returnRepository.findByIdForUpdate(id);
+    }
+}
+EOF
 lock_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$lock_capture" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review \
@@ -282,6 +298,14 @@ grep -F 'InspectionService.java（未变更关联文件）' "$lock_capture" >/de
 }
 grep -F 'findByIdForUpdate' "$lock_capture" >/dev/null || {
   echo 'transaction lock evidence did not include row-lock calls' >&2
+  exit 1
+}
+grep -F 'HelperService.java（变更文件）' "$lock_capture" >/dev/null || {
+  echo 'same-file helper lock source was not routed to prompt evidence' >&2
+  exit 1
+}
+grep -F 'void lockReturn(long id)' "$lock_capture" >/dev/null || {
+  echo 'same-file helper method boundary was not preserved in prompt evidence' >&2
   exit 1
 }
 extract_lock_block() {
