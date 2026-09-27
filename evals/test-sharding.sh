@@ -242,17 +242,16 @@ final class InspectionService {
     void confirm(long id) {
         inspectionRepository.findByIdForUpdate(id);
         returnRepository.findByIdForUpdate(id);
-        refresh(id);
-    }
-
-    private void refresh(long id) {
         salesOrderRepository.findByIdForUpdate(id);
     }
 }
 EOF
 git -C "$lock_repo" add .
 git -C "$lock_repo" commit -qm base
-printf '\n    // changed transaction path\n' >>"$lock_repo/src/main/java/com/example/ReturnService.java"
+# Touch a lock-bearing line so the deterministic candidate is supported by the
+# submitted diff rather than by an unrelated comment-only edit.
+perl -0pi -e 's/salesOrderRepository\.findByIdForUpdate\(id\);/salesOrderRepository.findByIdForUpdate(id + 1);/' \
+  "$lock_repo/src/main/java/com/example/ReturnService.java"
 for line in $(seq 1 160); do
   printf '    // filler-%03d\n' "$line" >>"$lock_repo/src/main/java/com/example/ReturnService.java"
 done
@@ -306,4 +305,106 @@ inspection_order="$(extract_lock_block 'InspectionService.java' | grep -oE '[a-z
   printf '%s\n' "$inspection_order" >&2
   exit 1
 }
+
+# A pre-existing reverse sequence must not be reported when the commit only
+# changes an unrelated comment/line. This guards the changed-lock evidence
+# gate in the deterministic collector.
+non_lock_repo="$fixture_root/non-lock-repo"
+git clone -q "$lock_repo" "$non_lock_repo"
+printf '\n    // unrelated comment-only change\n' >>"$non_lock_repo/src/main/java/com/example/ReturnService.java"
+non_lock_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$fixture_root/non-lock-requests" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_FAKE_CLEAN=true \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
+  OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
+  OLLAMA_REVIEW_NUM_CTX=16384 \
+  "$repo_root/bin/local-review.sh" --repo "$non_lock_repo")"
+if printf '%s\n' "$non_lock_output" | grep -F '事务内行锁存在反向锁序候选' >/dev/null; then
+  echo 'comment-only lock change produced a deterministic finding' >&2
+  printf '%s\n' "$non_lock_output" >&2
+  exit 1
+fi
+
+# A non-transactional method after the annotated method must not be folded
+# into the same lock-order segment. The old file-level parser would combine
+# `current` and `legacy` and incorrectly report a cycle against the unchanged
+# transaction in UnchangedService.java.
+scope_repo="$fixture_root/scope-repo"
+mkdir -p "$scope_repo/src/main/java/com/example"
+git -C "$scope_repo" init -q
+git -C "$scope_repo" config user.email test@example.invalid
+git -C "$scope_repo" config user.name lock-scope-test
+cat >"$scope_repo/src/main/java/com/example/ScopeService.java" <<'EOF'
+package com.example;
+
+final class ScopeService {
+    @Transactional
+    void current(long id) {
+        salesOrderRepository.findByIdForUpdate(id);
+        returnRepository.findByIdForUpdate(id);
+    }
+
+    void legacy(long id) {
+        returnRepository.findByIdForUpdate(id);
+        salesOrderRepository.findByIdForUpdate(id);
+    }
+}
+EOF
+cat >"$scope_repo/src/main/java/com/example/UnchangedService.java" <<'EOF'
+package com.example;
+
+final class UnchangedService {
+    @Transactional
+    void other(long id) {
+        salesOrderRepository.findByIdForUpdate(id);
+        returnRepository.findByIdForUpdate(id);
+    }
+}
+EOF
+git -C "$scope_repo" add .
+git -C "$scope_repo" commit -qm base
+perl -0pi -e 's/salesOrderRepository\.findByIdForUpdate\(id\);/salesOrderRepository.findByIdForUpdate(id + 1);/' \
+  "$scope_repo/src/main/java/com/example/ScopeService.java"
+scope_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$fixture_root/scope-requests" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_FAKE_CLEAN=true \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
+  OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
+  OLLAMA_REVIEW_NUM_CTX=16384 \
+  "$repo_root/bin/local-review.sh" --repo "$scope_repo")"
+if printf '%s\n' "$scope_output" | grep -F '事务内行锁存在反向锁序候选' >/dev/null; then
+  echo 'lock-order parser leaked a non-transactional method into the transaction segment' >&2
+  printf '%s\n' "$scope_output" >&2
+  exit 1
+fi
+
+# Declaration-based locks are included as prompt evidence, but are not turned
+# into a deterministic finding without a receiver-to-method mapping.
+cat >"$scope_repo/src/main/java/com/example/AnnotatedRepository.java" <<'EOF'
+package com.example;
+
+interface AnnotatedRepository {
+    @Lock(PESSIMISTIC_WRITE)
+    ReturnEntity findById(long id);
+}
+EOF
+annotation_capture="$fixture_root/annotation-requests"
+annotation_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$annotation_capture" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_FAKE_CLEAN=true \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
+  OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
+  OLLAMA_REVIEW_NUM_CTX=16384 \
+  "$repo_root/bin/local-review.sh" --repo "$scope_repo")"
+grep -F '@Lock(PESSIMISTIC_WRITE)' "$annotation_capture" >/dev/null || {
+  echo 'declaration-based lock marker was not routed to prompt evidence' >&2
+  exit 1
+}
+if printf '%s\n' "$annotation_output" | grep -F '事务内行锁存在反向锁序候选' >/dev/null; then
+  echo 'declaration-only lock marker produced an unsupported deterministic finding' >&2
+  exit 1
+fi
 echo 'diff sharding regression passed'

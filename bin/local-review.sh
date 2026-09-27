@@ -997,6 +997,8 @@ review_system="$(cat <<'EOF'
 
 找出所有能由代码或明确契约直接证明的逻辑、边界、异常、安全、权限/租户隔离、并发/事务、性能、兼容性和测试问题。每个独立根因都要保留；可独立修复的根因必须分别输出，即使发生在同一方法或相邻行（例如 null 解引用与除零是两条问题）。只有同一根因在相同调用点重复出现时才可合并，并列出全部受影响文件/行号范围。不要编造不确定问题，不要报告风格、命名、Javadoc、final 或泛化可维护性建议。
 
+事务锁序检查：对可见的 `@Transactional` 路径枚举实际锁调用（直接 `receiver.*ForUpdate(...)`、SQL `FOR UPDATE`；若 `@Lock(PESSIMISTIC_WRITE)` 与调用方法及资源映射同时可见，也纳入核对）。只有两条可达事务路径明确针对同一资源且获取顺序相反时才报告死锁/锁等待问题；单独出现注解、未展示调用链、普通 `findById` 或“可能并发”不能作为证据。若输入包含“反向锁序候选”预检段，必须回到可见源码核对方法边界、资源映射和调用可达性，不得重复输出没有独立证据的候选。
+
 接口、DTO、注解或声明式客户端的签名本身不构成运行时漏洞证据；没有可达实现、调用链或明确契约冲突时，不要仅因缺少 null、租户、事务、并发、限流、审计、错误处理、输入范围或兼容性校验而报告。仅有 `@RequestHeader Long tenantId`、`Long batchId` 或 `@PostExchange` 不是证据。测试中的反射、方法枚举、`throws Exception`、断言严格性和未覆盖场景也不是问题；只有差异直接证明测试无法编译、错误通过或掩盖生产缺陷时才报告一条具体测试问题。
 
 Java 语义：整数除法截断和基本类型整数回绕是定义行为；没有数学精确性、业务范围或调用方契约时，不要报告 `5 / 2`、`Integer.MIN_VALUE / -1`、`int` 加减乘的精度/溢出/输入校验问题。`public int add(int a, int b) { return a + b; }` 在无其他契约时必须视为干净代码；已经报告具体 null/零风险后，不要再添加“缺少输入校验”汇总。
@@ -3719,7 +3721,7 @@ collect_transaction_lock_preflight() {
       END {
         emitted = 0
         for (line_no = 1; line_no <= NR && emitted < max_lines; line_no++) {
-          if (source[line_no] !~ /@Transactional|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/) continue
+          if (source[line_no] !~ /@Transactional|@Lock|PESSIMISTIC_WRITE|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/) continue
           start = line_no - 5
           if (start < 1) start = 1
           finish = line_no + 5
@@ -3739,7 +3741,7 @@ collect_transaction_lock_preflight() {
     # Keep a compact, complete list of lock calls even when context windows
     # are capped.  This prevents an early method in a large service from
     # hiding a later confirmation path that reverses the lock order.
-    awk '/[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/ {
+    awk '/@Lock|PESSIMISTIC_WRITE|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/ {
       text = $0
       sub(/^[[:space:]]+/, "", text)
       printf "  %d: %s\n", NR, text
@@ -3763,7 +3765,7 @@ collect_transaction_lock_preflight() {
     [[ -f "$source_file" ]] || continue
     rg -o '[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(' "$source_file" 2>/dev/null \
       | sed -E 's/\..*$//' >>"$receiver_file" || true
-    if rg -q '@Transactional|find[A-Za-z0-9_]*ForUpdate|FOR[[:space:]]+UPDATE' "$source_file" 2>/dev/null; then
+    if rg -q '@Transactional|@Lock|PESSIMISTIC_WRITE|find[A-Za-z0-9_]*ForUpdate|FOR[[:space:]]+UPDATE' "$source_file" 2>/dev/null; then
       printf '%s\n' '__transaction_or_lock_text__' >>"$receiver_file"
     fi
   done <<<"$changed_java_paths"
@@ -3787,7 +3789,7 @@ collect_transaction_lock_preflight() {
         cd "$repo_root"
         perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$lock_scan_remaining_seconds" \
           rg -l --glob '*.java' \
-          '@Transactional|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE' \
+          '@Transactional|@Lock|PESSIMISTIC_WRITE|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE' \
           . 2>/dev/null | sed 's#^\./##' || true
       )
     fi
@@ -3829,7 +3831,7 @@ collect_transaction_lock_preflight() {
           continue
         fi
       fi
-    elif ! rg -q '@Transactional|find[A-Za-z0-9_]*ForUpdate|FOR[[:space:]]+UPDATE' "$java_file" 2>/dev/null; then
+    elif ! rg -q '@Transactional|@Lock|PESSIMISTIC_WRITE|find[A-Za-z0-9_]*ForUpdate|FOR[[:space:]]+UPDATE' "$java_file" 2>/dev/null; then
       continue
     fi
     if (( $(date +%s) >= review_deadline_epoch )); then
@@ -3859,7 +3861,7 @@ collect_transaction_lock_order_preflight() {
   local diff_file="$1"
   local output_file="$2"
   local repo_root="$3"
-  local changed_java_paths candidate_paths_file records_file pairs_file
+  local changed_java_paths changed_lock_paths candidate_paths_file records_file pairs_file
   local java_path java_file
 
   # This is intentionally narrower than a general deadlock proof: it only
@@ -3872,6 +3874,21 @@ collect_transaction_lock_order_preflight() {
     /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, ""); if (path ~ /\.java$/) print path }
   ' "$diff_file" | LC_ALL=C sort -u)"
   [[ -n "$changed_java_paths" ]] || return 0
+  # An existing lock-order cycle must not become a new finding merely because
+  # an unrelated comment/field changed in the same file.  Require the changed
+  # side itself to add/remove a visible transaction or lock marker; unchanged
+  # source context is still available to the model-only evidence collector.
+  changed_lock_paths="$(awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, ""); next }
+    /^\+\+\+ |^--- / { next }
+    /^[+-]/ {
+      text = substr($0, 2)
+      if (text ~ /@Transactional|@Lock|PESSIMISTIC_WRITE|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/) changed[path] = 1
+    }
+    END { for (path in changed) if (path ~ /\.java$/) print path }
+  ' "$diff_file" | LC_ALL=C sort -u)"
+  [[ -n "$changed_lock_paths" ]] || return 0
 
   candidate_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-candidates.XXXXXX")"
   records_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-records.XXXXXX")"
@@ -3894,14 +3911,98 @@ collect_transaction_lock_order_preflight() {
     java_file="$repo_root/$java_path"
     [[ -f "$java_file" ]] || continue
     awk -v source_path="$java_path" '
-      /@Transactional/ { transaction_segment++ }
-      transaction_segment > 0 {
-        remaining = $0
-        while (match(remaining, /[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(/)) {
-          token = substr(remaining, RSTART, RLENGTH)
-          sub(/\..*/, "", token)
-          if (token != "this") printf "%s\t%d\t%d\t%s\n", source_path, FNR, transaction_segment, token
-          remaining = substr(remaining, RSTART + RLENGTH)
+      function clean_java_line(raw, text, pos, prefix, tail, close_pos) {
+        text = raw
+        if (text_block) {
+          pos = index(text, "\"\"\"")
+          if (pos == 0) return ""
+          text = substr(text, pos + 3)
+          text_block = 0
+        }
+        while ((pos = index(text, "\"\"\"")) > 0) {
+          prefix = substr(text, 1, pos - 1)
+          tail = substr(text, pos + 3)
+          close_pos = index(tail, "\"\"\"")
+          if (close_pos == 0) {
+            text = prefix
+            text_block = 1
+            break
+          }
+          text = prefix substr(tail, close_pos + 3)
+        }
+        gsub(/"([^"\\]|\\.)*"/, "", text)
+        gsub(/\047([^\047\\]|\\.)*\047/, "", text)
+        if (block_comment) {
+          if (text !~ /\*\//) return ""
+          sub(/^.*\*\//, "", text)
+          block_comment = 0
+        }
+        while (text ~ /\/\*/) {
+          if (text ~ /\/\*.*\*\//) sub(/\/\*.*\*\//, "", text)
+          else {
+            sub(/\/\*.*$/, "", text)
+            block_comment = 1
+            break
+          }
+        }
+        sub(/\/\/.*$/, "", text)
+        return text
+      }
+      function emit_transaction_locks(method_start, method_end, segment,    line_no, remaining, token) {
+        for (line_no = method_start; line_no <= method_end; line_no++) {
+          remaining = clean[line_no]
+          while (match(remaining, /[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(/)) {
+            token = substr(remaining, RSTART, RLENGTH)
+            sub(/\..*/, "", token)
+            if (token != "this") printf "%s\t%d\t%s\t%s\n", source_path, line_no, segment, token
+            remaining = substr(remaining, RSTART + RLENGTH)
+          }
+        }
+      }
+      {
+        source[FNR] = $0
+        clean[FNR] = clean_java_line($0)
+      }
+      END {
+        for (annotation = 1; annotation <= NR; annotation++) {
+          if (clean[annotation] !~ /@Transactional/) continue
+          candidate = ""
+          candidate_start = 0
+          method_start = 0
+          method_end = 0
+          for (line_no = annotation; line_no <= NR && line_no < annotation + 20; line_no++) {
+            candidate = candidate " " clean[line_no]
+            if (candidate_start == 0 &&
+                candidate ~ /(^|[[:space:]])[A-Za-z_][A-Za-z0-9_.$<>, ?\[\]]*[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/ &&
+                candidate !~ /(^|[^[:alnum:]_])(if|for|while|switch|catch|synchronized|new)[[:space:]]*\(/) {
+              candidate_start = annotation
+            }
+            if (candidate_start != 0 && candidate ~ /\)[[:space:]]*(throws[[:space:]][^{}]*)?[[:space:]]*\{/) {
+              method_start = line_no
+              depth = 0
+              opened = 0
+              for (body_line = method_start; body_line <= NR; body_line++) {
+                brace_line = clean[body_line]
+                opens = gsub(/\{/, "{", brace_line)
+                closes = gsub(/\}/, "}", brace_line)
+                depth += opens - closes
+                if (opens > 0) opened = 1
+                if (opened && depth <= 0) {
+                  method_end = body_line
+                  break
+                }
+              }
+              if (method_end > 0) {
+                segment = source_path ":" method_start
+                if (!(segment in emitted_segment)) {
+                  emitted_segment[segment] = 1
+                  emit_transaction_locks(method_start, method_end, segment)
+                }
+              }
+              break
+            }
+            if (candidate ~ /;/ || line_no >= annotation + 19) break
+          }
         }
       }
     ' "$java_file" >>"$records_file"
@@ -3941,10 +4042,10 @@ collect_transaction_lock_order_preflight() {
     return 0
   fi
 
-  awk -F '\t' -v changed_paths="$changed_java_paths" '
+  LOCAL_REVIEW_CHANGED_LOCK_PATHS="$changed_lock_paths" awk -F '\t' '
     BEGIN {
-      split(changed_paths, changed_list, "\n")
-      for (i in changed_list) if (changed_list[i] != "") changed[changed_list[i]] = 1
+      split(ENVIRON["LOCAL_REVIEW_CHANGED_LOCK_PATHS"], changed_lock_list, "\n")
+      for (i in changed_lock_list) if (changed_lock_list[i] != "") changed_lock[changed_lock_list[i]] = 1
     }
     {
       key = $3 SUBSEP $4
@@ -3956,11 +4057,11 @@ collect_transaction_lock_order_preflight() {
         other_first = first_by_pair[reverse]
         other_second = second_by_pair[reverse]
         counterpart_path = other_path
-        if ($1 in changed) {
+        if ($1 in changed_lock) {
           primary_path = $1
           primary_first = $5
           primary_second = $6
-        } else if (other_path in changed) {
+        } else if (other_path in changed_lock) {
           primary_path = other_path
           primary_first = other_first
           primary_second = other_second
