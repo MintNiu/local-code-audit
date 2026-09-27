@@ -253,3 +253,7 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 同日重新复核 ERP 并发留出 `736ef178` 与 `7fee9f1a`：两份冻结父提交均完整结束，分别为 5/12 个分片、57/226 秒；确定性锁序预检各输出唯一一条反向锁序 P1，人工核对确认两条路径实际锁定同一退货/收货资源且顺序相反。两轮重复审查均 exit=0，结果文本、分片状态和运行签名稳定（耗时分别约 59/238–249 秒）。这把此前模型 clean 的两条并发漏报转成可见候选并补进真实根因证据，但仍按独立人工样本记录，不把合成门禁或预检候选直接冒充生产召回率。
 
 随后将这两条人工确认的 P1 以独立私有阶段一标签登记：两行 scorecard 均为 `gold_p0_p1=1`、`p0_p1_found=1`、`false_positive_count=0`、`output_complete=true`、`repeat_stable=true`，同属 `lock-order-erp-sales-return` 功能簇并都放在 `holdout`。阶段一门禁对这组单独 scorecard 正确拒绝（仅 2 个提交、2 个 holdout 根因且没有 train/dev），因此它们增加了真实根因证据，但没有被冒充为已经达到 20 个 holdout 根因或生产级指标。
+
+同日补充跨仓库真实提交探测：`platform-auth:711e742`（小程序登录）、`platform-integration:18ea173`（HR 发布失败）、`platform-system:db93e1d`（网关规则缓存自愈）均完整返回 clean，人工核对后不计入问题真值；`platform-job:ce7010c3` 的生产 bootstrap 新增两处 `${NACOS_PASSWORD:nacos}`，缺少环境变量时会回退公开默认密码，人工确认两条 P1 均成立。该提交两轮重复审查均 exit=0、文本 SHA-256 一致，私有阶段一 scorecard 为 `gold_p0_p1=2`、`p0_p1_found=2`、`predicted_candidates=2`、`false_positive_count=0`、`location_accurate=1`、`repeat_stable=true`，功能簇为 `config-prod-nacos-default`、split 为 `holdout`。
+
+同一轮发现模型可能把仅含 `username: ${...:nacos}` 的配置行误报为硬编码凭据；新增窄范围证据门只过滤“用户名单独作为凭据”的段落，密码、token、secret 及独立安全根因继续保留，并加入无模型/伪模型回归。该门禁不修改 SYSTEM；五轮合成门禁仍保持全部正例 5/5、clean 30/30、输出哈希稳定和截断显式失败。

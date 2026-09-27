@@ -185,6 +185,13 @@ cache:
   host: ${REDIS_HOST:192.168.30.241}
   password: ${REDIS_PASSWORD:wanzhiTestRedisPlatform}
 EOF
+cat >"$repo/application-prod-username.yml" <<'EOF'
+spring:
+  cloud:
+    nacos:
+      username: ${NACOS_USERNAME:nacos}
+      password: ${NACOS_PASSWORD:nacos}
+EOF
 cat >"$repo/application-cluster-platform.yml" <<'EOF'
 spring:
   cloud:
@@ -1200,6 +1207,23 @@ repeated_default_count="$(grep -o 'P1 application-credential-repeated-default.ym
 grep -F 'P1 application-credential-remote-default.yml' "$capture" >/dev/null || {
   echo 'missing remote JDBC/service default credential preflight' >&2
   cat "$capture" >&2
+  exit 1
+}
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 application-prod-username.yml:4 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。\\n\\nP1 application-prod-username.yml:5 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+username_default_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+if printf '%s\n' "$username_default_output" | grep -F 'P1 application-prod-username.yml:4' >/dev/null; then
+  echo 'username-only default was incorrectly reported as a credential finding' >&2
+  printf '%s\n' "$username_default_output" >&2
+  exit 1
+fi
+printf '%s\n' "$username_default_output" | grep -F 'P1 application-prod-username.yml:5' >/dev/null || {
+  echo 'password default was hidden while filtering username-only credential finding' >&2
+  printf '%s\n' "$username_default_output" >&2
   exit 1
 }
 grep -F 'P2 application-cluster-platform.yml:' "$capture" >/dev/null || {

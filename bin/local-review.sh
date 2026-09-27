@@ -491,6 +491,37 @@ filter_unsupported_shard_findings() {
       if (text ~ /缺少|冲突|不兼容|编译失败|构建失败|依赖版本|风险|问题/) return 0
       return 1
     }
+    function username_only_credential_default(text, evidence, path,    header, line_number, source_path, source_line, cursor, target_line) {
+      # A username such as `nacos` is an identifier, not a secret by itself.
+      # Models sometimes report a generic hardcoded-credential finding for a
+      # username placeholder next to a real password default.  Inspect only
+      # the exact changed source line; keep password/token/secret findings and
+      # any independent security claim visible.
+      if (path !~ /\.(ya?ml|properties|conf|ini|env|toml|json)$/) return 0
+      if (evidence == "" || path in symlink_by_path ||
+          path ~ /(^|\/)\.\.($|\/)/ || path ~ /^\// || path ~ /^[A-Za-z]:/) return 0
+      if (text !~ /配置文件新增了疑似硬编码凭据|硬编码凭据/) return 0
+      if (text ~ /密码|password|passwd|token|secret|AccessKey|access[-_]?key|api[-_]?key|权限|租户|越权|SSRF|SQL[[:space:]]*注入/) return 0
+      header = text
+      sub(/[\r\n].*$/, "", header)
+      if (header !~ /:[0-9]+([[:space:]]|$)/) return 0
+      sub(/^.*:/, "", header)
+      sub(/[[:space:]]+-.*$/, "", header)
+      line_number = header + 0
+      if (line_number <= 0 || repo_root == "") return 0
+      source_path = repo_root "/" path
+      cursor = 0
+      target_line = ""
+      while ((getline source_line < source_path) > 0) {
+        cursor++
+        if (cursor == line_number) target_line = source_line
+      }
+      close(source_path)
+      if (target_line == "") return 0
+      target_line = tolower(target_line)
+      if (target_line !~ /(^|[.[:space:]_"-])username([.[:space:]_:"-]|=)/) return 0
+      return target_line ~ /\$\{[a-z_][a-z0-9_]*:(nacos|admin|root)\}/
+    }
     function correlated_tenant_guard(text, evidence) {
       # A correlated EXISTS/subquery that compares the inner and outer
       # tenant_id is direct evidence of tenant scoping.  Do not let the model
@@ -636,6 +667,7 @@ filter_unsupported_shard_findings() {
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
       if (generic_standard_library_info(block)) invalid = 1
+      if (username_only_credential_default(block, path_evidence, finding_path(block))) invalid = 1
       if (correlated_tenant_guard(block, path_evidence)) invalid = 1
       # Do not suppress configuration findings just because their consequence
       # includes "可能"/"如果". Wording is not evidence against a defect;

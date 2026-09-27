@@ -660,3 +660,7 @@ reserve 和 effective budget，方便后续复核。
 同日复核 ERP 两条真实并发留出 `736ef178`、`7fee9f1a`：当前锁序预检分别在 5/12 个分片中保留一条反向锁序 P1，完整耗时 57/226 秒；人工核对 `returnRepository` 与 `inspectionRepository` 的实际资源映射和事务路径后确认两条候选成立。两轮重复审查均保持相同 finding 与运行签名，耗时约 59 秒和 238–249 秒。该结果提高并发根因的可观测性，但仍不把确定性候选未经人工标签聚合成泛化召回率。
 
 随后将两条候选登记为私有阶段一 holdout 标签，scorecard 各为 1 个确认 P1、1 个命中、0 个误报，重复稳定且定位准确；两条提交共享同一 `lock-order-erp-sales-return` 功能簇。单独运行阶段一门禁因缺少 train/dev 和 20 个 holdout 根因而按预期失败；这一步只补充真实并发真值，不放宽高可用验收条件。
+
+同日跨仓库抽样了 `platform-auth:711e742`、`platform-integration:18ea173`、`platform-system:db93e1d` 和 `platform-job:ce7010c3`。前三条完整返回 clean 且人工未确认 P0/P1；job 提交在生产 bootstrap 的 discovery/config 两处 `${NACOS_PASSWORD:nacos}` 被确认是默认凭据 P1。job 结果两轮 SHA-256 稳定，scorecard 为 2 个 gold、2 个命中、0 个误报、定位准确，作为独立 `config-prod-nacos-default` holdout 保存。
+
+该复核还暴露“默认用户名不是秘密”这一误报边界。运行器新增仅针对精确用户名行和公开弱默认值的过滤，要求路径来自当前 diff 且不跟随父目录/符号链接；密码和其他独立风险不受影响。新增回归后，确定性套件与五轮合成门禁均通过，未改动模型 SYSTEM 或默认参数。
