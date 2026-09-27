@@ -480,6 +480,17 @@ filter_unsupported_shard_findings() {
       }
       return (current_placeholder && !current_secret)
     }
+    function generic_standard_library_info(text) {
+      # Informational prose such as "java.net.http is a standard library and
+      # needs no extra dependency" is not a defect or an actionable review
+      # result. Models may emit it nondeterministically; dropping only this
+      # narrow shape keeps repeated reviews stable without hiding a concrete
+      # compatibility or build claim.
+      if (text !~ /^[[:space:]]*信息[[:space:]:：]+/) return 0
+      if (text !~ /标准库|标准组件|无需额外依赖|不需要额外依赖/) return 0
+      if (text ~ /缺少|冲突|不兼容|编译失败|构建失败|依赖版本|风险|问题/) return 0
+      return 1
+    }
     function flush(    invalid, path_evidence) {
       if (block == "") return
       finding_path_value = finding_path(block)
@@ -611,6 +622,7 @@ filter_unsupported_shard_findings() {
       if (block ~ /缺少.*日志|没有.*日志|日志记录/ && block !~ /秘密|Secret|password|密码/) invalid = 1
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
+      if (generic_standard_library_info(block)) invalid = 1
       # Do not suppress configuration findings just because their consequence
       # includes "可能"/"如果". Wording is not evidence against a defect;
       # invalid locations and incomplete fields must reach validation below.
@@ -1271,6 +1283,8 @@ Fail-closed 语义：客户端启用时主动调用 `requireInternalToken()`，�
 
 Spring 客户端负例：`@Bean` 方法接收由容器注入的 `Platform*Properties` 参数时，不得要求额外的 properties null 检查；已有默认 baseUrl 或明确的配置 setter/helper 时，不得仅因没有重复的 URL 格式、空值或超时校验而报告问题。若 token 已有 `null`/`isBlank()` 保护，不得声称缺少保护；不得仅因没有构建日志、token 日志或监控而报告问题。
 
+Spring 事务边界：`Propagation.MANDATORY` 只表达“调用方必须已有事务”，注解本身不是问题。只有当前差异同时展示了可达的非事务调用点、与明确契约冲突的异步/调度入口，或能直接证明运行时会抛出事务状态异常时才报告；如果所有可见调用点都位于 `@Transactional` 事务服务中，不得仅因没有改用 `REQUIRED` 而报告问题。
+
 Lombok：可见 `@Data`/`@Getter`/`@Setter`/`@Value`/构造器生成注解时，视为对应成员存在；仅有明确依赖或编译失败证据才报告缺失。
 
 内部路由客户端契约：如果差异新增或修改了 `/internal/**` 客户端方法，且同一差异或可见项目文档明确表明该客户端默认 baseUrl 是公网网关、拦截器只转发用户 `x-token`，而内部服务明确要求直连并携带 `X-Gateway-Token`（或等价内部认证），则报告一个 P1 的可达契约/运行时失败；应指出方法无法按默认自动配置成功调用，并建议拆分内部客户端、使用内部 baseUrl 和认证头。只有这些 baseUrl、路由和认证要求都能由当前差异或显式 context 直接证明时才报告；没有调用点时影响可标为潜在，但不能因此静默忽略。
@@ -1279,9 +1293,11 @@ Lombok：可见 `@Data`/`@Getter`/`@Setter`/`@Value`/构造器生成注解时，
 
 维护任务 clean 反例的强制边界：如果当前差异明确呈现 `supplyWithIgnoreTenant` 枚举记录、把每条记录的 `tenantId` 传给 `recycleForTenant`，并用 `Math.max(1, Math.min(limit, 1000))` 夹紧内部 LIMIT，则该模式本身必须视为 clean。不得假设 repository 实现“可能”绕过租户、返回 null、依赖线程上下文或把 limit 当 SQL 代码；这些都不是差异中的可验证问题。
 
-数据库 DDL 保守边界：新增初始化/迁移脚本、表或字段时，单凭缺少 `NOT NULL`、默认值、`CHECK`、枚举、唯一索引或外键，不得报告 P0-P3；这些约束只有在明确业务契约、可达代码反例或可复现数据库错误时才是问题。新增迁移脚本并同步更新 README/部署步骤通常是正常变更；“删除已有版本化迁移脚本且移除已有库升级步骤”的专门规则仍然适用。配置中的空令牌也不能仅凭字面为空报告问题，除非代码明确启用功能却绕过已有 fail-closed 校验。
+数据库 DDL 保守边界：新增初始化/迁移脚本、表或字段时，单凭缺少 `NOT NULL`、默认值、`CHECK`、枚举、唯一索引或外键，不得报告 P0-P3；这些约束只有在明确业务契约、可达代码反例或可复现数据库错误时才是问题。MySQL 生成列如果当前可见定义已经包含 `GENERATED ALWAYS AS (...) STORED` 或 `VIRTUAL`，这是合法且明确的存储方式，不得报告“缺少 STORED/VIRTUAL”或语法错误；只有差异真实缺少关键字且目标方言/构建证据明确冲突时才可报告。新增迁移脚本并同步更新 README/部署步骤通常是正常变更；“删除已有版本化迁移脚本且移除已有库升级步骤”的专门规则仍然适用。配置中的空令牌也不能仅凭字面为空报告问题，除非代码明确启用功能却绕过已有 fail-closed 校验。
 
 SQL schema 目标边界：如果同一新增或修改的 SQL 文件中恰好可见一个 `CREATE DATABASE`/`CREATE SCHEMA` 和一个 `USE`，且规范化后的名称不一致，必须报告一个 P1，说明空库初始化或迁移可能把 DDL 执行到错误数据库；至少一条语句必须是当前差异新增行。多 schema 编排、跨文件/变量关联、无法完整解析的多行语句、只有 CREATE 或名称一致时，不要猜测报告。
+
+字典排序边界：如果差异只交换字典/菜单记录的 `sort`、展示顺序或同类排序字段，且没有代码/契约证明该数字是业务状态、事件类型或持久化枚举编码，不得把数值重排报告为业务语义破坏；只有明确的 code/id 语义被改变且存在可达消费者或数据兼容证据时才报告。
 
 输出前逐条自检：每条问题都必须能在当前差异或明确契约中指出具体反例、可达影响和修复依据；仅凭“没有某个注解/日志/校验/测试”不得报告。如果同一根因、同一文件和相同代码范围重复出现，只保留一条。若自检不能证明问题，删除该候选；宁可输出“未发现阻塞问题”，也不要用猜测填满输出预算。
 
