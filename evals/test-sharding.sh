@@ -311,7 +311,7 @@ inspection_order="$(extract_lock_block 'InspectionService.java' | grep -oE '[a-z
 # gate in the deterministic collector.
 non_lock_repo="$fixture_root/non-lock-repo"
 git clone -q "$lock_repo" "$non_lock_repo"
-printf '\n    // unrelated comment-only change\n' >>"$non_lock_repo/src/main/java/com/example/ReturnService.java"
+printf '\n    // @Transactional lock-order note; unrelated comment-only change\n' >>"$non_lock_repo/src/main/java/com/example/ReturnService.java"
 non_lock_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$fixture_root/non-lock-requests" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review \

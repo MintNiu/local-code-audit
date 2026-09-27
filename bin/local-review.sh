@@ -3879,11 +3879,19 @@ collect_transaction_lock_order_preflight() {
   # side itself to add/remove a visible transaction or lock marker; unchanged
   # source context is still available to the model-only evidence collector.
   changed_lock_paths="$(awk '
+    function clean_changed_line(raw, text) {
+      text = raw
+      gsub(/"([^"\\]|\\.)*"/, "", text)
+      gsub(/\047([^\047\\]|\\.)*\047/, "", text)
+      sub(/\/\/.*$/, "", text)
+      sub(/\/\*.*$/, "", text)
+      return text
+    }
     /^diff --git / { path = $4; sub(/^b\//, "", path); next }
     /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, ""); next }
     /^\+\+\+ |^--- / { next }
     /^[+-]/ {
-      text = substr($0, 2)
+      text = clean_changed_line(substr($0, 2))
       if (text ~ /@Transactional|@Lock|PESSIMISTIC_WRITE|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/) changed[path] = 1
     }
     END { for (path in changed) if (path ~ /\.java$/) print path }
