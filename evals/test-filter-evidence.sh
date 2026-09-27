@@ -198,8 +198,21 @@ log_output="$(run_review token-log "$log_repo" 'P1 src/main/java/example/AuditLo
 验证方式：执行 record 并检查应用、网关和集中式日志，确认不再出现 token 值。')"
 assert_contains token-log "$log_output" STRUCTURED_TOKEN_LOG_MARKER
 
+# A model explanation of a safe header-only transport is not an information
+# finding.  It must normalize to the clean marker without hiding a concrete
+# security claim.
+safe_output="$(run_review safe-negative "$mixed_repo" '信息 src/main/resources/EmployeeMapper.xml:1-13 - 令牌只通过内部请求头传递，属于安全负例，无需修复。
+影响：没有证据表明该请求会进入日志或外部边界。
+修复建议：无需修复，当前实现符合安全负例契约。
+验证方式：确认差异中没有日志、持久化或外部跳转证据。')"
+if ! grep -Fx '未发现阻塞问题' "$safe_output" >/dev/null; then
+  printf 'FAIL safe-negative: expected clean marker\n' >&2
+  cat "$safe_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 4 cases\n'
+printf 'filter evidence regression passed: 5 cases\n'

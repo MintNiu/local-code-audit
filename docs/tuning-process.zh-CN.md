@@ -663,4 +663,10 @@ reserve 和 effective budget，方便后续复核。
 
 同日跨仓库抽样了 `platform-auth:711e742`、`platform-integration:18ea173`、`platform-system:db93e1d` 和 `platform-job:ce7010c3`。前三条完整返回 clean 且人工未确认 P0/P1；job 提交在生产 bootstrap 的 discovery/config 两处 `${NACOS_PASSWORD:nacos}` 被确认是默认凭据 P1。job 结果两轮 SHA-256 稳定，scorecard 为 2 个 gold、2 个命中、0 个误报、定位准确，作为独立 `config-prod-nacos-default` holdout 保存。
 
+### 2026-09-27：跨仓库 DAC 探测与证据过滤漏报修复
+
+新增真实探测样本：`platform-dac-service:36da7ae`、`platform-workflow-service:beab22f`、`platform-publishing-service:908b633`、`platform-auth:d5317b6` 和 `platform-gateway:052b848`。个人 profile 均 exit=0 且输出完整；workflow 租户排序、PDF 缓存、登录手机号回传和工作流网关路由经人工核对未确认 P0/P1。DAC 样本的 `includeDisabled` 语义和 HR 依赖可用性各保留为待契约确认的 P2 候选，不计入阶段一根因分母。
+
+本轮还用无模型夹具确认两个过滤漏报：路径级 `tenant_id` 证据错误覆盖同一 Mapper 的另一条查询/删除行，且“缺少日志”通用过滤会吞掉明确 token 明文日志。修复后 `evals/test-filter-evidence.sh` 五个用例通过：仅以报告行号附近的当前源码窗口判断相关租户条件，删除行和别名错误不再被静默过滤；含 token、令牌、凭据或 AccessKey 的日志段落继续保留。该修复不改变 SYSTEM 或模型权重，重点提升“发现的问题必须可见”的高可用门禁。
+
 该复核还暴露“默认用户名不是秘密”这一误报边界。运行器新增仅针对精确用户名行和公开弱默认值的过滤，要求路径来自当前 diff 且不跟随父目录/符号链接；密码和其他独立风险不受影响。新增回归后，确定性套件与五轮合成门禁均通过，未改动模型 SYSTEM 或默认参数。

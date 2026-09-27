@@ -257,3 +257,7 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 同日补充跨仓库真实提交探测：`platform-auth:711e742`（小程序登录）、`platform-integration:18ea173`（HR 发布失败）、`platform-system:db93e1d`（网关规则缓存自愈）均完整返回 clean，人工核对后不计入问题真值；`platform-job:ce7010c3` 的生产 bootstrap 新增两处 `${NACOS_PASSWORD:nacos}`，缺少环境变量时会回退公开默认密码，人工确认两条 P1 均成立。该提交两轮重复审查均 exit=0、文本 SHA-256 一致，私有阶段一 scorecard 为 `gold_p0_p1=2`、`p0_p1_found=2`、`predicted_candidates=2`、`false_positive_count=0`、`location_accurate=1`、`repeat_stable=true`，功能簇为 `config-prod-nacos-default`、split 为 `holdout`。
 
 同一轮发现模型可能把仅含 `username: ${...:nacos}` 的配置行误报为硬编码凭据；新增窄范围证据门只过滤“用户名单独作为凭据”的段落，密码、token、secret 及独立安全根因继续保留，并加入无模型/伪模型回归。该门禁不修改 SYSTEM；五轮合成门禁仍保持全部正例 5/5、clean 30/30、输出哈希稳定和截断显式失败。
+
+2026-09-27：对真实 `platform-dac-service:36da7ae`、`platform-workflow-service:beab22f`、`platform-publishing-service:908b633`、`platform-auth:d5317b6` 和 `platform-gateway:052b848` 做跨仓库 holdout 探测。当前 tuned profile 均完整返回 clean；人工复核确认 workflow 租户排序、PDF 页预览缓存、小程序手机号回传和网关工作流路由没有可由差异证明的 P0/P1。DAC 提交仍记录两条需要后续契约确认的 P2 候选：`DacDirectoryGateway.users(boolean includeDisabled)` 丢弃旧参数且 HR 目录固定只返回 ACTIVE，以及 `/dac/v1/sso/me` 同步依赖 HR 服务、无本地上下文降级；两者不计入阶段 1 P0/P1 分母，避免把有意的目录契约调整冒充安全根因。
+
+同日发现输出过滤器的两个真实漏报边界：路径级租户条件会把同一 Mapper 中另一条不安全查询或已删除租户条件误当作安全证据；“缺少日志”降噪会吞掉结构化 token 明文日志 P1。修复为仅使用报告行号附近的当前源码窗口，并保留明确 token/凭据日志；新增 `evals/test-filter-evidence.sh` 五用例回归，覆盖混合查询、删除行、别名错误、token 日志和安全负例信息。无模型确定性套件与五轮合成门禁均通过，五轮正例/负例输出哈希稳定，截断失败仍显式保留。

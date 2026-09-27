@@ -491,6 +491,19 @@ filter_unsupported_shard_findings() {
       if (text ~ /缺少|冲突|不兼容|编译失败|构建失败|依赖版本|风险|问题/) return 0
       return 1
     }
+    function safe_negative_info(text) {
+      # The model occasionally explains why an internal header-only token
+      # transport is safe as an `信息` paragraph.  That is not a finding and
+      # violates the clean-output contract, but only this explicit negative
+      # shape is removable; concrete leakage, tenancy, permission, or other
+      # risk wording remains visible.
+      if (text !~ /^[[:space:]]*信息[[:space:]:：]/) return 0
+      if (text !~ /安全负例|符合安全负例/) return 0
+      if (text !~ /无需修复|不构成问题/) return 0
+      if (text !~ /没有证据|未见|没有.*(日志|外部|持久化)/) return 0
+      if (text ~ /仍.*(泄漏|越权|风险|问题)|同时.*(泄漏|越权|风险|问题)|但是|然而/) return 0
+      return 1
+    }
     function username_only_credential_default(text, evidence, path,    header, line_number, source_path, source_line, cursor, target_line) {
       # A username such as `nacos` is an identifier, not a secret by itself.
       # Models sometimes report a generic hardcoded-credential finding for a
@@ -522,7 +535,7 @@ filter_unsupported_shard_findings() {
       if (target_line !~ /(^|[.[:space:]_"-])username([.[:space:]_:"-]|=)/) return 0
       return target_line ~ /\$\{[a-z_][a-z0-9_]*:(nacos|admin|root)\}/
     }
-    function correlated_tenant_guard(text, evidence) {
+    function correlated_tenant_guard(text, evidence, path,    header, location, start_line, end_line, lines, line_count, i, window) {
       # A correlated EXISTS/subquery that compares the inner and outer
       # tenant_id is direct evidence of tenant scoping.  Do not let the model
       # report a generic "missing tenant isolation" finding for that shape;
@@ -531,8 +544,33 @@ filter_unsupported_shard_findings() {
       if (text !~ /租户|tenant|Tenant|TENANT/) return 0
       if (text !~ /缺少|未.*限制|未.*校验|没有.*租户|隔离/) return 0
       if (text ~ /错误|不一致|不匹配|绕过|越权.*已发生|SQL[[:space:]]*注入|权限/) return 0
-      if (evidence !~ /EXISTS|子查询/) return 0
-      if (evidence !~ /[A-Za-z_][A-Za-z0-9_]*[.]tenant_id[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[.]tenant_id/) return 0
+      # Use the current source snapshot and only the reported line window.
+      # Path-wide diff evidence is unsafe here: a deleted tenant predicate or
+      # a different SELECT in the same mapper must not prove this finding
+      # false.  The snapshot is loaded only for a real changed, non-symlink
+      # path by flush() below.
+      if (path == "" || !(path in full_evidence)) return 0
+      header = text
+      sub(/[\r\n].*$/, "", header)
+      if (match(header, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?/)) {
+        location = substr(header, RSTART, RLENGTH)
+        sub(/^:/, "", location)
+        start_line = location + 0
+        end_line = start_line
+        if (location ~ /-/) {
+          sub(/^.*-/, "", location)
+          end_line = location + 0
+        }
+      }
+      if (start_line <= 0) return 0
+      if (end_line < start_line) end_line = start_line
+      line_count = split(full_evidence[path], lines, "\n")
+      for (i = start_line - 4; i <= end_line + 4; i++) {
+        if (i < 1 || i > line_count) continue
+        window = window lines[i] "\n"
+      }
+      if (window !~ /EXISTS|子查询/) return 0
+      if (window !~ /[A-Za-z_][A-Za-z0-9_]*[.]tenant_id[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[.]tenant_id/) return 0
       return 1
     }
     function flush(    invalid, path_evidence) {
@@ -550,7 +588,7 @@ filter_unsupported_shard_findings() {
       if (repo_root != "" && finding_path_value != "" &&
           (finding_path_value in evidence_by_path) &&
           !(finding_path_value in symlink_by_path) &&
-          finding_path_value ~ /\.(java|ya?ml|properties|sql)$/ &&
+          finding_path_value ~ /\.(java|ya?ml|properties|sql|xml)$/ &&
           !(finding_path_value in full_loaded)) {
         full_file = repo_root "/" finding_path_value
         full_line_count = 0
@@ -663,12 +701,14 @@ filter_unsupported_shard_findings() {
           path_evidence ~ /->/ && path_evidence ~ /return/) invalid = 1
       # Missing logging/monitoring by itself is explicitly outside the audit
       # contract; concrete secret logging remains reportable by its evidence.
-      if (block ~ /缺少.*日志|没有.*日志|日志记录/ && block !~ /秘密|Secret|password|密码/) invalid = 1
+      if (block ~ /缺少.*日志|没有.*日志|日志记录/ &&
+          block !~ /秘密|Secret|password|密码|token|Token|令牌|凭据|credential|AccessKey/) invalid = 1
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
       if (generic_standard_library_info(block)) invalid = 1
+      if (safe_negative_info(block)) invalid = 1
       if (username_only_credential_default(block, path_evidence, finding_path(block))) invalid = 1
-      if (correlated_tenant_guard(block, path_evidence)) invalid = 1
+      if (correlated_tenant_guard(block, path_evidence, finding_path_value)) invalid = 1
       # Do not suppress configuration findings just because their consequence
       # includes "可能"/"如果". Wording is not evidence against a defect;
       # invalid locations and incomplete fields must reach validation below.
