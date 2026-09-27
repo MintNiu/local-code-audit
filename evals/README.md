@@ -87,7 +87,18 @@ SQL 迁移预检还会识别同一文件内 DROP/CREATE 触发器名称仅差前
   ~/.local/share/local-review/evals/platform-api-scorecard.tsv
 ```
 
-构建器只输出 `review_status=complete` 且运行成功的提交；它会校验标签中的 `# source_result_sha256` 与所选结果文件内容完全一致，并逐条校验 confirmed/false-positive 的文件和行号与结果候选重叠，允许安全搬迁同一结果，拒绝把旧 profile/旧运行的标签套到不同结果上。`missed` 是人工记录的 false negative，必须使用 P0/P1、真实路径、正数行号和证据备注，并且不能与所选结果中的任何候选范围重叠；否则标签与结果矛盾，构建器会 fail-closed。`uncertain` 不计入指标。缺少结果、元数据或字段不完整会 fail-closed；失败时不会留下半成品输出。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
+如果要生成可提交阶段一门禁的评分卡，显式加上 `--stage1`：
+
+```bash
+./evals/build-scorecard.sh --stage1 \
+  --labels-dir ~/.local/share/local-review/evals/platform-api-labels \
+  --results-dir ~/.local/share/local-review/evals/platform-api-results \
+  --out ~/.local/share/local-review/evals/platform-api-stage1-scorecard.tsv
+```
+
+`--stage1` 不会根据提交日期、主题、候选数量或运行是否成功猜测评测元数据；每个 complete 标签必须由人工填写 `# split`、`# feature_cluster`、`# location_accurate` 和 `# repeat_stable`，并且会校验字段格式及 `location_accurate <= p0_p1_found`。缺少或不可信的字段会 fail-closed。默认模式保持基础评分卡兼容，不附加这些阶段一列。
+
+构建器只输出 `review_status=complete` 且运行成功的提交；它会校验标签中的 `# source_result_sha256` 与所选结果文件内容完全一致，要求每个标签文件内的 `finding_id` 唯一，并逐条校验 confirmed/false-positive 的文件和行号与结果候选重叠，允许安全搬迁同一结果，拒绝把旧 profile/旧运行的标签套到不同结果上。`missed` 是人工记录的 false negative，必须使用 P0/P1、真实路径、正数行号和证据备注，并且不能与所选结果中的任何候选范围重叠；否则标签与结果矛盾，构建器会 fail-closed。`uncertain` 不计入指标。缺少结果、元数据或字段不完整会 fail-closed；失败时不会留下半成品输出。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
 
 对于跨事务/行锁风险，运行器会把受限的源码上下文送入 prompt，并额外执行一个窄范围的确定性反向锁序预检。预检只报告“候选”：它要求两个带 `@Transactional` 的源码段直接调用相同 `*ForUpdate` 接收者且顺序相反，并且至少一侧属于变更文件、且变更行本身触及事务/锁标记；它不证明相同数据库资源、调用可达性或真实死锁。候选在模型结果后合并，避免 prompt 重复；Prompt 证据会展示 `@Lock(PESSIMISTIC_WRITE)` 等声明式锁标记，但确定性配对暂不覆盖这类间接锁。请用人工调用链审计和真实数据库并发测试确认，不要把候选直接当作最终真值。
 

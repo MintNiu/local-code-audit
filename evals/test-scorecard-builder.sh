@@ -52,6 +52,43 @@ grep -Fx "$expected_header" "$output" >/dev/null
 grep -F "$commit" "$output" | grep -F $'\t1\t1\t2\t1\ttrue\t12' >/dev/null
 "$repo_root/evals/summarize-scorecard.sh" "$output" | grep -F 'p0_p1_recall=100.0%' >/dev/null
 
+stage1_labels="$tmp_dir/stage1-labels"
+mkdir -p "$stage1_labels"
+cp "$labels_dir/$commit.labels.tsv" "$stage1_labels/$commit.labels.tsv"
+perl -0pi -e 's/^# finding_id/# split\ttrain\n# feature_cluster\tcode-contract\n# location_accurate\t1\n# repeat_stable\ttrue\n# finding_id/m' "$stage1_labels/$commit.labels.tsv"
+stage1_output="$tmp_dir/stage1-scorecard.tsv"
+"$repo_root/evals/build-scorecard.sh" --stage1 --labels-dir "$stage1_labels" --results-dir "$results_dir" --out "$stage1_output" >/dev/null
+stage1_header=$'commit\tmodel\ttemperature\tseed\tnum_ctx\tgold_p0_p1\tp0_p1_found\tpredicted_candidates\tfalse_positive_count\toutput_complete\telapsed_seconds\tsplit\tfeature_cluster\tlocation_accurate\trepeat_stable'
+grep -Fx "$stage1_header" "$stage1_output" >/dev/null
+grep -F "$commit" "$stage1_output" | grep -F $'\t12\ttrain\tcode-contract\t1\ttrue' >/dev/null
+
+stage1_missing_metadata="$tmp_dir/stage1-missing-metadata"
+mkdir -p "$stage1_missing_metadata"
+cp "$labels_dir/$commit.labels.tsv" "$stage1_missing_metadata/$commit.labels.tsv"
+stage1_missing_output="$tmp_dir/stage1-missing.tsv"
+if "$repo_root/evals/build-scorecard.sh" --stage1 --labels-dir "$stage1_missing_metadata" --results-dir "$results_dir" --out "$stage1_missing_output" >/dev/null 2>&1; then
+  echo 'stage1 scorecard builder accepted labels without stage1 metadata' >&2
+  exit 1
+fi
+[[ ! -e "$stage1_missing_output" ]] || {
+  echo 'stage1 scorecard builder left output after metadata rejection' >&2
+  exit 1
+}
+
+stage1_duplicate_metadata="$tmp_dir/stage1-duplicate-metadata"
+mkdir -p "$stage1_duplicate_metadata"
+cp "$stage1_labels/$commit.labels.tsv" "$stage1_duplicate_metadata/$commit.labels.tsv"
+printf '# split\tdev\n' >>"$stage1_duplicate_metadata/$commit.labels.tsv"
+stage1_duplicate_output="$tmp_dir/stage1-duplicate.tsv"
+if "$repo_root/evals/build-scorecard.sh" --stage1 --labels-dir "$stage1_duplicate_metadata" --results-dir "$results_dir" --out "$stage1_duplicate_output" >/dev/null 2>&1; then
+  echo 'stage1 scorecard builder accepted duplicate stage1 metadata' >&2
+  exit 1
+fi
+[[ ! -e "$stage1_duplicate_output" ]] || {
+  echo 'stage1 scorecard builder left output after duplicate metadata rejection' >&2
+  exit 1
+}
+
 clean_with_finding_labels="$tmp_dir/clean-with-finding-labels"
 mkdir -p "$clean_with_finding_labels"
 cp "$labels_dir/$commit.labels.tsv" "$clean_with_finding_labels/$commit.labels.tsv"
@@ -78,6 +115,20 @@ if "$repo_root/evals/build-scorecard.sh" --labels-dir "$labels_dir" --results-di
 fi
 [[ ! -e "$incomplete_output" ]] || {
   echo 'scorecard builder left output after incomplete-run rejection' >&2
+  exit 1
+}
+
+duplicate_labels="$tmp_dir/duplicate-labels"
+mkdir -p "$duplicate_labels"
+cp "$labels_dir/$commit.labels.tsv" "$duplicate_labels/$commit.labels.tsv"
+printf '%s\n' $'confirmed-1\tP1\tsrc/main.java\t10\tfalse-positive\tduplicate fixture' >>"$duplicate_labels/$commit.labels.tsv"
+duplicate_output="$tmp_dir/duplicate-scorecard.tsv"
+if "$repo_root/evals/build-scorecard.sh" --labels-dir "$duplicate_labels" --results-dir "$results_dir" --out "$duplicate_output" >/dev/null 2>&1; then
+  echo 'scorecard builder accepted duplicate finding_id' >&2
+  exit 1
+fi
+[[ ! -e "$duplicate_output" ]] || {
+  echo 'scorecard builder left output after duplicate finding_id rejection' >&2
   exit 1
 }
 

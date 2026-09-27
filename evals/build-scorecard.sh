@@ -4,6 +4,7 @@ set -euo pipefail
 labels_dir=""
 results_dir=""
 output_file=""
+stage1_mode=false
 
 usage() {
   cat <<'EOF'
@@ -17,6 +18,8 @@ usage() {
   --labels-dir <dir>   人工标签目录，只读取已标为 complete 的标签
   --results-dir <dir>  与标签对应的 .txt 和 .meta.tsv 结果目录
   --out <file>         输出 TSV；省略时写到 stdout
+  --stage1              输出阶段一评分卡；要求标签包含人工填写的 split、
+                        feature_cluster、location_accurate、repeat_stable 元数据
 
 脚本不会修改标签或结果。uncertain finding 不计入指标；只有
 review_status=complete 的提交才会输出到 scorecard。
@@ -39,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "--out 需要文件" >&2; exit 2; }
       output_file="$2"
       shift 2
+      ;;
+    --stage1)
+      stage1_mode=true
+      shift
       ;;
     -h|--help)
       usage
@@ -69,7 +76,11 @@ emit() {
   fi
 }
 
-emit $'commit\tmodel\ttemperature\tseed\tnum_ctx\tgold_p0_p1\tp0_p1_found\tpredicted_candidates\tfalse_positive_count\toutput_complete\telapsed_seconds'
+if [[ "$stage1_mode" == true ]]; then
+  emit $'commit\tmodel\ttemperature\tseed\tnum_ctx\tgold_p0_p1\tp0_p1_found\tpredicted_candidates\tfalse_positive_count\toutput_complete\telapsed_seconds\tsplit\tfeature_cluster\tlocation_accurate\trepeat_stable'
+else
+  emit $'commit\tmodel\ttemperature\tseed\tnum_ctx\tgold_p0_p1\tp0_p1_found\tpredicted_candidates\tfalse_positive_count\toutput_complete\telapsed_seconds'
+fi
 
 label_count=0
 while IFS= read -r label_file; do
@@ -91,6 +102,19 @@ while IFS= read -r label_file; do
     fi
   elif ! awk -F '\t' '$1 !~ /^#/ && NF >= 6 && ($5 == "confirmed" || $5 == "missed" || $5 == "false-positive") { found = 1 } END { exit(found ? 0 : 1) }' "$label_file"; then
     echo "verdict=findings 至少需要一条 confirmed、missed 或 false-positive 标签: $label_file" >&2
+    exit 1
+  fi
+  if ! awk -F '\t' '
+    $1 !~ /^#/ && NF >= 6 {
+      if ($1 in seen) {
+        printf "标签包含重复 finding_id: %s\n", $1 > "/dev/stderr"
+        duplicate = 1
+      }
+      seen[$1] = 1
+    }
+    END { exit(duplicate ? 1 : 0) }
+  ' "$label_file"; then
+    echo "标签 finding_id 必须唯一，拒绝汇总: $label_file" >&2
     exit 1
   fi
   commit="$(awk -F '\t' '$1 == "# commit" { print $2; exit }' "$label_file")"
@@ -135,6 +159,36 @@ while IFS= read -r label_file; do
     exit 1
   }
 
+  if [[ "$stage1_mode" == true ]]; then
+    for stage1_field in split feature_cluster location_accurate repeat_stable; do
+      stage1_field_count="$(awk -F '\t' -v key="# $stage1_field" '$1 == key { n++ } END { print n + 0 }' "$label_file")"
+      [[ "$stage1_field_count" == 1 ]] || {
+        echo "阶段一标签必须恰好包含一个 # $stage1_field 元数据行: $commit" >&2
+        exit 1
+      }
+    done
+    split_name="$(awk -F '\t' '$1 == "# split" { print $2; exit }' "$label_file")"
+    feature_cluster="$(awk -F '\t' '$1 == "# feature_cluster" { print $2; exit }' "$label_file")"
+    location_accurate="$(awk -F '\t' '$1 == "# location_accurate" { print $2; exit }' "$label_file")"
+    repeat_stable="$(awk -F '\t' '$1 == "# repeat_stable" { print $2; exit }' "$label_file")"
+    [[ "$split_name" =~ ^(train|dev|holdout)$ ]] || {
+      echo "阶段一标签缺少有效 split（train、dev 或 holdout）: $commit" >&2
+      exit 1
+    }
+    [[ "$feature_cluster" =~ ^[^[:space:]]+$ ]] || {
+      echo "阶段一标签缺少有效 feature_cluster: $commit" >&2
+      exit 1
+    }
+    [[ "$location_accurate" =~ ^[0-9]+$ ]] || {
+      echo "阶段一标签的 location_accurate 必须是非负整数: $commit" >&2
+      exit 1
+    }
+    [[ "$repeat_stable" == true || "$repeat_stable" == false ]] || {
+      echo "阶段一标签的 repeat_stable 必须是 true 或 false: $commit" >&2
+      exit 1
+    }
+  fi
+
   model="$(awk -F '\t' '$1 == "resolved_model" { print $2; exit }' "$meta_file")"
   temperature="$(awk -F '\t' '$1 == "temperature" { print $2; exit }' "$meta_file")"
   seed="$(awk -F '\t' '$1 == "seed" { print $2; exit }' "$meta_file")"
@@ -157,6 +211,10 @@ while IFS= read -r label_file; do
   fi
   if [[ "$false_positives" -gt "$candidates" ]]; then
     echo "人工标记的误报多于结果中的模型候选数: ${commit}；标签与结果可能不匹配" >&2
+    exit 1
+  fi
+  if [[ "$stage1_mode" == true && "$location_accurate" -gt "$found" ]]; then
+    echo "阶段一标签的 location_accurate 不能大于 p0_p1_found: $commit" >&2
     exit 1
   fi
   # Candidate counts alone do not prove that the label was made from this
@@ -222,9 +280,16 @@ while IFS= read -r label_file; do
       exit 1
     fi
   done <"$label_file"
-  emit "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\ttrue\t%s' \
-    "$commit" "$model" "$temperature" "$seed" "$num_ctx" "$gold" "$found" \
-    "$candidates" "$false_positives" "$elapsed")"
+  if [[ "$stage1_mode" == true ]]; then
+    emit "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\ttrue\t%s\t%s\t%s\t%s\t%s' \
+      "$commit" "$model" "$temperature" "$seed" "$num_ctx" "$gold" "$found" \
+      "$candidates" "$false_positives" "$elapsed" "$split_name" "$feature_cluster" \
+      "$location_accurate" "$repeat_stable")"
+  else
+    emit "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\ttrue\t%s' \
+      "$commit" "$model" "$temperature" "$seed" "$num_ctx" "$gold" "$found" \
+      "$candidates" "$false_positives" "$elapsed")"
+  fi
   label_count=$((label_count + 1))
 done < <(find "$labels_dir" -type f -name '*.labels.tsv' -print | LC_ALL=C sort)
 
