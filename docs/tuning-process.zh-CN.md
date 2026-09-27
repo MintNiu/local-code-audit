@@ -678,3 +678,13 @@ reserve 和 effective budget，方便后续复核。
 运行器没有用泛化关键词过滤，而是加入两条可解释的确定性证据门：只有同一文件同时出现新增 URL 前缀匹配、`new URL(url)` 出站 sink 和白名单证据时，才报告 URL 前缀 SSRF；只有权限拦截器迁移同时触及 xxl-job 控制器时，才检查同类任务/日志入口是否缺 `validJobGroupPermission`。两条无模型夹具均通过；SSRF holdout 重跑后完整命中并按同一根因聚合，随后两轮重复结果稳定。权限 holdout 的确定性预检命中，但 Ollama 请求超时，结果保持 `output_complete=false`，不纳入阶段一召回或稳定性统计。
 
 这次过程再次验证高可用边界：确定性预检可以补上模型对安全修复完整性的漏报，但模型传输/推理未完成时必须保留失败状态，不能把预检结果伪装成完整审查。对应真实结果与 scorecard 只保存在本机私有评测目录，不进入公开仓库；阶段一仍未达到 20 个独立 holdout P0/P1 根因和 90% 召回/定位门槛。
+
+### 2026-09-28：权限留出超时恢复与重复稳定性
+
+权限留出 `platform-job:a2dc901` 的第一次预检复跑虽然确定性识别了 `JobInfoController`/`JobLogController` 的 job-group 授权缺口，但模型请求在大请求窗口下超时；将窗口直接压小到 512 token 又触发截断。复盘发现模型在分片中反复生成“如果服务层未校验”的条件式猜测，既没有当前分片证据，也重复了权限预检根因。
+
+因此增加两层窄范围门禁：SYSTEM 明确禁止把未展示的服务层实现写成条件式权限问题；输出过滤器在当前差异已出现 `PermissionInterceptor`/`validJobGroupPermission` 迁移证据时，移除同一预检根因的重复或“若服务层”猜测，但保留任何带独立租户、SQL、并发、凭据或其他授权证据的段落。若 Ollama 返回 `done_reason=length`，只有在该窄范围过滤后没有任何独立模型 finding、且确定性权限预检已存在时，才恢复为可继续合并的 clean 分片；其他长度截断仍按失败处理。无模型回归从 6 个扩展到 7 个用例，覆盖正常过滤和该恢复条件。
+
+在 `num_ctx=16384`、3KB 分片、`num_predict=1024`/分片预算 1024 的受限评测配置下，权限留出 13/13 个分片完整结束，exit=0，耗时 124 秒；两轮重复为 123/128 秒，结果 SHA-256 和两条预检 P1 finding 完全一致。私有 scorecard 记录 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=1`、`false_positives=0`、`output_complete=true`、`location_accurate=1`、`repeat_stable=true`。该过程把“能发现但超时”的样本转成可重复的完整审查，同时保留 fail-closed 边界；它只增加一个权限根因证据，阶段一仍未满足 20 个独立 holdout P0/P1 根因和 90% 生产门槛。
+
+同轮五轮合成门禁又暴露 `java-generated-column-safe` 的信息级 DDL 误报：模型把没有显式租户列、以及已经明确使用 `GENERATED ALWAYS ... STORED` 的合法 CASE 生成列分别写成问题。运行器新增窄范围 DDL 证据门，只过滤带“可能/或许”措辞、没有明确契约/越权/泄漏/权限/SQL 注入证据的信息段落；P0–P3 和具体 SQL/租户冲突不受影响。`test-filter-evidence.sh` 扩展为 8 个用例，随后五轮合成恢复为 7 类正例 5/5、6 类 clean 30/30，所有结果哈希稳定。

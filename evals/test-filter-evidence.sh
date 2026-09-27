@@ -29,8 +29,9 @@ EOF
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-exec jq -n --rawfile response "$LOCAL_REVIEW_TEST_RESPONSE" \
-  '{response: $response, done: true, done_reason: "stop"}'
+done_reason="${LOCAL_REVIEW_TEST_DONE_REASON:-stop}"
+exec jq -n --rawfile response "$LOCAL_REVIEW_TEST_RESPONSE" --arg done_reason "$done_reason" \
+  '{response: $response, done: true, done_reason: $done_reason}'
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
@@ -211,8 +212,89 @@ if ! grep -Fx '未发现阻塞问题' "$safe_output" >/dev/null; then
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
+# A permission-interceptor migration has a deterministic preflight finding.
+# The model must not turn the missing service implementation from a shard into
+# repeated conditional "if the service does not validate" findings; the
+# preflight paragraph remains the authoritative visible issue.
+permission_repo="$(new_repo xxl-permission-migration)"
+mkdir -p "$permission_repo/src/main/java/example"
+cat >"$permission_repo/src/main/java/example/JobInfoController.java" <<'EOF'
+package example;
+
+class JobInfoController {
+  @RequestMapping("/jobinfo/remove")
+  void remove(LoginUser loginUser) {
+    xxlJobService.remove();
+  }
+}
+EOF
+git -C "$permission_repo" add .
+git -C "$permission_repo" commit -qm base
+printf '%s\n' '  private PermissionInterceptor permissionInterceptor;' >>"$permission_repo/src/main/java/example/JobInfoController.java"
+permission_output="$(run_review permission-migration "$permission_repo" 'P1 src/main/java/example/JobInfoController.java:7 - SPECULATIVE_PERMISSION_MARKER：当前分片未展示服务层实现，如果服务层未执行 job group 权限校验，普通用户可能越权修改任务。
+影响：如果服务层缺少权限校验，可能发生越权。
+修复建议：检查服务层是否调用 validJobGroupPermission。
+验证方式：检查服务层实现并执行跨组请求。')"
+if grep -F 'SPECULATIVE_PERMISSION_MARKER' "$permission_output" >/dev/null ||
+   ! grep -F '权限拦截器重构后仍有同类任务/日志入口未执行' "$permission_output" >/dev/null; then
+  printf 'FAIL permission-migration: speculative model duplicate was not filtered or preflight finding missing\n' >&2
+  cat "$permission_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
+# If the same narrow permission response reaches Ollama's length cap, the
+# wrapper may recover only when filtering proves that every emitted block was
+# a preflight duplicate/speculation.  Other truncated responses remain
+# fail-closed.
+export LOCAL_REVIEW_TEST_DONE_REASON=length
+permission_truncated_output="$(run_review permission-migration-truncated "$permission_repo" 'P1 src/main/java/example/JobInfoController.java:7 - SPECULATIVE_PERMISSION_MARKER：当前分片未展示服务层实现，如果服务层未执行 job group 权限校验，普通用户可能越权修改任务。
+影响：如果服务层缺少权限校验，可能发生越权。
+修复建议：检查服务层是否调用 validJobGroupPermission。
+验证方式：检查服务层实现并执行跨组请求。
+
+P1 src/main/java/example/JobInfoController.java:1-8 - 权限拦截器重构后仍有同类任务/日志入口未执行 job group 权限校验，授权修复不完整。
+影响：普通用户可能越权访问任务。
+修复建议：统一调用 validJobGroupPermission。
+验证方式：执行跨组请求。')"
+export LOCAL_REVIEW_TEST_DONE_REASON=stop
+if grep -F 'SPECULATIVE_PERMISSION_MARKER' "$permission_truncated_output" >/dev/null ||
+   ! grep -F '权限拦截器重构后仍有同类任务/日志入口未执行' "$permission_truncated_output" >/dev/null; then
+  printf 'FAIL permission-migration-truncated: safe length recovery did not preserve only preflight finding\n' >&2
+  cat "$permission_truncated_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
+# Legal generated-column syntax and an unconstrained DDL tenant-column
+# suggestion are information-level speculation without a visible contract;
+# both must normalize to clean while concrete SQL/tenant findings remain.
+ddl_repo="$(new_repo ddl-safe-info)"
+mkdir -p "$ddl_repo/sql"
+cat >"$ddl_repo/sql/schema.sql" <<'EOF'
+CREATE TABLE hr_employment (
+  id BIGINT PRIMARY KEY,
+  status VARCHAR(32) NOT NULL,
+  active_person_id BIGINT GENERATED ALWAYS AS (CASE WHEN status = 'ACTIVE' THEN id ELSE NULL END) STORED
+);
+EOF
+git -C "$ddl_repo" add .
+git -C "$ddl_repo" commit -qm base
+printf '%s\n' '-- reviewed generated column' >>"$ddl_repo/sql/schema.sql"
+ddl_output="$(run_review ddl-safe-info "$ddl_repo" '信息 sql/schema.sql:1-5 - 新增表缺少租户字段，可能导致跨租户数据混淆。
+影响：可能跨租户读取数据。
+修复建议：添加 tenant_id 字段。
+验证方式：检查租户查询。
+
+信息 sql/schema.sql:4 - GENERATED ALWAYS AS 子句使用 CASE WHEN 表达式，可能影响数据库性能。
+修复建议：考虑使用更简单的表达式或索引优化。
+验证方式：监控查询性能。')"
+if ! grep -Fx '未发现阻塞问题' "$ddl_output" >/dev/null || grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]' "$ddl_output"; then
+  printf 'FAIL ddl-safe-info: legal/generated-column information was not filtered to clean\n' >&2
+  cat "$ddl_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 5 cases\n'
+printf 'filter evidence regression passed: 8 cases\n'
