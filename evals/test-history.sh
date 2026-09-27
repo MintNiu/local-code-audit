@@ -95,6 +95,20 @@ PATH="$fake_bin:$PATH" \
     >"$fixture_root/repeat-stdout"
 grep -F 'history repeat stability passed: runs=2, commits=1' "$fixture_root/repeat-stdout" >/dev/null
 cmp -s "$repeat_out/run-1/$commit.txt" "$repeat_out/run-2/$commit.txt"
+
+# A single run cannot establish repeat stability; reject it before creating
+# output or invoking the reviewer.
+if PATH="$fake_bin:$PATH" \
+  HISTORY_TEST_CURL_COUNT="$fixture_root/repeat-single-curl-count" \
+  "$repo_root/evals/run-history-repeat.sh" \
+    --runs 1 --repo "$repo" --manifest "$manifest" --out-dir "$fixture_root/repeat-single" \
+    >"$fixture_root/repeat-single-stdout" 2>"$fixture_root/repeat-single-stderr"; then
+  echo 'history repeat accepted runs=1' >&2
+  exit 1
+fi
+grep -F -- '--runs 必须是大于等于 2 的整数' "$fixture_root/repeat-single-stderr" >/dev/null
+[[ ! -e "$fixture_root/repeat-single-curl-count" ]]
+[[ ! -e "$fixture_root/repeat-single" ]]
 printf 'history duplicate regression passed\n'
 
 # Parent validation is fail-closed and must happen before any model transport.
