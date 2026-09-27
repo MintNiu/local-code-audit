@@ -61,6 +61,20 @@ done
 [[ -f "$manifest_file" ]] || { echo "清单文件不存在: $manifest_file" >&2; exit 2; }
 [[ -d "$results_dir" ]] || { echo "结果目录不存在: $results_dir" >&2; exit 2; }
 [[ -n "$labels_dir" ]] || { usage >&2; exit 2; }
+command -v shasum >/dev/null 2>&1 || { echo "生成标签需要 shasum 记录 manifest 版本。" >&2; exit 2; }
+
+label_temp_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-labels.XXXXXX")"
+trap 'rm -rf "$label_temp_root"' EXIT
+manifest_snapshot="$label_temp_root/manifest.tsv"
+if ! cp "$manifest_file" "$manifest_snapshot"; then
+  echo "无法冻结 manifest，拒绝生成可能漂移的标签: $manifest_file" >&2
+  exit 1
+fi
+manifest_sha256="$(shasum -a 256 "$manifest_snapshot" | awk '{print $1}')"
+[[ "$manifest_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || {
+  echo "无法计算 manifest 的 SHA-256，拒绝生成可能漂移的标签。" >&2
+  exit 1
+}
 
 mkdir -p "$labels_dir"
 created=0
@@ -76,11 +90,28 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   result_file="$results_dir/$commit.txt"
   label_file="$labels_dir/$commit.labels.tsv"
 
-  if [[ ! -f "$metadata_file" && ! -f "$result_file" ]]; then
+  if [[ ! -f "$metadata_file" ]]; then
+    if [[ -f "$result_file" ]]; then
+      echo "结果缺少 run-history metadata，无法验证 manifest 来源: $commit" >&2
+      exit 1
+    fi
     printf '跳过 %s：还没有模型结果\n' "$commit" >&2
     missing=$((missing + 1))
     continue
   fi
+
+  metadata_manifest_sha256="$(awk -F '\t' '$1 == "manifest_sha256" { print $2; exit }' "$metadata_file")"
+  if [[ "$metadata_manifest_sha256" != "$manifest_sha256" ]]; then
+    echo "结果与当前 manifest 不一致，拒绝生成标签: $commit" >&2
+    echo "  结果 manifest_sha256=${metadata_manifest_sha256:-<missing>} 当前=${manifest_sha256}" >&2
+    exit 1
+  fi
+  metadata_commit="$(awk -F '\t' '$1 == "commit" { print $2; exit }' "$metadata_file")"
+  metadata_parent="$(awk -F '\t' '$1 == "parent" { print $2; exit }' "$metadata_file")"
+  [[ "$metadata_commit" == "$commit" && "$metadata_parent" == "$parent" ]] || {
+    echo "结果的 commit/parent 与当前 manifest 不一致，拒绝生成标签: $commit" >&2
+    exit 1
+  }
 
   if [[ -e "$label_file" ]]; then
     printf '保留已有标签: %s\n' "$label_file"
@@ -89,9 +120,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   fi
 
   source_result_sha256=""
-  if [[ -f "$metadata_file" ]]; then
-    source_result_sha256="$(awk -F '\t' '$1 == "result_sha256" { print $2; exit }' "$metadata_file")"
-  fi
+  source_result_sha256="$(awk -F '\t' '$1 == "result_sha256" { print $2; exit }' "$metadata_file")"
   if [[ -z "$source_result_sha256" && -f "$result_file" ]]; then
     source_result_sha256="$(shasum -a 256 "$result_file" | awk '{print $1}')"
   fi
@@ -121,6 +150,6 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   } >"$label_file"
   printf '已创建标签模板: %s\n' "$label_file"
   created=$((created + 1))
-done < <(tail -n +2 "$manifest_file")
+done < <(tail -n +2 "$manifest_snapshot")
 
 printf 'label templates: created=%s skipped=%s missing-results=%s\n' "$created" "$skipped" "$missing"

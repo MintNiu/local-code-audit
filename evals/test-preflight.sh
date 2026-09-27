@@ -2670,6 +2670,25 @@ grep -F '行号超出当前文件范围' "$line_range_error" >/dev/null || {
   exit 1
 }
 
+# A unique bare basename is accepted as a location alias, but it must still
+# use the aliased file's real line count for range validation.
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 Consumer.java:999 - 裸文件名行号越界。\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+bare_basename_range_error="$fixture_root/bare-basename-line-range-error"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" > /dev/null 2>"$bare_basename_range_error"; then
+  echo 'out-of-range bare basename finding was incorrectly accepted' >&2
+  exit 1
+fi
+grep -F '行号超出当前文件范围' "$bare_basename_range_error" >/dev/null || {
+  echo 'bare basename line-range validation did not explain the rejected location' >&2
+  cat "$bare_basename_range_error" >&2
+  exit 1
+}
+
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 exit 99
@@ -2958,6 +2977,105 @@ presigned_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL
 printf '%s\n' "$presigned_output" | grep -F '取消后仍可重放有效的预签名上传票据' >/dev/null || {
   echo 'missing presigned-ticket replay preflight' >&2
   printf '%s\n' "$presigned_output" >&2
+  exit 1
+}
+
+# URL allowlists must compare parsed hosts, not raw string prefixes.
+url_allowlist_repo="$fixture_root/url-allowlist-repo"
+mkdir -p "$url_allowlist_repo/src/main/java/com/example/security"
+git -C "$url_allowlist_repo" init -q
+git -C "$url_allowlist_repo" config user.email test@example.invalid
+git -C "$url_allowlist_repo" config user.name preflight-url-allowlist-test
+cat >"$url_allowlist_repo/src/main/java/com/example/security/UrlFetcher.java" <<'EOF'
+package com.example.security;
+
+final class UrlFetcher {
+    String fetch(String url) throws Exception {
+        return "blocked";
+    }
+}
+EOF
+git -C "$url_allowlist_repo" add .
+git -C "$url_allowlist_repo" commit -qm base
+python3 - "$url_allowlist_repo/src/main/java/com/example/security/UrlFetcher.java" <<'PY'
+from pathlib import Path
+path = Path(__import__('sys').argv[1])
+path.write_text('''package com.example.security;
+
+import java.net.URL;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+
+final class UrlFetcher {
+    private static final Set<String> DOMAIN_WHITE_LIST = new HashSet<>(Arrays.asList("https://trusted.example"));
+
+    String fetch(String url) throws Exception {
+        for (String prefix : DOMAIN_WHITE_LIST) {
+            if (url.startsWith(prefix)) {
+                return new URL(url).openStream().toString();
+            }
+        }
+        return "blocked-by-default";
+    }
+}
+''')
+PY
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+url_allowlist_capture="$fixture_root/url-allowlist-capture"
+url_allowlist_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$url_allowlist_capture" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$url_allowlist_repo")"
+printf '%s\n' "$url_allowlist_output" | grep -F 'URL 白名单使用 startsWith 前缀匹配' >/dev/null || {
+  echo 'missing URL-prefix allowlist SSRF preflight' >&2
+  printf '%s\n' "$url_allowlist_output" >&2
+  cat "$url_allowlist_capture" >&2 || true
+  exit 1
+}
+
+# A permission-helper migration must not leave sibling job/log endpoints
+# without resource-level authorization.
+xxl_permission_repo="$fixture_root/xxl-permission-repo"
+mkdir -p "$xxl_permission_repo/src/main/java/com/xxl/job/admin/controller"
+git -C "$xxl_permission_repo" init -q
+git -C "$xxl_permission_repo" config user.email test@example.invalid
+git -C "$xxl_permission_repo" config user.name preflight-xxl-permission-test
+cat >"$xxl_permission_repo/src/main/java/com/xxl/job/admin/controller/JobInfoController.java" <<'EOF'
+package com.xxl.job.admin.controller;
+
+final class JobInfoController {
+    private final XxlJobService xxlJobService = null;
+
+    @RequestMapping("/pageList")
+    Object pageList(int jobGroup) { return xxlJobService.pageList(jobGroup); }
+    @RequestMapping("/remove")
+    Object remove(int id) { return xxlJobService.remove(id); }
+    @RequestMapping("/stop")
+    Object stop(int id) { return xxlJobService.stop(id); }
+    @RequestMapping("/start")
+    Object start(int id) { return xxlJobService.start(id); }
+}
+EOF
+git -C "$xxl_permission_repo" add .
+git -C "$xxl_permission_repo" commit -qm base
+python3 - "$xxl_permission_repo/src/main/java/com/xxl/job/admin/controller/JobInfoController.java" <<'PY'
+from pathlib import Path
+path = Path(__import__('sys').argv[1])
+text = path.read_text()
+text = text.replace('final class JobInfoController {', 'import com.xxl.job.admin.controller.interceptor.PermissionInterceptor;\n\nfinal class JobInfoController {')
+text = text.replace('Object pageList(int jobGroup)', 'Object pageList(HttpServletRequest request, int jobGroup)')
+text = text.replace('Object remove(int id)', 'Object remove(HttpServletRequest request, int id)')
+path.write_text(text)
+PY
+xxl_permission_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$xxl_permission_repo")"
+printf '%s\n' "$xxl_permission_output" | grep -F '权限拦截器重构后仍有同类任务/日志入口未执行' >/dev/null || {
+  echo 'missing xxl-job permission migration completeness preflight' >&2
+  printf '%s\n' "$xxl_permission_output" >&2
   exit 1
 }
 

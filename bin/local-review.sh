@@ -13,11 +13,27 @@ ollama_show_with_timeout() {
   local show_model="$1"
   local show_pid
   local elapsed_tenths=0
+  local effective_probe_timeout="$ollama_probe_timeout_seconds"
+
+  if [[ "${review_deadline_epoch:-}" =~ ^[0-9]+$ ]]; then
+    local remaining_seconds=$((review_deadline_epoch - $(date +%s)))
+    if (( remaining_seconds <= 0 )); then
+      return 124
+    fi
+    if (( effective_probe_timeout > remaining_seconds )); then
+      effective_probe_timeout="$remaining_seconds"
+    fi
+  fi
 
   ollama show "$show_model" >/dev/null 2>&1 &
   show_pid=$!
   while kill -0 "$show_pid" 2>/dev/null; do
-    if (( elapsed_tenths >= ollama_probe_timeout_seconds * 10 )); then
+    if [[ "${review_deadline_epoch:-}" =~ ^[0-9]+$ ]] && (( $(date +%s) >= review_deadline_epoch )); then
+      kill "$show_pid" 2>/dev/null || true
+      wait "$show_pid" 2>/dev/null || true
+      return 124
+    fi
+    if (( elapsed_tenths >= effective_probe_timeout * 10 )); then
       kill "$show_pid" 2>/dev/null || true
       wait "$show_pid" 2>/dev/null || true
       return 124
@@ -50,6 +66,9 @@ keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
 timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-600}"
 total_timeout_seconds="${OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS:-$timeout_seconds}"
 max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
+max_untracked_file_bytes="${OLLAMA_REVIEW_MAX_UNTRACKED_FILE_BYTES:-10485760}"
+max_untracked_total_bytes="${OLLAMA_REVIEW_MAX_UNTRACKED_TOTAL_BYTES:-52428800}"
+untracked_diff_timeout_seconds="${OLLAMA_REVIEW_UNTRACKED_DIFF_TIMEOUT_SECONDS:-30}"
 chunk_timeout_seconds="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-180}"
 chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
 retry_attempts="${OLLAMA_REVIEW_RETRY_ATTEMPTS:-2}"
@@ -93,6 +112,7 @@ usage() {
 默认读取 ~/.local/share/local-review/examples.md 作为人工确认的 few-shot 示例。
 模型探测默认最多等待 10 秒，可用 OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS 覆盖；请求地址遵循 OLLAMA_HOST（默认 http://127.0.0.1:11434）。
 当差异超过 OLLAMA_REVIEW_MAX_DIFF_BYTES（默认 3000）时，会按文件再按 unified diff hunk 分片审查；任一分片失败，整次审查失败。
+Git 报告的未跟踪路径只接受普通文件或符号链接，默认普通文件单文件上限为 OLLAMA_REVIEW_MAX_UNTRACKED_FILE_BYTES=10485760、总 diff 上限为 OLLAMA_REVIEW_MAX_UNTRACKED_TOTAL_BYTES=52428800；已被 Git 报告的 FIFO、设备等特殊文件、过大文件或差异读取超时会 fail-closed，不会静默跳过。Git 忽略或不报告的路径不在审查范围内。符号链接只进入链接自身的 diff，不跟随目标做源码快照。
 分片前会按当前系统规则、项目上下文和确定性预检估算输入预算；若配置的分片过大，会自动收窄到可验证的字节上限，并在历史评测元数据中记录实际值。
 分片默认使用 OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180 和 OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048，避免单个分片长时间占用服务；可按项目需要覆盖。
 整次审查默认受 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 限制；个人高性能入口默认 2400 秒，以覆盖多个分片串行审查，显式设置该变量仍可 fail-fast。
@@ -153,7 +173,7 @@ if [[ ! -d "$repo_dir" ]]; then
   exit 2
 fi
 
-for required_command in git ollama jq curl awk tr sort rg perl; do
+for required_command in git ollama jq curl awk tr sort rg perl stat; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     echo "找不到必要命令: $required_command，请先安装并确保它在 PATH 中。" >&2
     exit 2
@@ -240,6 +260,13 @@ if [[ ! "$max_diff_bytes" =~ ^[0-9]+$ ]] || (( max_diff_bytes < 1000 )); then
   exit 2
 fi
 
+validate_positive_integer OLLAMA_REVIEW_MAX_UNTRACKED_FILE_BYTES "$max_untracked_file_bytes"
+validate_positive_integer OLLAMA_REVIEW_MAX_UNTRACKED_TOTAL_BYTES "$max_untracked_total_bytes"
+if [[ ! "$untracked_diff_timeout_seconds" =~ ^[0-9]+$ ]] || (( untracked_diff_timeout_seconds < 1 )); then
+  echo "OLLAMA_REVIEW_UNTRACKED_DIFF_TIMEOUT_SECONDS 必须是正整数。" >&2
+  exit 2
+fi
+
 if [[ ! "$chunk_timeout_seconds" =~ ^[0-9]+$ ]] || (( chunk_timeout_seconds < 30 )); then
   echo "OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS 必须是至少 30 秒的整数。" >&2
   exit 2
@@ -257,6 +284,16 @@ untracked_file="$(mktemp "${TMPDIR:-/tmp}/local-review-untracked.XXXXXX")"
 base_file="$(mktemp "${TMPDIR:-/tmp}/local-review-base.XXXXXX")"
 changed_paths_nul_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths-nul.XXXXXX")"
 trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file"' EXIT
+review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
+
+ensure_review_deadline() {
+  local stage="${1:-当前阶段}"
+  local remaining_seconds=$((review_deadline_epoch - $(date +%s)))
+  if (( remaining_seconds <= 0 )); then
+    echo "本地代码审查失败：${stage}前已达到整次审查总超时 ${total_timeout_seconds} 秒，拒绝继续使用不完整证据。" >&2
+    return 124
+  fi
+}
 
 print_file_if_exists() {
   local title="$1"
@@ -887,7 +924,7 @@ validate_finding_line_ranges() {
   local response_text="$1"
   local paths_file="$2"
   local line_counts_file
-  local report_path resolved_path line_count alias
+  local report_path resolved_path line_count alias basename_aliases_file
 
   # Build a small, read-only map once per response.  The model is allowed to
   # use repository-relative paths (and the common ./ / a/ / b/ diff aliases),
@@ -925,6 +962,38 @@ validate_finding_line_ranges() {
     fi
   done <"$paths_file"
 
+  # Scope validation accepts a unique bare basename for model ergonomics. Add
+  # the same alias to the line-count map so the later range check cannot let
+  # an out-of-range `Foo.java:999` pass merely because the full path was not
+  # repeated in the model paragraph.
+  basename_aliases_file="$(mktemp "${TMPDIR:-/tmp}/local-review-basename-aliases.XXXXXX")"
+  awk -F '\t' -v paths_file="$paths_file" -v counts_file="$line_counts_file" '
+    BEGIN {
+      while ((getline path < paths_file) > 0) {
+        if (path == "") continue
+        basename = path
+        sub(/^.*\//, "", basename)
+        basename_count[basename]++
+        basename_path[basename] = path
+      }
+      close(paths_file)
+      while ((getline row < counts_file) > 0) {
+        split(row, fields, "\t")
+        if (fields[1] != "") line_count[fields[1]] = fields[2] + 0
+      }
+      close(counts_file)
+    }
+    END {
+      for (basename in basename_count) {
+        path = basename_path[basename]
+        if (basename_count[basename] == 1 && path in line_count)
+          printf "%s\t%s\n", basename, line_count[path]
+      }
+    }
+  ' >"$basename_aliases_file"
+  cat "$basename_aliases_file" >>"$line_counts_file"
+  rm -f "$basename_aliases_file"
+
   if ! awk -F '\t' -v counts_file="$line_counts_file" -v paths_file="$paths_file" '
     BEGIN {
       while ((getline row < counts_file) > 0) {
@@ -933,9 +1002,17 @@ validate_finding_line_ranges() {
       }
       close(counts_file)
       while ((getline row < paths_file) > 0) {
-        if (row != "") report_paths[++path_count] = row
+        if (row != "") {
+          report_paths[++path_count] = row
+          basename = row
+          sub(/^.*\//, "", basename)
+          basename_count[basename]++
+          basename_path[basename] = row
+        }
       }
       close(paths_file)
+      for (basename in basename_count)
+        if (basename_count[basename] == 1) report_paths[++path_count] = basename
     }
     function parse_range(token,    count, pieces, i, piece, start, finish, tail) {
       count = split(token, pieces, /[,，]/)
@@ -1286,17 +1363,64 @@ if [[ -n "$base_ref" ]]; then
   git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ "$base_ref...HEAD" -- >"$base_file"
 fi
 
-# Include untracked files so newly created source files are reviewed too.
+# Include untracked files so newly created source files are reviewed too.  Do
+# not use a process substitution here: failures from git ls-files would be
+# invisible under set -e and could turn an unreadable untracked file into a
+# successful clean review.
+untracked_list_status=0
+git -c core.fsmonitor=false -C "$repo_root" ls-files --others --exclude-standard -z >"$changed_paths_nul_file" || untracked_list_status=$?
+if (( untracked_list_status != 0 )); then
+  echo "本地代码审查失败：无法读取 Git 未跟踪路径清单（状态 ${untracked_list_status}），拒绝把不完整差异当作 clean。" >&2
+  exit 1
+fi
 while IFS= read -r -d '' path; do
   if has_unsafe_line_path_chars "$path"; then
     echo "本地代码审查失败：Git 变更路径包含换行或回车，无法安全建立路径证据边界。" >&2
     exit 1
   fi
+  untracked_path="$repo_root/$path"
+  if [[ ! -L "$untracked_path" && ! -f "$untracked_path" ]]; then
+    echo "本地代码审查失败：未跟踪路径不是普通文件或符号链接，拒绝读取: $path" >&2
+    exit 1
+  fi
+  if [[ ! -L "$untracked_path" ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      untracked_size_bytes="$(stat -f '%z' "$untracked_path")"
+    else
+      untracked_size_bytes="$(stat -c '%s' "$untracked_path")"
+    fi
+    if [[ ! "$untracked_size_bytes" =~ ^[0-9]+$ ]] || (( untracked_size_bytes > max_untracked_file_bytes )); then
+      echo "本地代码审查失败：未跟踪文件超过单文件上限 ${max_untracked_file_bytes} 字节，拒绝不完整读取: $path" >&2
+      exit 1
+    fi
+  fi
+  untracked_remaining_seconds=$((review_deadline_epoch - $(date +%s)))
+  if (( untracked_remaining_seconds <= 0 )); then
+    echo "本地代码审查失败：收集未跟踪文件差异时已达到整次审查总超时。" >&2
+    exit 1
+  fi
+  effective_untracked_timeout="$untracked_diff_timeout_seconds"
+  if (( effective_untracked_timeout > untracked_remaining_seconds )); then
+    effective_untracked_timeout="$untracked_remaining_seconds"
+  fi
+  untracked_diff_status=0
   (
     cd "$repo_root"
-    git -c core.fsmonitor=false -c core.quotePath=false diff --no-index --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >>"$untracked_file" || true
-  )
-done < <(git -c core.fsmonitor=false -C "$repo_root" ls-files --others --exclude-standard -z)
+    perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$effective_untracked_timeout" \
+      git -c core.fsmonitor=false -c core.quotePath=false diff --no-index --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >>"$untracked_file"
+  ) || untracked_diff_status=$?
+  if (( untracked_diff_status > 1 )); then
+    echo "本地代码审查失败：无法完整读取未跟踪文件差异（状态 ${untracked_diff_status}）: $path" >&2
+    exit 1
+  fi
+  untracked_total_bytes="$(wc -c <"$untracked_file" | tr -d ' ')"
+  if [[ ! "$untracked_total_bytes" =~ ^[0-9]+$ ]] || (( untracked_total_bytes > max_untracked_total_bytes )); then
+    echo "本地代码审查失败：未跟踪文件差异超过总上限 ${max_untracked_total_bytes} 字节，拒绝继续收集不完整审查材料。" >&2
+    exit 1
+  fi
+done <"$changed_paths_nul_file"
+
+ensure_review_deadline "Git 差异收集完成" || exit 124
 
 if [[ -n "$base_ref" && ! -s "$base_file" && ! -s "$staged_file" && ! -s "$unstaged_file" && ! -s "$untracked_file" ]]; then
   echo "没有发现待审查的 Git 变更。"
@@ -1312,6 +1436,7 @@ fi
 # --help, invalid invocations, non-Git directories, and clean repositories
 # instant. An explicit model skips the automatic tuned/review probes and is
 # checked directly below.
+ensure_review_deadline "模型探测" || exit 124
 if [[ -z "${OLLAMA_REVIEW_MODEL:-}" && "$model_overridden" != true ]]; then
   if ollama_show_with_timeout devstral-small-2-review-tuned; then
     default_model="devstral-small-2-review-tuned"
@@ -1328,6 +1453,7 @@ if [[ "$model_overridden" == true || -n "${OLLAMA_REVIEW_MODEL:-}" || "$default_
   echo "请先执行: ollama pull $model" >&2
   exit 2
 fi
+ensure_review_deadline "模型探测完成" || exit 124
 
 if [[ -n "${LOCAL_REVIEW_RESOLVED_MODEL_FILE:-}" ]]; then
   if ! printf '%s\n' "$model" >"$LOCAL_REVIEW_RESOLVED_MODEL_FILE"; then
@@ -3274,6 +3400,142 @@ collect_security_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_url_prefix_whitelist_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+
+  # A URL allowlist implemented as String.startsWith(prefix) is not a host
+  # validation boundary. Keep this narrow: require the changed prefix check,
+  # a same-file `new URL(url)` sink, and visible allowlist evidence in the
+  # current source snapshot. This avoids flagging ordinary filesystem/path
+  # prefix checks while covering the SSRF bypass class directly.
+  awk -v repo_root="$source_root" '
+    function flush_candidate(    source_path, value, has_url_sink, has_allowlist) {
+      if (candidate_path == "" || candidate_line == 0 || candidate_seen[candidate_path]) return
+      candidate_seen[candidate_path] = 1
+      has_url_sink = 0
+      has_allowlist = 0
+      if (repo_root != "") {
+        source_path = repo_root "/" candidate_path
+        while ((getline value < source_path) > 0) {
+          if (value ~ /new[[:space:]]+URL[[:space:]]*\([[:space:]]*url[[:space:]]*\)/) has_url_sink = 1
+          if (value ~ /WHITE[_-]?LIST|ALLOW[_-]?LIST|allowlist|whitelist|white-list|Set[[:space:]]*<.*String.*>/) has_allowlist = 1
+        }
+        close(source_path)
+      }
+      if (has_url_sink && has_allowlist) {
+        printf "P1 %s:%d - URL 白名单使用 startsWith 前缀匹配，无法证明目标 host 被严格限制，存在 SSRF 绕过风险。\n影响：攻击者可构造允许前缀后追加其他主机、用户信息或恶意后缀的 URL，使服务端访问非预期外部地址、内网服务或云 metadata。\n修复建议：先解析 URI/URL，再严格比较 scheme、host、port 和规范化后的目标；不要用字符串前缀代替主机白名单。\n验证方式：使用允许域名后缀、userinfo、重定向和内网/metadata 地址构造测试，确认所有非精确 host 均在出站连接前被拒绝。\n\n", candidate_path, candidate_line
+      }
+    }
+    /^diff --git / {
+      flush_candidate()
+      candidate_path = $4
+      sub(/^b\//, "", candidate_path)
+      candidate_line = 0
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_candidate()
+      candidate_path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", candidate_path)
+      candidate_line = 0
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && text ~ /\.[[:space:]]*startsWith[[:space:]]*\([[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\)/ &&
+          text ~ /(^|[^[:alnum:]_])(url|uri|target|endpoint)[[:space:]]*[.]?[[:space:]]*startsWith/) {
+        candidate_path = candidate_path
+        candidate_line = line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { flush_candidate() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_xxl_job_permission_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+
+  # The CVE-2024-42681 refactor moved group permission helpers into an
+  # interceptor. When that security refactor touches the xxl-job controllers,
+  # inspect the same controller's sibling mutation/log endpoints so a partial
+  # migration cannot be mistaken for a complete authorization fix.
+  awk -v repo_root="$source_root" '
+    function evaluate_method(    route, block, path, line, risky, locations) {
+      if (current_route == "" || current_path == "") return
+      risky = (current_route ~ /\/(remove|stop|start|pageList|getJobsByGroup|logDetailPage|logDetailCat|logKill|clearLog)/ &&
+        current_block ~ /xxlJob(Service|InfoDao|LogDao)|XxlJobCompleter/ &&
+        current_block !~ /valid(JobGroup)?Permission|validPermission[[:space:]]*\(/)
+      if (risky) {
+        permission_locations[current_path] = permission_locations[current_path] \
+          (permission_locations[current_path] == "" ? "" : ",") current_line
+      }
+    }
+    function evaluate_path(path,    source_path, value, line_no) {
+      if (!candidate_path[path] || path !~ /(JobInfoController|JobLogController)\.java$/ || repo_root == "") return
+      source_path = repo_root "/" path
+      current_path = path
+      current_route = ""
+      current_line = 0
+      current_block = ""
+      line_no = 0
+      while ((getline value < source_path) > 0) {
+        line_no++
+        if (value ~ /@RequestMapping[[:space:]]*\("[^"]+"\)/) {
+          evaluate_method()
+          current_route = value
+          current_line = line_no
+          current_block = value "\n"
+        } else if (current_route != "") {
+          current_block = current_block value "\n"
+        }
+      }
+      evaluate_method()
+      close(source_path)
+    }
+    /^diff --git / {
+      if (path != "") evaluate_path(path)
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      if (path != "") evaluate_path(path)
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && path ~ /(JobInfoController|JobLogController)\.java$/ &&
+          text ~ /PermissionInterceptor|valid(JobGroup)?Permission|xxlJobService\.(add|update)/) {
+        candidate_path[path] = 1
+      }
+    }
+    END {
+      if (path != "") evaluate_path(path)
+      for (path in permission_locations) {
+        printf "P1 %s:%s - 权限拦截器重构后仍有同类任务/日志入口未执行 job group 权限校验，授权修复不完整。\n影响：普通用户可利用未校验的 jobGroup、jobId 或 logId 访问、修改或清理其他执行器组的任务和日志，形成越权/IDOR。\n修复建议：在每个受保护入口统一调用 validJobGroupPermission，或把权限校验下沉到服务层并以资源所属 jobGroup 再次核验；不要只依赖页面上的分组过滤。\n验证方式：创建两个权限不同的用户和执行器组，逐一调用列举、删除、启停、日志查看/终止/清理接口，确认跨组请求均被拒绝且服务层也拒绝绕过控制器的调用。\n\n", path, permission_locations[path]
+      }
+    }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_java_division_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -4692,7 +4954,6 @@ chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
 trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
-review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 {
   git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z --cached
   git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z
@@ -4764,6 +5025,7 @@ fi
 # instead of running a repository-wide search once per changed method.
 diff_bytes="$(wc -c <"$chunk_input_file" | tr -d ' ')"
 if (( diff_bytes > max_diff_bytes )); then
+  ensure_review_deadline "跨文件证据索引" || exit 124
   if (( $(date +%s) < review_deadline_epoch )); then
     (
       cd "$repo_root"
@@ -4809,6 +5071,7 @@ if (( diff_bytes > max_diff_bytes )); then
     done <"$changed_paths_file"
   } | LC_ALL=C sort -u >"$cross_file_evidence_file"
 fi
+ensure_review_deadline "跨文件证据索引完成" || exit 124
 if [[ -s "$cross_file_evidence_file" ]]; then
   # A shard carries evidence only for its own paths. Reserve the largest
   # per-path contribution (not the repository-wide sum), plus the fixed
@@ -4849,9 +5112,12 @@ else
   : >"$java_source_index"
   : >"$java_main_source_index"
 fi
+ensure_review_deadline "确定性预检" || exit 124
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_xxl_job_permission_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
@@ -4875,6 +5141,7 @@ fi
 } | awk '$1 == "D" { print $2 }' | LC_ALL=C sort -u >"$deleted_types_file"
 collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"
 collect_context_tenant_preflight "$chunk_input_file" "$build_preflight_file"
+ensure_review_deadline "确定性预检完成" || exit 124
 if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   echo "本地代码审查失败：检测到 combined diff（diff --cc/diff --combined），当前分片器不会猜测合并冲突语义；请先展开为普通文件 diff 后重试。" >&2
   exit 1

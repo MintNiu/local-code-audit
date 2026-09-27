@@ -59,7 +59,57 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$output_dir" ]] || { echo "--out-dir 是必需参数。" >&2; exit 2; }
-mkdir -p "$output_dir"
+output_parent="$(dirname "$output_dir")"
+mkdir -p "$output_parent"
+if [[ -e "$output_dir" ]]; then
+  [[ -d "$output_dir" ]] || { echo "--out-dir 不是目录: $output_dir" >&2; exit 2; }
+  if find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    echo "拒绝覆盖非空重复评测目录: $output_dir" >&2
+    exit 2
+  fi
+else
+  mkdir "$output_dir"
+fi
+repeat_lock_dir="$output_dir/.repeat.lock"
+if ! mkdir "$repeat_lock_dir" 2>/dev/null; then
+  echo "重复历史评测目录正在被其他进程使用: $output_dir" >&2
+  exit 2
+fi
+trap 'rmdir "$repeat_lock_dir" 2>/dev/null || true' EXIT
+
+validate_completed_run() {
+  local run_dir="$1"
+  local meta_file status exit_code output_complete result_file
+  local meta_count=0 result_count=0
+  [[ -d "$run_dir" ]] || {
+    echo "重复评测结果目录不存在: $run_dir" >&2
+    return 1
+  }
+  while IFS= read -r meta_file; do
+    [[ -n "$meta_file" ]] || continue
+    meta_count=$((meta_count + 1))
+    status="$(awk -F '\t' '$1 == "status" { value = $2 } END { print value }' "$meta_file")"
+    exit_code="$(awk -F '\t' '$1 == "exit_code" { value = $2 } END { print value }' "$meta_file")"
+    output_complete="$(awk -F '\t' '$1 == "output_complete" { value = $2 } END { print value }' "$meta_file")"
+    if [[ "$status" != "completed" || "$exit_code" != "0" || "$output_complete" != "true" ]]; then
+      echo "重复评测包含未完成结果: ${meta_file#"$run_dir/"} (status=${status:-<empty>}, exit_code=${exit_code:-<empty>}, output_complete=${output_complete:-<empty>})" >&2
+      return 1
+    fi
+    result_file="${meta_file%.meta.tsv}.txt"
+    [[ -s "$result_file" ]] || {
+      echo "重复评测 metadata 对应的结果为空: ${result_file#"$run_dir/"}" >&2
+      return 1
+    }
+  done < <(find "$run_dir" -type f -name '*.meta.tsv' -print | LC_ALL=C sort)
+  while IFS= read -r result_file; do
+    [[ -n "$result_file" ]] || continue
+    result_count=$((result_count + 1))
+  done < <(find "$run_dir" -type f -name '*.txt' -print | LC_ALL=C sort)
+  if (( meta_count == 0 || meta_count != result_count )); then
+    echo "重复评测结果/metadata 数量不一致: $run_dir (meta=$meta_count, result=$result_count)" >&2
+    return 1
+  fi
+}
 
 for ((run = 1; run <= runs; run++)); do
   run_dir="$output_dir/run-$run"
@@ -68,6 +118,7 @@ for ((run = 1; run <= runs; run++)); do
     exit 2
   fi
   "$repo_root/evals/run-history.sh" "${forward_args[@]}" --out-dir "$run_dir"
+  validate_completed_run "$run_dir"
 done
 
 baseline_dir="$output_dir/run-1"

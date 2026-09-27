@@ -85,6 +85,10 @@ done
 [[ -n "$repo_dir" && -n "$manifest_file" && -n "$output_dir" ]] || { usage >&2; exit 2; }
 [[ -d "$repo_dir" ]] || { echo "仓库目录不存在: $repo_dir" >&2; exit 2; }
 [[ -f "$manifest_file" ]] || { echo "清单文件不存在: $manifest_file" >&2; exit 2; }
+if LC_ALL=C grep -n $'\r' "$manifest_file" >/dev/null; then
+  echo "清单文件包含回车控制字符，拒绝写入不可验证的历史元数据: $manifest_file" >&2
+  exit 2
+fi
 if (( ${#context_files[@]} > 0 )); then
   resolved_context_files=()
   for context_file in "${context_files[@]}"; do
@@ -135,9 +139,48 @@ if [[ -n "$limit" && ! "$limit" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
-mkdir -p "$output_dir"
+output_parent="$(dirname "$output_dir")"
+mkdir -p "$output_parent"
+if [[ -e "$output_dir" ]]; then
+  [[ -d "$output_dir" ]] || { echo "--out-dir 不是目录: $output_dir" >&2; exit 2; }
+  if find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    echo "拒绝覆盖非空历史评测目录: $output_dir" >&2
+    exit 2
+  fi
+else
+  mkdir "$output_dir"
+fi
+history_lock_dir="$output_dir/.history.lock"
+if ! mkdir "$history_lock_dir" 2>/dev/null; then
+  echo "历史评测目录正在被其他进程使用: $output_dir" >&2
+  exit 2
+fi
+temp_root=""
+trap 'if [[ -n "${temp_root:-}" ]]; then rm -rf "$temp_root"; fi; rmdir "$history_lock_dir" 2>/dev/null || true' EXIT
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-history.XXXXXX")"
-trap 'rm -rf "$temp_root"' EXIT
+manifest_snapshot="$temp_root/manifest.tsv"
+if ! cp "$manifest_file" "$manifest_snapshot"; then
+  echo "历史评测无效：无法冻结 manifest: $manifest_file" >&2
+  exit 12
+fi
+manifest_sha256="$(shasum -a 256 "$manifest_snapshot" | awk '{print $1}')"
+manifest_conflict="$(awk -F '\t' '
+  NR == 1 { next }
+  $5 == "pending-human-label" && $1 != "" {
+    commit_key = tolower($1)
+    parent_key = tolower($2)
+    if (commit_key in parent_by_commit && parent_by_commit[commit_key] != parent_key) {
+      printf "%s\t%s\t%s", $1, parent_by_commit[commit_key], $2
+      bad = 1
+    }
+    parent_by_commit[commit_key] = parent_key
+  }
+  END { exit (bad ? 1 : 0) }
+' "$manifest_snapshot" 2>/dev/null || true)"
+if [[ -n "$manifest_conflict" ]]; then
+  echo "清单包含同一提交对应多个不同 parent，拒绝选择性评测: $manifest_conflict" >&2
+  exit 2
+fi
 seen_commits_file="$temp_root/seen-commits"
 : >"$seen_commits_file"
 
@@ -226,7 +269,57 @@ review_seed="${OLLAMA_REVIEW_SEED:-42}"
 review_top_k="${OLLAMA_REVIEW_TOP_K:-40}"
 review_top_p="${OLLAMA_REVIEW_TOP_P:-0.9}"
 count=0
+failed_count=0
 manifest_row=1
+
+validate_history_output() {
+  local result_path="$1"
+  local paths_file="${2:-}"
+  local normalized
+  normalized="$(tr -d '[:space:]' <"$result_path")"
+  case "$normalized" in
+    "未发现阻塞问题"|"未发现阻塞问题。"|"未发现阻塞问题."|"未发现阻塞问题！"|"未发现阻塞问题!")
+      return 0
+      ;;
+  esac
+  [[ -n "$normalized" ]] || return 1
+  awk -v paths_file="$paths_file" '
+    BEGIN {
+      if (paths_file != "") {
+        while ((getline path < paths_file) > 0) {
+          if (path == "") continue
+          allowed_path[path] = 1
+          basename = path
+          sub(/^.*\//, "", basename)
+          basename_count[basename]++
+          basename_path[basename] = path
+        }
+        close(paths_file)
+        for (basename in basename_count)
+          if (basename_count[basename] == 1) allowed_path[basename] = 1
+      }
+    }
+    function flush(    header, path, location_ok) {
+      if (block == "") return
+      header = block
+      sub(/[\r\n].*$/, "", header)
+      if (header !~ /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/) bad = 1
+      if (header !~ /(^|[[:space:]])[^[:space:]:]+:[0-9]+([,，-]|[[:space:]]|$)/) bad = 1
+      location_ok = 0
+      for (path in allowed_path)
+        if (index(header, path ":") > 0) location_ok = 1
+      if (paths_file != "" && !location_ok) bad = 1
+      if (block !~ /影响[：:]/ || block !~ /修复建议[：:]/ || block !~ /验证方式[：:]/) bad = 1
+      block = ""
+    }
+    {
+      if ($0 ~ /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/) flush()
+      if (block != "") block = block "\n"
+      block = block $0
+    }
+    END { flush(); exit (bad ? 1 : 0) }
+  ' "$result_path"
+}
 
 record_invalid_range() {
   local invalid_id="$commit"
@@ -236,10 +329,12 @@ record_invalid_range() {
   : >"$output_dir/$invalid_id.txt"
   {
     printf 'commit\t%s\nparent\t%s\nsubject\t%s\n' "$commit" "$parent" "$subject"
+    printf 'manifest_sha256\t%s\n' "$manifest_sha256"
     printf 'parent_policy\tany-direct-parent\n'
     printf 'status\tinvalid-range\nexit_code\t12\nfailure_reason\t%s\n' "$1"
     printf 'resolved_model\tnot-invoked\n'
   } >"$output_dir/$invalid_id.meta.tsv"
+  failed_count=$((failed_count + 1))
   echo "本次历史评测无效：$1 ($commit / $parent)，未调用审计器。" >&2
 }
 
@@ -248,11 +343,14 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   [[ "$commit" == "commit" || -z "$commit" ]] && continue
   [[ "$status" == "pending-human-label" ]] || continue
   [[ -z "$commit_filter" || "$commit" == "$commit_filter" ]] || continue
-  if grep -Fqx -- "$commit" "$seen_commits_file"; then
+  commit_key="$(printf '%s' "$commit" | tr '[:upper:]' '[:lower:]')"
+  parent_key="$(printf '%s' "$parent" | tr '[:upper:]' '[:lower:]')"
+  seen_key="${commit_key}"$'\t'"${parent_key}"
+  if grep -Fqx -- "$seen_key" "$seen_commits_file"; then
     echo "跳过重复提交清单行：$commit" >&2
     continue
   fi
-  printf '%s\n' "$commit" >>"$seen_commits_file"
+  printf '%s\n' "$seen_key" >>"$seen_commits_file"
   if [[ -n "$limit" && "$count" -ge "$limit" ]]; then
     break
   fi
@@ -282,11 +380,13 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
   patch_file="$temp_root/$commit.patch"
   result_file="$output_dir/$commit.txt"
   metadata_file="$output_dir/$commit.meta.tsv"
+  review_changed_paths_file="$temp_root/$commit.changed-paths"
   : >"$result_file"
   mkdir -p "$worktree"
 
   if ! git --no-replace-objects -c core.fsmonitor=false -C "$repo_root" archive "$resolved_parent" | tar -xf - -C "$worktree"; then
     printf 'commit\t%s\nstatus\tarchive-failed\nsubject\t%s\n' "$commit" "$subject" >"$metadata_file"
+    failed_count=$((failed_count + 1))
     count=$((count + 1))
     continue
   fi
@@ -302,9 +402,14 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
 
   if ! git -C "$worktree" apply --whitespace=nowarn "$patch_file"; then
     printf 'commit\t%s\nstatus\tapply-failed\nsubject\t%s\n' "$commit" "$subject" >"$metadata_file"
+    failed_count=$((failed_count + 1))
     count=$((count + 1))
     continue
   fi
+  {
+    git -c core.quotePath=false -C "$worktree" diff --no-ext-diff --name-only --no-renames
+    git -c core.quotePath=false -C "$worktree" ls-files --others --exclude-standard
+  } | LC_ALL=C sort -u >"$review_changed_paths_file"
 
   start="$(date +%s)"
   exit_code=0
@@ -360,6 +465,11 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
       exit_code=12
       failure_reason="empty-review-output"
     fi
+    if [[ "$exit_code" -eq 0 ]] && ! validate_history_output "$review_stdout_file" "$review_changed_paths_file"; then
+      printf '本次历史评测无效：审计器输出不是严格 clean 标记或完整问题段落。\n' >>"$review_stderr_file"
+      exit_code=12
+      failure_reason="malformed-review-output"
+    fi
     if [[ "$exit_code" -eq 0 ]]; then
       # A successful retry may still have diagnostics from an earlier failed
       # transport attempt. Keep the review result machine-readable: stderr is
@@ -399,6 +509,9 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     exit_code=12
     failure_reason="missing-resolved-model"
   fi
+  if (( exit_code != 0 )); then
+    failed_count=$((failed_count + 1))
+  fi
   output_complete=false
   if [[ "$exit_code" -eq 0 && -f "$result_file" ]] && LC_ALL=C grep -q '[^[:space:]]' "$result_file"; then
     output_complete=true
@@ -414,6 +527,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'parent_policy\tany-direct-parent\nparent_validation\tdirect-parent\n'
     printf 'date\t%s\n' "$date"
     printf 'subject\t%s\n' "$subject"
+    printf 'manifest_sha256\t%s\n' "$manifest_sha256"
     printf 'diff_sha256\t%s\n' "$diff_sha256"
     printf 'profile\t%s\n' "$profile"
     printf 'workflow_git_revision\t%s\n' "$workflow_git_revision"
@@ -477,6 +591,14 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
 
   printf '%s exit=%s elapsed=%ss result=%s\n' "$commit" "$exit_code" "$((end - start))" "$result_file"
   count=$((count + 1))
-done < <(tail -n +2 "$manifest_file")
+done < <(tail -n +2 "$manifest_snapshot")
 
 printf 'history evaluation finished: %s commit(s), private output=%s\n' "$count" "$output_dir"
+if (( count == 0 )); then
+  printf 'history evaluation failed: manifest 没有匹配的 pending-human-label 提交\n' >&2
+  exit 1
+fi
+if (( failed_count > 0 )); then
+  printf 'history evaluation failed: %s commit(s) did not complete a valid review\n' "$failed_count" >&2
+  exit 1
+fi

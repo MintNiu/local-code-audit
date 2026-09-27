@@ -129,6 +129,13 @@ SQL 迁移预检还会识别删除版本化 `sql/migration`/`db/migration` 文�
 
 该预算只针对 Git diff 本身，不代表完整请求一定能放入 `num_ctx`；项目规则、显式上下文和系统提示词仍需计入容量。
 
+未跟踪文件收集也有 fail-closed 边界：对 Git 报告的路径只接受普通文件或符号链接（符号链接只审查链接自身的 diff，不跟随目标），普通文件默认单文件上限为
+`OLLAMA_REVIEW_MAX_UNTRACKED_FILE_BYTES=10485760`，差异读取默认超时为
+`OLLAMA_REVIEW_UNTRACKED_DIFF_TIMEOUT_SECONDS=30`；Git 已报告的 FIFO、设备、过大文件、读取错误或超时不会被静默当成无变更。Git 忽略或不报告的路径不在审查范围内。
+`run-history.sh` 会冻结 manifest 并记录 SHA-256；没有匹配的 pending-human-label 行、单提交失败或 malformed reviewer 输出都会以非零状态结束。标签模板生成还会核对结果 metadata 中的
+manifest SHA-256、commit 和 parent，防止清单漂移后把旧结果绑定到新标签；`run-history-repeat.sh` 只有在每轮 metadata 均为
+`status=completed`、`exit_code=0`、`output_complete=true` 且结果/metadata 一一对应时，才允许报告 `repeat_stable`。
+
 运行器的确定性构建和安全预检可用无模型回归测试验证：
 
 ```bash
@@ -141,7 +148,7 @@ SQL 迁移预检还会识别删除版本化 `sql/migration`/`db/migration` 文�
 以及未知路径、越界行号和缺字段仍会显式失败。它检验输出链路，不证明模型能发现这些问题。
 夹具必须在断言时仍有待审查变更，不能复用被前序测试提交过的配置文件来证明过滤安全。
 
-该测试覆盖当前差异新增但仓库缺失的类型、显式 `--context` 仍引用当前提交删除类型的跨仓库候选、URL 查询令牌、Java 包装类型除法、跨 hunk SSRF、URL builder、路径 API 别名和配置硬编码凭据；它使用假的 Ollama/Curl，验证预检证据注入、确定性结果合并、问题段字段完整性和输出门禁，不消耗模型推理。
+该测试覆盖当前差异新增但仓库缺失的类型、显式 `--context` 仍引用当前提交删除类型的跨仓库候选、URL 查询令牌、Java 包装类型除法、跨 hunk SSRF、URL builder、URL 白名单前缀绕过、xxl-job 权限迁移遗漏、路径 API 别名和配置硬编码凭据；它使用假的 Ollama/Curl，验证预检证据注入、确定性结果合并、问题段字段完整性和输出门禁，不消耗模型推理。
 
 scorecard 汇总器也有独立的输入校验回归：
 

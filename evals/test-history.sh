@@ -85,6 +85,34 @@ grep -F 'transient transport warning' "$out_dir/$commit.stderr.log" >/dev/null
 result_sha256="$(shasum -a 256 "$out_dir/$commit.txt" | awk '{print $1}')"
 grep -F $'# source_result_sha256\t'"$result_sha256" "$labels_out/$commit.labels.tsv" >/dev/null
 
+# Labels must not bind a result to a changed manifest or to a different
+# commit/parent pair. The result directory remains immutable; only the input
+# manifest changes.
+drifted_manifest="$fixture_root/drifted-manifest.tsv"
+sed "s/${parent}/${commit}/" "$manifest" >"$drifted_manifest"
+if "$repo_root/evals/prepare-history-labels.sh" \
+  --manifest "$drifted_manifest" --results "$out_dir" --labels-dir "$fixture_root/drifted-labels" \
+  >"$fixture_root/drifted-labels-stdout" 2>"$fixture_root/drifted-labels-stderr"; then
+  echo 'label preparation accepted a manifest/result mismatch' >&2
+  exit 1
+fi
+grep -F '结果与当前 manifest 不一致' "$fixture_root/drifted-labels-stderr" >/dev/null
+
+# A manifest row with no matching pending commit must not be reported as a
+# successful empty history run.
+empty_manifest="$fixture_root/empty-manifest.tsv"
+printf 'commit\tparent\tdate\tsubject\tstatus\n' >"$empty_manifest"
+empty_history_status=0
+PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/evals/run-history.sh" \
+    --repo "$repo" --manifest "$empty_manifest" --out-dir "$fixture_root/empty-history-results" \
+    >"$fixture_root/empty-history-stdout" 2>"$fixture_root/empty-history-stderr" || empty_history_status=$?
+(( empty_history_status != 0 )) || {
+  echo 'empty history manifest was incorrectly accepted' >&2
+  exit 1
+}
+grep -F '没有匹配的 pending-human-label 提交' "$fixture_root/empty-history-stderr" >/dev/null
+
 PATH="$fake_bin:$PATH" \
   HISTORY_TEST_CURL_COUNT="$fixture_root/repeat-curl-count" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
@@ -127,16 +155,41 @@ invalid_out="$fixture_root/invalid-parent-results"
 invalid_old_parent="$commit"
 printf 'commit\tparent\tdate\tsubject\tstatus\n%s\t%s\t2026-09-14\tinvalid parent\tpending-human-label\n' "$commit" "$invalid_old_parent" >"$invalid_manifest"
 invalid_curl_count="$fixture_root/invalid-curl-count"
+invalid_status=0
 PATH="$fake_bin:$PATH" \
   HISTORY_TEST_CURL_COUNT="$invalid_curl_count" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/evals/run-history.sh" \
-    --repo "$repo" --manifest "$invalid_manifest" --out-dir "$invalid_out" >/dev/null 2>"$fixture_root/invalid-stderr"
+    --repo "$repo" --manifest "$invalid_manifest" --out-dir "$invalid_out" >/dev/null 2>"$fixture_root/invalid-stderr" || invalid_status=$?
+(( invalid_status != 0 )) || {
+  echo 'invalid parent history run unexpectedly exited successfully' >&2
+  exit 1
+}
 grep -F $'status\tinvalid-range' "$invalid_out/$commit.meta.tsv" >/dev/null
 grep -F $'failure_reason\tparent-is-not-a-direct-parent' "$invalid_out/$commit.meta.tsv" >/dev/null
 [[ ! -e "$invalid_curl_count" ]]
 grep -F '未调用审计器' "$fixture_root/invalid-stderr" >/dev/null
 printf 'history invalid-parent fail-closed regression passed\n'
+
+# The same commit must not be silently evaluated against two different
+# parents; a merge commit needs an explicit, single parent choice per run.
+conflict_manifest="$fixture_root/conflicting-parent.tsv"
+{
+  printf 'commit\tparent\tdate\tsubject\tstatus\n'
+  printf '%s\t%s\t2026-09-14\tfirst parent\tpending-human-label\n' "$commit" "$parent"
+  printf '%s\t%s\t2026-09-14\tconflicting parent\tpending-human-label\n' "$commit" "$commit"
+} >"$conflict_manifest"
+conflict_status=0
+PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/evals/run-history.sh" \
+    --repo "$repo" --manifest "$conflict_manifest" --out-dir "$fixture_root/conflicting-results" \
+    >"$fixture_root/conflicting-stdout" 2>"$fixture_root/conflicting-stderr" || conflict_status=$?
+(( conflict_status != 0 )) || {
+  echo 'conflicting parent manifest was incorrectly accepted' >&2
+  exit 1
+}
+grep -F '多个不同 parent' "$fixture_root/conflicting-stderr" >/dev/null
+printf 'history conflicting-parent fail-closed regression passed\n'
 
 # An exit-0 reviewer with only whitespace is not a completed review.
 fake_workflow="$fixture_root/workflow"
@@ -161,8 +214,9 @@ PATH="$fake_bin:$PATH" \
   "$fake_workflow/evals/run-history.sh" \
     --repo "$repo" --manifest "$manifest" --out-dir "$empty_out" >/dev/null 2>"$fixture_root/empty-stderr" || empty_status=$?
 if (( empty_status != 0 )); then
-  cat "$fixture_root/empty-stderr" >&2
-  echo "empty-output history fixture exited unexpectedly: $empty_status" >&2
+  :
+else
+  echo 'empty-output history run unexpectedly exited successfully' >&2
   exit 1
 fi
 grep -F $'status\tfailed' "$empty_out/$commit.meta.tsv" >/dev/null
@@ -171,13 +225,52 @@ grep -F $'failure_reason\tempty-review-output' "$empty_out/$commit.meta.tsv" >/d
 grep -F 'exit 0 但没有非空审查结果' "$empty_out/$commit.stderr.log" >/dev/null
 printf 'history empty-output fail-closed regression passed\n'
 
+# A non-empty but malformed exit-0 reviewer result must also be rejected.
+cat >"$fake_workflow/bin/local-review-local.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "fake-core" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"
+printf 'FROZEN-REVIEW\n'
+EOF
+chmod +x "$fake_workflow/bin/local-review-local.sh"
+malformed_out="$fixture_root/malformed-results"
+malformed_status=0
+PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=fake \
+  "$fake_workflow/evals/run-history.sh" \
+    --repo "$repo" --manifest "$manifest" --out-dir "$malformed_out" >/dev/null 2>"$fixture_root/malformed-stderr" || malformed_status=$?
+(( malformed_status != 0 )) || {
+  echo 'malformed reviewer output was incorrectly accepted' >&2
+  exit 1
+}
+grep -F $'status\tfailed' "$malformed_out/$commit.meta.tsv" >/dev/null
+grep -F $'failure_reason\tmalformed-review-output' "$malformed_out/$commit.meta.tsv" >/dev/null
+printf 'history malformed-output fail-closed regression passed\n'
+
+# A finding-shaped output without a path and line is not auditable evidence.
+cat >"$fake_workflow/bin/local-review-local.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "fake-core" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"
+printf 'P1 generic finding\n影响：x\n修复建议：y\n验证方式：z\n'
+EOF
+chmod +x "$fake_workflow/bin/local-review-local.sh"
+unlocated_out="$fixture_root/unlocated-results"
+unlocated_status=0
+PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=fake \
+  "$fake_workflow/evals/run-history.sh" \
+    --repo "$repo" --manifest "$manifest" --out-dir "$unlocated_out" >/dev/null 2>"$fixture_root/unlocated-stderr" || unlocated_status=$?
+(( unlocated_status != 0 )) || {
+  echo 'history accepted a finding without path/line evidence' >&2
+  exit 1
+}
+grep -F $'failure_reason\tmalformed-review-output' "$unlocated_out/$commit.meta.tsv" >/dev/null
+printf 'history unlocated-output fail-closed regression passed\n'
+
 # The reviewer is copied before execution. Mutating source scripts while the
 # frozen run is sleeping must not change its output or recorded hashes.
 cat >"$fake_workflow/bin/local-review-local.sh" <<'EOF'
 #!/usr/bin/env bash
 sleep 1
 printf '%s\n' "fake-core" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"
-printf 'FROZEN-REVIEW\n'
+printf '未发现阻塞问题\n'
 EOF
 chmod +x "$fake_workflow/bin/local-review-local.sh"
 race_out="$fixture_root/race-results"
@@ -198,7 +291,7 @@ printf 'MUTATED-CORE\n'
 EOF
 chmod +x "$fake_workflow/bin/"*.sh
 wait "$history_pid"
-grep -Fx 'FROZEN-REVIEW' "$race_out/$commit.txt" >/dev/null
+grep -Fx '未发现阻塞问题' "$race_out/$commit.txt" >/dev/null
 if grep -Fx 'MUTATED-REVIEW' "$race_out/$commit.txt" >/dev/null; then
   echo 'frozen history result unexpectedly used mutated wrapper' >&2
   exit 1

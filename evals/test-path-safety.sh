@@ -160,4 +160,30 @@ grep -F '变更路径包含换行' "$fixture_root/newline-stderr" >/dev/null || 
   cat "$fixture_root/newline-stderr" >&2
   exit 1
 }
+
+# Large untracked files must fail before `git diff --no-index` can consume
+# unbounded input or fill the review buffer.
+large_repo="$fixture_root/large-repo"
+mkdir -p "$large_repo/src"
+git -C "$large_repo" init -q
+git -C "$large_repo" config user.email test@example.invalid
+git -C "$large_repo" config user.name path-safety-test
+printf '%s\n' 'base' >"$large_repo/src/Base.txt"
+git -C "$large_repo" add .
+git -C "$large_repo" commit -qm base
+printf 'x%.0s' {1..2048} >"$large_repo/src/Large.txt"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MAX_UNTRACKED_FILE_BYTES=1024 \
+  "$repo_root/bin/local-review.sh" --repo "$large_repo" \
+  >"$fixture_root/large-stdout" 2>"$fixture_root/large-stderr"; then
+  echo 'oversized untracked file was accepted as a review result' >&2
+  cat "$fixture_root/large-stderr" >&2
+  exit 1
+fi
+grep -F '超过单文件上限' "$fixture_root/large-stderr" >/dev/null || {
+  echo 'oversized untracked file did not fail closed before diff reading' >&2
+  cat "$fixture_root/large-stderr" >&2
+  exit 1
+}
 echo 'path safety regression passed'
