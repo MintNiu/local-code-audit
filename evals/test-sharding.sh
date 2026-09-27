@@ -108,6 +108,28 @@ else
   exit 1
 fi
 
+# Git quotes non-ASCII paths in diff headers by default (for example, as
+# octal escapes), while the NUL-safe changed-path index contains UTF-8 names.
+# The reviewer must normalize its own diff output so exact shard routing still
+# works for a changed file with a Chinese name.
+unicode_repo="$fixture_root/unicode-repo"
+mkdir -p "$unicode_repo"
+git -C "$unicode_repo" init -q
+git -C "$unicode_repo" config user.email test@example.invalid
+git -C "$unicode_repo" config user.name unicode-path-test
+seq 1 80 | awk '{ printf "原始-%03d\n", $1 }' >"$unicode_repo/变更说明.txt"
+git -C "$unicode_repo" add .
+git -C "$unicode_repo" commit -qm base
+seq 1 80 | awk '{ printf "修改-%03d\n", $1 }' >"$unicode_repo/变更说明.txt"
+PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$fixture_root/unicode-capture" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_FAKE_CLEAN=true \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
+  OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
+  OLLAMA_REVIEW_NUM_CTX=16384 \
+  "$repo_root/bin/local-review.sh" --repo "$unicode_repo" >/dev/null
+
 # A config-heavy diff adds deterministic credential evidence to each routed
 # shard. The budget planner must account for that variable prompt section
 # instead of relying on the old fixed reserve, while still completing every

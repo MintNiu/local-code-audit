@@ -1193,11 +1193,11 @@ sort_findings_by_severity() {
 
 git -c core.fsmonitor=false -C "$repo_root" status --short >"$status_file"
 
-git -c core.fsmonitor=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached -- >"$staged_file"
-git -c core.fsmonitor=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- >"$unstaged_file"
+git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached -- >"$staged_file"
+git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- >"$unstaged_file"
 
 if [[ -n "$base_ref" ]]; then
-  git -c core.fsmonitor=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ "$base_ref...HEAD" -- >"$base_file"
+  git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ "$base_ref...HEAD" -- >"$base_file"
 fi
 
 # Include untracked files so newly created source files are reviewed too.
@@ -1208,7 +1208,7 @@ while IFS= read -r -d '' path; do
   fi
   (
     cd "$repo_root"
-    git -c core.fsmonitor=false diff --no-index --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >>"$untracked_file" || true
+    git -c core.fsmonitor=false -c core.quotePath=false diff --no-index --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >>"$untracked_file" || true
   )
 done < <(git -c core.fsmonitor=false -C "$repo_root" ls-files --others --exclude-standard -z)
 
@@ -4608,10 +4608,10 @@ trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$b
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 {
-  git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z --cached
-  git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z
+  git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z --cached
+  git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z
   if [[ -n "$base_ref" ]]; then
-    git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z "$base_ref...HEAD"
+    git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z "$base_ref...HEAD"
   fi
   git -c core.fsmonitor=false -C "$repo_root" ls-files --others --exclude-standard -z
 } >"$changed_paths_nul_file"
@@ -4781,10 +4781,10 @@ if ! collect_transaction_lock_order_preflight "$chunk_input_file" "$deterministi
   exit 1
 fi
 {
-  git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
-  git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames
+  git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
+  git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-status --no-renames
   if [[ -n "$base_ref" ]]; then
-    git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames "$base_ref...HEAD"
+    git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-status --no-renames "$base_ref...HEAD"
   fi
 } | awk '$1 == "D" { print $2 }' | LC_ALL=C sort -u >"$deleted_types_file"
 collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"
