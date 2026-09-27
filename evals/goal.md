@@ -251,3 +251,5 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 随后针对上述 `HrPersonMapper.xml` 租户 P2 误报增加了窄范围证据门：`EXISTS`/子查询已可见 `inner.tenant_id = outer.tenant_id` 时，过滤“缺少租户隔离”的泛化段落；别名不一致、权限、SQL 注入或其他独立证据仍保留。该规则只放在确定性输出过滤和无模型回归中，没有再次写入 SYSTEM；尝试写入 SYSTEM 会让预签名票据夹具超过 180 秒无响应，回滚后旧运行态恢复到约 45–51 秒。当前 tuned SYSTEM SHA 保持 `bfc4993dec3bc0c45d3a81e4f7712c645971e65cbd63e6aafb5904226442d783`，五轮合成门禁重新通过。
 
 同日重新复核 ERP 并发留出 `736ef178` 与 `7fee9f1a`：两份冻结父提交均完整结束，分别为 5/12 个分片、57/226 秒；确定性锁序预检各输出唯一一条反向锁序 P1，人工核对确认两条路径实际锁定同一退货/收货资源且顺序相反。两轮重复审查均 exit=0，结果文本、分片状态和运行签名稳定（耗时分别约 59/238–249 秒）。这把此前模型 clean 的两条并发漏报转成可见候选并补进真实根因证据，但仍按独立人工样本记录，不把合成门禁或预检候选直接冒充生产召回率。
+
+随后将这两条人工确认的 P1 以独立私有阶段一标签登记：两行 scorecard 均为 `gold_p0_p1=1`、`p0_p1_found=1`、`false_positive_count=0`、`output_complete=true`、`repeat_stable=true`，同属 `lock-order-erp-sales-return` 功能簇并都放在 `holdout`。阶段一门禁对这组单独 scorecard 正确拒绝（仅 2 个提交、2 个 holdout 根因且没有 train/dev），因此它们增加了真实根因证据，但没有被冒充为已经达到 20 个 holdout 根因或生产级指标。

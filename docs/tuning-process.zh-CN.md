@@ -658,3 +658,5 @@ reserve 和 effective budget，方便后续复核。
 同日为 `HrPersonMapper.xml` 的租户条件误报增加窄范围输出证据门：可见 `inner.tenant_id = outer.tenant_id` 的相关子查询不再被报告为“缺少租户隔离”，但别名不一致、权限、SQL 注入和其他独立根因继续保留。曾将该边界加入 SYSTEM 的实验使预签名票据请求在 180 秒内无响应，因而撤回提示词改动；恢复旧 SYSTEM 后五轮合成门禁和预签名夹具均恢复稳定。最终只保留确定性过滤器与无模型回归，运行态 SYSTEM SHA 仍为 `bfc4993dec3bc0c45d3a81e4f7712c645971e65cbd63e6aafb5904226442d783`。
 
 同日复核 ERP 两条真实并发留出 `736ef178`、`7fee9f1a`：当前锁序预检分别在 5/12 个分片中保留一条反向锁序 P1，完整耗时 57/226 秒；人工核对 `returnRepository` 与 `inspectionRepository` 的实际资源映射和事务路径后确认两条候选成立。两轮重复审查均保持相同 finding 与运行签名，耗时约 59 秒和 238–249 秒。该结果提高并发根因的可观测性，但仍不把确定性候选未经人工标签聚合成泛化召回率。
+
+随后将两条候选登记为私有阶段一 holdout 标签，scorecard 各为 1 个确认 P1、1 个命中、0 个误报，重复稳定且定位准确；两条提交共享同一 `lock-order-erp-sales-return` 功能簇。单独运行阶段一门禁因缺少 train/dev 和 20 个 holdout 根因而按预期失败；这一步只补充真实并发真值，不放宽高可用验收条件。
