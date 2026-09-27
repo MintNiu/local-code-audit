@@ -205,6 +205,7 @@ run_review java-token-header 0
 run_review java-tenant-leak tenant
 run_review java-tenant-safe 0
 run_review java-maintenance-safe 0
+run_review java-lombok-properties-safe 0
 run_review java-migration-delete migration
 run_review java-secret-config secret
 run_review java-presigned-replay presigned
@@ -222,4 +223,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, clean=$((runs * 4)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, clean=$((runs * 5)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"

@@ -1327,6 +1327,24 @@ duplicate_security_count="$(printf '%s\n' "$duplicate_security_output" | grep -F
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/QueryTokenProxy.java:3-4 - 认证令牌从 URL 查询参数读取，可能进入日志。影响：凭据泄露。修复建议：只用请求头。验证方式：检查日志。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+broad_duplicate_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
+broad_duplicate_count="$(printf '%s\n' "$broad_duplicate_output" | grep -F 'P1 src/main/java/com/example/api/client/QueryTokenProxy.java:' | wc -l | tr -d ' ')"
+[[ "$broad_duplicate_count" == "1" ]] || {
+  echo 'broad model URL-token duplicate was not collapsed to exact preflight finding' >&2
+  printf '%s\n' "$broad_duplicate_output" >&2
+  exit 1
+}
+if printf '%s\n' "$broad_duplicate_output" | grep -F 'QueryTokenProxy.java:3-4' >/dev/null; then
+  echo 'broad model URL-token location was retained instead of exact preflight location' >&2
+  printf '%s\n' "$broad_duplicate_output" >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
 printf '{"response":"P1 src/main/java/com/example/api/client/QueryTokenProxy.java:7 - 认证令牌从 URL 查询参数读取，同时未校验 tenantId，可能造成跨租户访问。影响：凭据可能进入日志，租户边界也可能被绕过。修复建议：仅使用受保护请求头并校验 tenantId。验证方式：检查日志并用两个租户执行请求。","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/curl"
@@ -2690,6 +2708,79 @@ if printf '%s\n' "$sql_trigger_output" | grep -F 'safe_trigger.sql' >/dev/null; 
   printf '%s\n' "$sql_trigger_output" >&2
   exit 1
 fi
+
+mkdir -p "$repo/sql/migration"
+cat >"$repo/sql/migration/V20260927__existing_database.sql" <<'EOF'
+-- Versioned migration for existing databases.
+ALTER TABLE old_table ADD COLUMN uploaded_at TIMESTAMP;
+EOF
+git -C "$repo" add sql/migration/V20260927__existing_database.sql
+git -C "$repo" commit -qm migration-delete-base
+python3 - <<'PY' "$repo/sql/migration/V20260927__existing_database.sql"
+from pathlib import Path
+import sys
+Path(sys.argv[1]).unlink()
+PY
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"P1 sql/migration/V20260927__existing_database.sql:1-2 - 删除迁移脚本会导致已有数据库升级路径中断。\n影响：模型重复描述。\n修复建议：模型重复修复。\n验证方式：模型重复验证。","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+migration_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$migration_output" | grep -F '删除版本化迁移脚本会中断已有数据库升级路径' >/dev/null || {
+  echo 'missing deleted versioned-migration preflight' >&2
+  printf '%s\n' "$migration_output" >&2
+  exit 1
+}
+if [[ "$(printf '%s\n' "$migration_output" | grep -c 'sql/migration/V20260927__existing_database.sql')" -ne 1 ]]; then
+  echo 'migration model duplicate was not filtered' >&2
+  printf '%s\n' "$migration_output" >&2
+  exit 1
+fi
+
+cat >"$repo/src/main/java/com/example/api/client/PresignedReplay.java" <<'EOF'
+final class PresignedReplay {
+    private final Store store;
+    private final Sessions sessions;
+
+    Ticket issue(String objectKey) {
+        return store.presignPut(objectKey, 900);
+    }
+
+    void accept(Ticket ticket) {
+        if (ticket.expiresAt().isAfter(java.time.Instant.now())) {
+            store.put(ticket, ticket.objectKey());
+        }
+    }
+
+    void cancel(String objectKey, long id) {
+        store.delete(objectKey);
+        sessions.markCancelled(id);
+    }
+
+    void cleanupExpired() {
+        for (Session session : sessions.findActiveExpired()) {
+            store.delete(session.objectKey());
+        }
+    }
+
+    interface Store {
+        Ticket presignPut(String key, long ttl);
+        void put(Ticket ticket, String key);
+        void delete(String key);
+    }
+
+    interface Sessions { Iterable<Session> findActiveExpired(); void markCancelled(long id); }
+    interface Session { String objectKey(); }
+    record Ticket(String objectKey, java.time.Instant expiresAt) {}
+}
+EOF
+presigned_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
+printf '%s\n' "$presigned_output" | grep -F '取消后仍可重放有效的预签名上传票据' >/dev/null || {
+  echo 'missing presigned-ticket replay preflight' >&2
+  printf '%s\n' "$presigned_output" >&2
+  exit 1
+}
 
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed

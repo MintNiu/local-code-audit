@@ -451,6 +451,19 @@ filter_unsupported_shard_findings() {
           path_evidence ~ /DEFAULT_(CONNECT|READ)_TIMEOUT/ && path_evidence ~ /requireFinitePositiveTimeout/) invalid = 1
       if (block ~ /baseUrl/ && block ~ /缺少/ && block ~ /格式|空/ && path_evidence ~ /baseUrl[[:space:]]*=[[:space:]]*"http/) invalid = 1
       if (block ~ /TOKEN_HEADER/ && block ~ /常量|校验|定义/ && path_evidence ~ /TOKEN_HEADER[[:space:]]*=/) invalid = 1
+      # The presigned-ticket preflight is authoritative when the visible
+      # source already checks expiry.  Remove only speculative duplicate
+      # validation paragraphs in that lifecycle shape; a paragraph that also
+      # carries replay, tenant, permission, or another independent root stays.
+      if (path_evidence ~ /presign[A-Za-z0-9_]*[[:space:]]*\(/ &&
+          path_evidence ~ /expiresAt[[:space:]]*\(\)[[:space:]]*\.[[:space:]]*isAfter/ &&
+          block ~ /过期/ && block ~ /缺少|没有|未见|未进行/ && block ~ /校验|检查|验证/ &&
+          block !~ /重放|竞态|孤儿|撤销|租户|权限|越权|契约/) invalid = 1
+      if (path_evidence ~ /presign[A-Za-z0-9_]*[[:space:]]*\(/ &&
+          block ~ /objectKey|ticket|id/ && block ~ /缺少|没有|未见/ &&
+          block ~ /有效性|格式|校验|验证|检查/ && block !~ /重放|竞态|孤儿|撤销|租户|权限|越权|契约/) invalid = 1
+      if (path_evidence ~ /findActiveExpired/ && block ~ /cleanupExpired/ &&
+          block ~ /只清理活动|仅.*活动|无法.*取消/ && block !~ /重放|竞态|孤儿|撤销|租户|权限|越权|契约/) invalid = 1
       # A shard does not contain the whole repository. Claims that a type or
       # build declaration is missing merely because the current shard does
       # not show it are not evidence of a defect.
@@ -810,7 +823,8 @@ filter_security_preflight_duplicates() {
       # A model paragraph can occasionally combine a deterministic URL/Java
       # finding with a second root cause at the same location. Never discard
       # that whole paragraph merely because one part overlaps preflight.
-      return text ~ /租户|tenant|跨租户|越权|权限绕过|授权绕过|SSRF|请求伪造|路径遍历|重放|竞态|并发|事务|SQL[[:space:]]*注入|迁移脚本|数据库升级|编译失败|构建失败/
+      if (text ~ /租户|tenant|跨租户|越权|权限绕过|授权绕过|SSRF|请求伪造|路径遍历|重放|竞态|并发|事务|SQL[[:space:]]*注入|迁移脚本|数据库升级|编译失败|构建失败/) return 1
+      return text ~ /URL|URI|查询参数|访问日志/ && text ~ /硬编码凭据|AccessKey|access-key|secret-key|password|密码|字面量/
     }
     FILENAME == ARGV[1] {
       if ($0 ~ /凭据值被拼接到 URL|认证令牌从 URL 查询参数读取/) {
@@ -845,9 +859,11 @@ filter_security_preflight_duplicates() {
       sub(/[\r\n].*$/, "", header)
       set_location(header)
       duplicate_security = 0
+      same_path_security = 0
       if (block ~ /凭据|token|secret|URL|URI|查询参数|路径/) {
         for (i = 1; i <= security_count; i++) {
           if (overlaps(loc_path, loc_start, loc_end, security_path[i], security_start[i], security_end[i])) duplicate_security = 1
+          if (loc_path == security_path[i]) same_path_security = 1
         }
       }
       duplicate_java_null = 0
@@ -874,7 +890,97 @@ filter_security_preflight_duplicates() {
         duplicate_java_zero = 0
         duplicate_hardcoded_credential = 0
       }
+      # A model may locate the same URL-token root on a broad class/import
+      # range while the deterministic preflight has the exact call line.  The
+      # exact preflight finding is authoritative for that same file; keep the
+      # model paragraph only when it also carries an independent root cause.
+      if (same_path_security && block ~ /凭据值被拼接到 URL|认证令牌从 URL 查询参数读取/ && !contains_independent_root(block)) {
+        duplicate_security = 1
+      }
       if (!duplicate_security && !duplicate_java_null && !duplicate_java_zero && !duplicate_hardcoded_credential) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
+filter_migration_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-migration-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function canonicalize_key(value) {
+      sub(/^[.][\/]/, "", value)
+      sub(/^a[\/]/, "", value)
+      sub(/^b[\/]/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function set_location(line,    value, suffix, pieces) {
+      value = line
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", value)
+      sub(/[[:space:]]+-.*$/, "", value)
+      loc_path = value
+      if (match(value, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?$/)) {
+        suffix = substr(value, RSTART, RLENGTH)
+        loc_path = substr(value, 1, RSTART - 1)
+        sub(/^:/, "", suffix)
+        gsub(/[[:space:]]+/, "", suffix)
+        split(suffix, pieces, "-")
+        loc_start = pieces[1] + 0
+        loc_end = (pieces[2] == "" ? loc_start : pieces[2] + 0)
+      } else {
+        loc_start = 0
+        loc_end = 0
+      }
+      loc_path = canonicalize_key(loc_path)
+    }
+    function independent_root(text) {
+      # Keep a model paragraph when it carries a second, independently
+      # evidenced root cause at the same deleted file. Migration wording alone
+      # is the preflight duplicate; tenant, SQL, permissions, and trigger
+      # defects remain visible for separate human review.
+      return text ~ /租户|tenant|越权|权限|SQL[[:space:]]*注入|CREATE[[:space:]]+(DATABASE|SCHEMA)|USE[[:space:]]|触发器|并发|竞态|重放|SSRF|路径遍历|硬编码凭据|AccessKey|password|密码/
+    }
+    FILENAME == ARGV[1] {
+      if ($0 ~ /^[[:space:]]*P1[[:space:]:：]+/ && $0 ~ /删除版本化迁移脚本|已有数据库升级路径/) {
+        set_location($0)
+        migration_path[++migration_count] = loc_path
+        migration_start[migration_count] = loc_start
+        migration_end[migration_count] = loc_end
+      }
+      next
+    }
+    function flush(    header, model_path, model_start, model_end, i, duplicate) {
+      if (block == "") return
+      header = block
+      sub(/[\r\n].*$/, "", header)
+      set_location(header)
+      model_path = loc_path
+      model_start = loc_start
+      model_end = loc_end
+      duplicate = 0
+      if (block ~ /删除|移除/ && block ~ /迁移|migration|已有数据库|升级路径|数据库升级/ && !independent_root(block)) {
+        for (i = 1; i <= migration_count; i++) {
+          if (model_path == migration_path[i] &&
+              (model_start == 0 || migration_start[i] == 0 ||
+               (model_start <= migration_end[i] && migration_start[i] <= model_end))) {
+            duplicate = 1
+            break
+          }
+        }
+      }
+      if (!duplicate) {
         if (printed) printf "\n"
         printf "%s", block
         printed = 1
@@ -997,6 +1103,10 @@ review_system="$(cat <<'EOF'
 
 找出所有能由代码或明确契约直接证明的逻辑、边界、异常、安全、权限/租户隔离、并发/事务、性能、兼容性和测试问题。每个独立根因都要保留；可独立修复的根因必须分别输出，即使发生在同一方法或相邻行（例如 null 解引用与除零是两条问题）。只有同一根因在相同调用点重复出现时才可合并，并列出全部受影响文件/行号范围。不要编造不确定问题，不要报告风格、命名、Javadoc、final 或泛化可维护性建议。
 
+对象存储上传取消边界：可见预签名票据仍在有效期、取消先删除 objectKey 后标记终态、且清理只扫活动状态时，必须报告一个 P1 重放/孤儿对象风险；有撤销/版本化证据则不报告。已有 `expiresAt().isAfter(...)` 时不要重复报告过期校验；没有明确契约时不要泛化要求 objectKey/id/ticket 格式校验。
+
+上下文边界：`AGENTS.md` 等规则文件只提供约束/契约，不单独生成 finding；契约问题定位实际代码行。
+
 事务锁序检查：对可见的 `@Transactional` 路径枚举实际锁调用（直接 `receiver.*ForUpdate(...)`、SQL `FOR UPDATE`；若 `@Lock(PESSIMISTIC_WRITE)` 与调用方法及资源映射同时可见，也纳入核对）。只有两条可达事务路径明确针对同一资源且获取顺序相反时才报告死锁/锁等待问题；单独出现注解、未展示调用链、普通 `findById` 或“可能并发”不能作为证据。若输入包含“反向锁序候选”预检段，必须回到可见源码核对方法边界、资源映射和调用可达性，不得重复输出没有独立证据的候选。
 
 接口、DTO、注解或声明式客户端的签名本身不构成运行时漏洞证据；没有可达实现、调用链或明确契约冲突时，不要仅因缺少 null、租户、事务、并发、限流、审计、错误处理、输入范围或兼容性校验而报告。仅有 `@RequestHeader Long tenantId`、`Long batchId` 或 `@PostExchange` 不是证据。测试中的反射、方法枚举、`throws Exception`、断言严格性和未覆盖场景也不是问题；只有差异直接证明测试无法编译、错误通过或掩盖生产缺陷时才报告一条具体测试问题。
@@ -1016,6 +1126,8 @@ Fail-closed 语义：客户端启用时主动调用 `requireInternalToken()`，�
   任务与测试边界：定时任务/调度器入口让业务异常继续向调度框架传播，通常是为了让任务状态失败并触发监控，不得仅因没有 try/catch、重试或额外日志而报告问题。测试使用固定、可复现的系统编码、字节数组或 mock 返回值是正常夹具；除非测试直接断言错误结果、无法编译或掩盖差异中的生产缺陷，不要要求按环境参数化或穷举更多输入。
 
 Spring 客户端负例：`@Bean` 方法接收由容器注入的 `Platform*Properties` 参数时，不得要求额外的 properties null 检查；已有默认 baseUrl 或明确的配置 setter/helper 时，不得仅因没有重复的 URL 格式、空值或超时校验而报告问题。若 token 已有 `null`/`isBlank()` 保护，不得声称缺少保护；不得仅因没有构建日志、token 日志或监控而报告问题。
+
+Lombok：可见 `@Data`/`@Getter`/`@Setter`/`@Value`/构造器生成注解时，视为对应成员存在；仅有明确依赖或编译失败证据才报告缺失。
 
 内部路由客户端契约：如果差异新增或修改了 `/internal/**` 客户端方法，且同一差异或可见项目文档明确表明该客户端默认 baseUrl 是公网网关、拦截器只转发用户 `x-token`，而内部服务明确要求直连并携带 `X-Gateway-Token`（或等价内部认证），则报告一个 P1 的可达契约/运行时失败；应指出方法无法按默认自动配置成功调用，并建议拆分内部客户端、使用内部 baseUrl 和认证头。只有这些 baseUrl、路由和认证要求都能由当前差异或显式 context 直接证明时才报告；没有调用点时影响可标为潜在，但不能因此静默忽略。
 
@@ -1039,6 +1151,8 @@ SQL schema 目标边界：如果同一新增或修改的 SQL 文件中恰好可�
 
 安全判定硬规则：仅凭 `header("X-Token", token)`、`Authorization` 或其他 HTTP header 传递 token，且目标是明确的内部 URI、差异中没有日志记录、外部跳转、URL query/path 拼接或禁止该 header 的契约时，必须视为安全负例并输出“未发现阻塞问题”。不要声称 header 会“必然”进入日志；header 泄漏只有在差异直接展示日志、持久化、外部边界或契约冲突时才可报告。`token` 拼进 URL query/path，或从 `request.getParameter("x-token")`、`getParameter(TOKEN_HEADER)` 等 URL 查询参数读取认证令牌（包括先把 `TOKEN_HEADER` 赋给局部变量、再把该别名传给 `getParameter`），则必须单独报告凭证可能进入访问日志、代理历史或 Referer 的 P1 泄漏风险。
 
+查询令牌：同一 `getParameter("x-token")`/`getParameter(TOKEN_HEADER)` 调用只报一次，使用调用行；已有预检位置时不重复，其他调用点分别保留。
+
 最终硬门槛：逐条删除依赖“可能/如果未来/未证明/建议确认”的候选；这些措辞本身表明当前差异没有可验证反例。不要把防御性偏好、未来兼容性、测试参数化、日志审计或代码注释问题升级为缺陷。若删完没有证据充分的问题，只输出“未发现阻塞问题”。
 
 文档同步边界：README、Javadoc 或注释的描述性缺失、措辞不清和“可能造成混淆”不是问题；不要仅因文档没有解释某个配置、传输方式或内部令牌而报告信息级问题。若差异同时删除/替换对应代码、配置和文档说明，应视为同步变更，除非当前差异直接展示文档与实际代码或明确部署契约矛盾。不得把“当前分片未展示”“如果仍在使用”“可能导致配置不一致”当作证据或问题。
@@ -1047,7 +1161,6 @@ SQL schema 目标边界：如果同一新增或修改的 SQL 文件中恰好可�
 
 凭据配置边界：如果差异把 AccessKey、Secret、Token、密码或会话秘密从环境变量/占位符改成字面量并提交到配置文件，尤其配置仍指向真实 endpoint、bucket 或其他外部资源，这是可由差异直接证明的 P1（凭据仍有效时可按组织威胁模型升级 P0）泄漏；应报告配置文件行号、暴露方式及轮换/移除建议。不要因为文件名含 localhost 或 profile 就自动豁免。只有差异确实展示了字面量秘密或其进入日志、持久化、URL/外部边界时才报告；普通内部 HTTP header 传递 token 仍按前述安全负例处理。
 
-对象存储上传取消边界：若取消/中止流程先删除对象再把会话标记为终态，而已签发且在有效期内的单文件预签名上传票据仍可写入同一 objectKey，且后台清理只扫描活动状态，则必须报告可复现的竞态与孤儿对象资源耗尽风险（P1）。修复应撤销或版本化票据并覆盖终态会话/对象清理；不要仅凭“存在预签名 URL”报告问题，必须能从差异证明票据仍有效且终态不会再清理。
 EOF
 )"
 
@@ -1704,6 +1817,7 @@ merge_preflight_findings() {
   fi
   if [[ -s "$finding_preflight_file" ]]; then
     filter_security_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
   {
@@ -3417,6 +3531,93 @@ collect_java_division_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_presigned_replay_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+
+  # Detect one narrow, directly evidenced object-storage race without relying
+  # on model recall: a still-valid presigned ticket can write the same key
+  # after cancellation deletes it and marks the session terminal, while
+  # cleanup only enumerates active expired sessions. Require the changed diff
+  # to touch this lifecycle family and reject visible revoke/invalidate
+  # evidence; unrelated uploads and ordinary deletes stay model-only.
+  awk -v repo_root="$source_root" '
+    function reset_file() {
+      changed = 0
+      source_count = 0
+      delete source_lines
+      source_blob = ""
+    }
+    function load_source(    source_path, value) {
+      if (repo_root == "" || path == "" || path == "/dev/null" || source_count > 0) return
+      source_path = repo_root "/" path
+      while ((getline value < source_path) > 0) {
+        source_lines[++source_count] = value
+        source_blob = source_blob value "\n"
+      }
+      close(source_path)
+    }
+    function emit_file(    i, j, delete_line, terminal_line, cleanup_seen, has_race) {
+      if (!changed || path == "" || path !~ /\.java$/) return
+      load_source()
+      if (source_count == 0) return
+      if (source_blob !~ /presign[A-Za-z0-9_]*[[:space:]]*\(/ ||
+          source_blob !~ /expiresAt[[:space:]]*\(\)[[:space:]]*\.[[:space:]]*isAfter/ ||
+          source_blob !~ /[.]put[[:space:]]*\([[:space:]]*ticket/ ||
+          source_blob !~ /findActiveExpired|find[A-Za-z0-9_]*Active[A-Za-z0-9_]*Expired/ ||
+          source_blob ~ /revoke|invalidate|deleteTicket|expireTicket/) return
+      for (i = 1; i <= source_count; i++) {
+        if (source_lines[i] !~ /[.]delete[[:space:]]*\([[:space:]]*objectKey[[:space:]]*\)/) continue
+        delete_line = i
+        terminal_line = 0
+        for (j = i + 1; j <= i + 8 && j <= source_count; j++) {
+          if (source_lines[j] ~ /mark(Cancelled|Canceled|Completed|Aborted)[[:space:]]*\(|setStatus[[:space:]]*\([^)]*(CANCEL|CANCELLED|COMPLET|ABORT)/) {
+            terminal_line = j
+            break
+          }
+        }
+        if (terminal_line == 0) continue
+        has_race = 1
+        printf "P1 %s:%d - 取消后仍可重放有效的预签名上传票据，存在对象存储竞态和孤儿对象资源耗尽风险。\n影响：取消流程删除 objectKey 并标记终态后，未过期票据仍可写入同一对象，而只扫描活动会话的清理流程不会回收该对象。\n修复建议：取消时撤销或版本化所有未过期票据，并让终态对象进入可靠的删除/补偿队列。\n验证方式：在票据有效期内先取消会话再上传，确认写入被拒绝且对象最终被回收；重复测试终态和过期清理路径。\n\n", path, delete_line
+        break
+      }
+    }
+    /^diff --git / {
+      emit_file()
+      path = $4
+      sub(/^b\//, "", path)
+      reset_file()
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      load_source()
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+") {
+        text = substr($0, 2)
+        if (text ~ /presign|UploadTicket|objectKey|mark(Cancelled|Canceled|Completed|Aborted)|findActiveExpired|expiresAt/) changed = 1
+        line_no++
+      } else if (prefix == " ") {
+        line_no++
+      }
+    }
+    END { emit_file() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_storage_delete_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -3691,6 +3892,64 @@ collect_sql_trigger_preflight() {
         record_create(text, prefix == "+", line_no)
       }
       if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { emit_file() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_migration_delete_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # A deleted versioned migration is a high-confidence upgrade-path risk only
+  # when the deleted file itself says it serves existing databases.  This is
+  # intentionally narrower than treating every obsolete-looking SQL filename
+  # as a defect: explicit replacement/framework evidence remains the model's
+  # job, while this preflight supplies one stable location for the proven
+  # deletion.  Keeping this deterministic also prevents wording/line-range
+  # drift from making repeated reviews disagree.
+  awk '
+    function reset_file() {
+      deleted = 0
+      old_start = 0
+      old_count = 0
+      old_text = ""
+    }
+    function emit_file(    range, end_line, base) {
+      if (!deleted || path == "" || path !~ /(^|\/)(sql|db)\/migration\/V[0-9]{8}[^\/]*\.sql$/) return
+      if (old_text !~ /Versioned[[:space:]]+migration|existing[[:space:]]+databases?|已有数据库|升级路径|数据库升级/) return
+      if (old_start <= 0) old_start = 1
+      if (old_count <= 1) range = old_start
+      else {
+        end_line = old_start + old_count - 1
+        range = old_start "-" end_line
+      }
+      printf "P1 %s:%s - 删除版本化迁移脚本会中断已有数据库升级路径，当前提交没有保留该版本的可执行升级入口。\n影响：已经存在的数据库无法按原版本顺序应用结构变更，部署可能停在半升级状态或缺少必需表/字段。\n修复建议：保留该版本迁移，或在同一发布链路提供等价可执行替代并明确迁移映射；不要只依赖空库初始化脚本。\n验证方式：在旧版本数据库上执行升级，确认该版本变更仍被执行且可重复/可回滚；同时验证全新数据库初始化路径。\n\n", path, range
+    }
+    /^diff --git / {
+      emit_file()
+      path = $4
+      sub(/^b\//, "", path)
+      reset_file()
+      next
+    }
+    /^deleted file mode / { deleted = 1; next }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -/, "", hunk)
+      sub(/ \+.*/, "", hunk)
+      split(hunk, pieces, ",")
+      old_start = pieces[1] + 0
+      old_count = (pieces[2] == "" ? 1 : pieces[2] + 0)
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "-" ? substr($0, 2) : $0)
+      # A deleted SQL comment beginning with `--` is rendered as `--- ...`;
+      # skip only the diff file-header form, not that real source line.
+      if (prefix == "-" && $0 !~ /^--- (a\/|\/dev\/null)/) old_text = old_text text "\n"
     }
     END { emit_file() }
   ' "$diff_file" >>"$output_file"
@@ -4242,9 +4501,11 @@ collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
+collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
+collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
 collect_transaction_lock_order_preflight "$chunk_input_file" "$deterministic_lock_order_file" "$repo_root"
 {
