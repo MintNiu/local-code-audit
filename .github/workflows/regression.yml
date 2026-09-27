@@ -28,8 +28,10 @@ jobs:
           ./evals/test-sharding.sh
           ./evals/test-shard-preflight-routing.sh
           ./evals/test-shard-integrity.sh
+          ./evals/test-config-findings.sh
           ./evals/test-history.sh
           ./evals/test-label-migration.sh
           ./evals/test-scorecard.sh
           ./evals/test-scorecard-builder.sh
           ./evals/test-runtime-verify.sh
+          ./evals/test-stage1-gate.sh
