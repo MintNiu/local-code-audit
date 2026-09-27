@@ -109,6 +109,16 @@ fi
 grep -F -- '--runs 必须是大于等于 2 的整数' "$fixture_root/repeat-single-stderr" >/dev/null
 [[ ! -e "$fixture_root/repeat-single-curl-count" ]]
 [[ ! -e "$fixture_root/repeat-single" ]]
+
+# Multi-digit values such as 10 remain valid; stop at argument validation so
+# the regression does not launch a history run.
+if PATH="$fake_bin:$PATH" \
+  "$repo_root/evals/run-history-repeat.sh" \
+    --runs 10 >"$fixture_root/repeat-ten-stdout" 2>"$fixture_root/repeat-ten-stderr"; then
+  echo 'history repeat unexpectedly ran without required output directory' >&2
+  exit 1
+fi
+grep -F -- '--out-dir 是必需参数' "$fixture_root/repeat-ten-stderr" >/dev/null
 printf 'history duplicate regression passed\n'
 
 # Parent validation is fail-closed and must happen before any model transport.
