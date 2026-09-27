@@ -2738,6 +2738,58 @@ if [[ "$(printf '%s\n' "$migration_output" | grep -c 'sql/migration/V20260927__e
   exit 1
 fi
 
+cat >"$repo/src/main/java/com/example/api/client/GuardedClientProperties.java" <<'EOF'
+package com.example.api.client;
+
+import lombok.Data;
+
+@Data
+public class GuardedClientProperties {
+    private String baseUrl = "http://localhost:8092";
+    private String gatewayInternalToken;
+    private String fileInternalToken;
+}
+EOF
+cat >"$repo/src/main/java/com/example/api/client/GuardedClientAutoConfiguration.java" <<'EOF'
+package com.example.api.client;
+
+import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.service.invoker.HttpServiceProxyFactory;
+
+@AutoConfiguration
+@ConditionalOnClass({RestClient.class, HttpServiceProxyFactory.class})
+@EnableConfigurationProperties(GuardedClientProperties.class)
+public class GuardedClientAutoConfiguration {
+    @Bean
+    Object client(GuardedClientProperties properties) {
+        if (properties.getGatewayInternalToken() == null
+                || properties.getGatewayInternalToken().isBlank()) {
+            throw new IllegalStateException("gateway token required");
+        }
+        if (properties.getFileInternalToken() == null
+                || properties.getFileInternalToken().length() < 32) {
+            throw new IllegalStateException("file token required");
+        }
+        return RestClient.builder().baseUrl(properties.getBaseUrl()).build();
+    }
+}
+EOF
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"P1 src/main/java/com/example/api/client/GuardedClientAutoConfiguration.java:1-24 - RestClient 和 HttpServiceProxyFactory 类型在当前提交中缺少。\n影响：可能无法构建。\n修复建议：补充依赖。\n验证方式：执行构建。\n\nP1 src/main/java/com/example/api/client/GuardedClientAutoConfiguration.java:16-20 - properties 参数缺少 null 检查。\n影响：可能 NPE。\n修复建议：增加检查。\n验证方式：传入 null。\n\nP1 src/main/java/com/example/api/client/GuardedClientAutoConfiguration.java:21-24 - gatewayInternalToken 和 fileInternalToken 缺少 null/空值检查。\n影响：可能 NPE。\n修复建议：增加检查。\n验证方式：传入空值。\n\nP1 src/main/java/com/example/api/client/GuardedClientAutoConfiguration.java:24 - baseUrl 缺少默认值和空值检查。\n影响：可能失败。\n修复建议：增加检查。\n验证方式：传入空值。","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+guarded_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
+if printf '%s\n' "$guarded_output" | grep -F 'GuardedClientAutoConfiguration.java' >/dev/null; then
+  echo 'cross-file guard/default/ConditionalOnClass contradictions were not filtered' >&2
+  printf '%s\n' "$guarded_output" >&2
+  exit 1
+fi
+
 cat >"$repo/src/main/java/com/example/api/client/PresignedReplay.java" <<'EOF'
 final class PresignedReplay {
     private final Store store;

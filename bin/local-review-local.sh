@@ -4,7 +4,11 @@ set -euo pipefail
 # Personal high-performance profile. Values remain overridable per invocation.
 # It keeps the same evidence and security gates as local-review; only runtime
 # budgets, model residency, and the local private examples path are changed.
-export OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-16384}"
+# The personal profile keeps a 32K request window so fixed audit rules,
+# explicit context, and routed preflight evidence do not make real multi-file
+# reviews fail before inference. Callers may lower this deliberately, but the
+# default must favor complete review output over a smaller context footprint.
+export OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-32768}"
 export OLLAMA_REVIEW_NUM_PREDICT="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
 export OLLAMA_REVIEW_MAX_DIFF_BYTES="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
 export OLLAMA_REVIEW_TIMEOUT_SECONDS="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-600}"

@@ -20,6 +20,11 @@ fi
 EOF
 chmod +x "$fake_bin/ollama"
 
+grep -F 'OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-32768}"' "$repo_root/bin/local-review-local.sh" >/dev/null || {
+  echo 'personal high-performance wrapper lost its 32K default context' >&2
+  exit 1
+}
+
 # Keep the fake command independent from the repository's Ollama installation;
 # the verifier must compare the exact SYSTEM payload, not just marker strings.
 PATH="$fake_bin:$PATH" LOCAL_REVIEW_BIN_DIR="$fixture_root/no-global" VERIFY_MODELF_FILE="$repo_root/config/Modelfile" \

@@ -334,7 +334,7 @@ filter_unsupported_shard_findings() {
   # reason is that incompleteness itself, rather than hiding any finding with
   # concrete code evidence. This is a deterministic guard for a recurrent
   # model failure mode ("please provide the complete file").
-  awk -v evidence_file="$current_evidence_file" '
+  awk -v evidence_file="$current_evidence_file" -v repo_root="$repo_root" '
     BEGIN {
       if (evidence_file != "") {
         evidence_path = ""
@@ -420,7 +420,48 @@ filter_unsupported_shard_findings() {
     }
     function flush(    invalid, path_evidence) {
       if (block == "") return
-      path_evidence = evidence_by_path[finding_path(block)]
+      finding_path_value = finding_path(block)
+      path_evidence = evidence_by_path[finding_path_value]
+      # A shard may show only the hunk that triggered a finding.  For a small
+      # set of contradiction guards, also load the current snapshot of that
+      # changed source file.  This is evidence for filtering only; it never
+      # invents a finding or turns an unseen file into review scope.
+      if (repo_root != "" && finding_path_value != "" &&
+          finding_path_value ~ /\.(java|ya?ml|properties|sql)$/ &&
+          !(finding_path_value in full_loaded)) {
+        full_file = repo_root "/" finding_path_value
+        full_line_count = 0
+        while ((getline full_line < full_file) > 0) {
+          if (full_line_count < 20000) full_evidence[finding_path_value] = full_evidence[finding_path_value] full_line "\n"
+          full_line_count++
+        }
+        close(full_file)
+        full_loaded[finding_path_value] = 1
+      }
+      path_evidence = path_evidence full_evidence[finding_path_value]
+      # Auto-configuration classes often put defaults and generated accessors
+      # in a sibling *Properties.java file.  Load only the explicitly bound
+      # properties type from the same package; this is still contradiction
+      # evidence for the changed target, not a new review target.
+      related_class = path_evidence
+      if (match(related_class, /@EnableConfigurationProperties\([A-Z][A-Za-z0-9_]*\.class/)) {
+        related_class = substr(related_class, RSTART, RLENGTH)
+        sub(/^.*\(/, "", related_class)
+        sub(/\.class.*$/, "", related_class)
+        package_dir = finding_path_value
+        sub(/\/[^\/]+$/, "", package_dir)
+        related_file = repo_root "/" package_dir "/" related_class ".java"
+        if (!(related_file in related_loaded)) {
+          related_line_count = 0
+          while ((getline related_line < related_file) > 0) {
+            if (related_line_count < 12000) related_evidence[finding_path_value] = related_evidence[finding_path_value] related_line "\n"
+            related_line_count++
+          }
+          close(related_file)
+          related_loaded[related_file] = 1
+        }
+        path_evidence = path_evidence related_evidence[finding_path_value]
+      }
       # Drop only a wholly generic "the shard is incomplete" paragraph. If
       # the same block also contains concrete evidence, keep the finding so
       # output filtering can never hide an independently actionable problem.
@@ -437,11 +478,31 @@ filter_unsupported_shard_findings() {
       # Spring supplies @Bean method arguments; do not report a generic null
       # check for an injected properties object when the annotation and type
       # are visible in the current evidence.
-      if (block ~ /properties/ && block ~ /null/ && block ~ /缺少/ &&
-          path_evidence ~ /@Bean/ && path_evidence ~ /PlatformDictClientProperties[[:space:]]+properties/) invalid = 1
+      if (block ~ /[Pp]roperties/ && block ~ /null/ && block ~ /缺少/ &&
+          path_evidence ~ /@Bean/ && path_evidence ~ /[A-Z][A-Za-z0-9]*Properties[[:space:]]+properties/) invalid = 1
+      # ConditionalOnClass deliberately makes optional Spring client types
+      # conditional.  Do not turn their absence from the local source tree
+      # into a build finding unless the model has an independent annotation or
+      # dependency contradiction.
+      if (block ~ /(RestClient|HttpServiceProxyFactory)/ &&
+          block ~ /缺少|未找到|不存在|无法/ &&
+          path_evidence ~ /@ConditionalOnClass/ &&
+          path_evidence ~ /RestClient/ && path_evidence ~ /HttpServiceProxyFactory/ &&
+          block !~ /ConditionalOnClass.*(错误|缺失|冲突)/) invalid = 1
       # These are already visible guards/defaults, not actionable findings.
       if (block ~ /currentToken|token/ && block ~ /null/ && block ~ /空/ &&
           path_evidence ~ /token[[:space:]]*!=[[:space:]]*null/ && path_evidence ~ /token\.isBlank\(\)/) invalid = 1
+      # Require* token getters commonly guard both null and blank/length
+      # before being passed to a RestClient default header.  A shard can split
+      # those guards from the header call; the full-file evidence makes this
+      # contradiction deterministic without suppressing a different token or
+      # an independent authentication root.
+      if (block ~ /gatewayInternalToken/ && block ~ /null|空/ && block ~ /缺少|没有|未见/ &&
+          path_evidence ~ /getGatewayInternalToken\(\)[[:space:]]*==[[:space:]]*null/ &&
+          path_evidence ~ /isBlank|length\(\)[[:space:]]*</) invalid = 1
+      if (block ~ /fileInternalToken/ && block ~ /null|空/ && block ~ /缺少|没有|未见/ &&
+          path_evidence ~ /getFileInternalToken\(\)[[:space:]]*==[[:space:]]*null/ &&
+          path_evidence ~ /isBlank|length\(\)[[:space:]]*</) invalid = 1
       # A DTO access guarded by `dto == null ? null : ... dto.getX()` is not
       # a null-dereference or empty-value defect merely because the model
       # speculates about the alternate branch.

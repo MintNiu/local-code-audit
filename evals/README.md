@@ -119,7 +119,7 @@ SQL 迁移预检还会识别删除版本化 `sql/migration`/`db/migration` 文�
 3. 误报必须单独统计；每条输出都能定位到文件、行号和代码证据。
 4. 审查输出不能静默截断。API 错误、空响应或 `done_reason=length` 必须以非零状态退出并明确提示。
 5. 同一提交重复审查时，结果应基本稳定；固定 seed 只用于降低波动，不能代替人工复核。
-6. 每次评测记录模型名、temperature、seed、num_ctx、提交、耗时和人工结论。
+6. 每次评测记录模型名、temperature、seed、num_ctx、提交、耗时和人工结论。个人高性能 `local-review-local` 默认请求 `num_ctx=32768`，通用 core `local-review` 保持 `16384`；大提交优先使用个人入口，若显式降低上下文，预算门禁仍会 fail-closed。
 
 ### 大差异分片
 

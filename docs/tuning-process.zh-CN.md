@@ -232,7 +232,7 @@ context_files[@]: unbound variable
 
 - Ollama 的瞬时传输失败默认最多重试两次，但每次重试都会重新计算整次审查的剩余总超时；`OLLAMA_REVIEW_RETRY_ATTEMPTS=0` 可关闭重试，避免网络或服务抖动直接丢失一次审查。
 - 输出门禁在结构校验后核对报告中的文件/行号。当前文件或显式 context 文件存在时，超过真实文件行数的定位会失败；删除文件不强行按当前内容校验，避免把历史删除问题误判为行号错误。
-- 请求发送前按 UTF-8 字节估算 system 规则、上下文和 diff 的输入 token，并为输出与 tokenizer 波动保留空间。估算超出 `num_ctx - num_predict - OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` 时直接失败，不把可能被静默截断的请求交给模型；默认 16k/4096 profile 已用真实合成回归验证。
+- 请求发送前按 UTF-8 字节估算 system 规则、上下文和 diff 的输入 token，并为输出与 tokenizer 波动保留空间。估算超出 `num_ctx - num_predict - OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` 时直接失败，不把可能被静默截断的请求交给模型；个人高性能 profile 默认 32k/4096，普通 core profile 仍为 16k/4096。
 
 `scripts/verify-runtime.sh` 现在还会从 `config/Modelfile` 与 `ollama show --modelfile` 提取完整 SYSTEM 块并比较 SHA-256。规则缺失、格式异常或运行态漂移都会 fail-closed；`evals/test-runtime-verify.sh` 覆盖一致通过和人为漂移失败两条路径。该机制解决的是“脚本已更新但 Ollama 派生模型仍是旧规则”的运维问题，不代表基础模型能力发生变化。
 
@@ -633,4 +633,7 @@ reserve 和 effective budget，方便后续复核。
 五轮合成稳定性曾暴露两个模型侧漂移：预签名上传取消后偶发漏报仍可重放的有效票据，迁移删除则偶发以宽行号重复描述已有库升级风险。前者加入四项证据同时成立才触发的对象存储 P1 预检；后者加入只针对明确标注“已有数据库”的版本化迁移删除预检，并按文件/行号过滤同根因模型复述。所有过滤都保留租户、权限、SQL、并发、SSRF 等独立证据。
 
 无模型预检回归、五轮合成门禁和运行态校验均通过：7 类正例 5/5 命中，5 类 clean 共 25/25 通过，输出哈希稳定，截断故障显式失败。该结果改善个人本地高可用性和可重复性，但不扩大真实人工标签分母；当前仍按 23 个跨项目提交、7 个确认 P0/P1 根因解释，不能宣称生产级召回率。
+
 真实 `platform-api:cbe47ea0` 随后使用当前 tuned profile 做了两轮重复审查：单轮 11 个分片，分别约 32/33 秒，均 exit=0、完整返回 clean；重复门禁确认结果内容、模型、SYSTEM、脚本和分片签名稳定。该提交此前曾有 8 条 Lombok/安全/查询令牌误报，本轮全部消失。这只证明一个已知 clean 误报簇得到改善，不增加 P0/P1 召回分母，也不替代跨项目人工真值。
+
+真实 `platform-api:63d520b` 的复测暴露个人 profile 默认 16K 上下文不足：固定规则和跨文件证据占满预算时，审查器必须 fail-closed，不能只把确定性 token P1 当作完整结果。个人 `local-review-local` 默认窗口现提升到 32K；过滤器同时读取当前变更文件和显式绑定的 `*Properties` 类，仅在源码已展示 guard、默认值或 `@ConditionalOnClass` 时移除模型矛盾段。32K、14 个分片、182 秒的完整复测只保留该提交人工确认的查询 token P1，原有 properties/null/可选依赖误报消失。该证据改善了真实大提交的可用性和精度，但不扩大 P0/P1 真值分母。
