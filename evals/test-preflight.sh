@@ -2449,6 +2449,82 @@ if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   exit 1
 fi
 
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"   \u001b[0m  ","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'blank/ control-only response was incorrectly converted to clean' >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"未发现阻塞问题","done":true,"done_reason":"error"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'done_reason=error response was incorrectly accepted' >&2
+  exit 1
+fi
+
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"未发现阻塞问题","done":true}'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >/dev/null 2>&1; then
+  echo 'missing done_reason response was incorrectly accepted' >&2
+  exit 1
+fi
+
+lock_repo="$fixture_root/lock-repo"
+mkdir -p "$lock_repo/src/main/java/com/example/api/client"
+git -C "$lock_repo" init -q
+git -C "$lock_repo" config user.email test@example.invalid
+git -C "$lock_repo" config user.name preflight-test
+cat >"$lock_repo/src/main/java/com/example/api/client/LockOnly.java" <<'EOF'
+package com.example.api.client;
+
+final class LockOnly {
+    void load() {
+        // baseline
+    }
+}
+EOF
+git -C "$lock_repo" add .
+git -C "$lock_repo" commit -qm lock-base
+cat >"$lock_repo/src/main/java/com/example/api/client/LockOnly.java" <<'EOF'
+package com.example.api.client;
+
+import org.springframework.transaction.annotation.Transactional;
+
+final class LockOnly {
+    private final LockRepository repository = null;
+
+    @Transactional
+    void load() {
+        repository.findByIdForUpdate(1L);
+    }
+}
+EOF
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+lock_only_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
+[[ "$lock_only_output" == '未发现阻塞问题' ]] || {
+  echo 'prompt-only lock evidence turned a clean review into empty/non-clean output' >&2
+  printf '%s\n' "$lock_only_output" >&2
+  exit 1
+}
+
 if PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   OLLAMA_REVIEW_NUM_CTX=4096 OLLAMA_REVIEW_NUM_PREDICT=512 \
   OLLAMA_REVIEW_INPUT_RESERVE_TOKENS=256 \
@@ -2831,6 +2907,50 @@ presigned_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL
 printf '%s\n' "$presigned_output" | grep -F '取消后仍可重放有效的预签名上传票据' >/dev/null || {
   echo 'missing presigned-ticket replay preflight' >&2
   printf '%s\n' "$presigned_output" >&2
+  exit 1
+}
+
+# A lock-context scan failure must not be swallowed and converted into a
+# successful clean review. The fake perl affects only the bounded lock scans;
+# the review must fail before it sends a model request.
+lock_failure_repo="$fixture_root/lock-scan-failure-repo"
+mkdir -p "$lock_failure_repo/src/main/java/com/example/lock"
+git -C "$lock_failure_repo" init -q
+git -C "$lock_failure_repo" config user.email test@example.invalid
+git -C "$lock_failure_repo" config user.name preflight-lock-test
+cat >"$lock_failure_repo/src/main/java/com/example/lock/LockService.java" <<'EOF'
+package com.example.lock;
+
+final class LockService {
+    void update() {
+        repository.findForUpdate();
+    }
+
+    interface Repository { void findForUpdate(); }
+}
+EOF
+git -C "$lock_failure_repo" add .
+git -C "$lock_failure_repo" commit -qm base
+python3 - "$lock_failure_repo/src/main/java/com/example/lock/LockService.java" <<'PY'
+from pathlib import Path
+path = Path(__import__('sys').argv[1])
+path.write_text(path.read_text().replace('void update()', '@org.springframework.transaction.annotation.Transactional\n    void update()'))
+PY
+cat >"$fake_bin/perl" <<'EOF'
+#!/usr/bin/env bash
+exit 2
+EOF
+chmod +x "$fake_bin/perl"
+if PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$lock_failure_repo" >"$fixture_root/lock-failure.stdout" 2>"$fixture_root/lock-failure.stderr"; then
+  echo 'lock scan failure was incorrectly accepted as a successful review' >&2
+  cat "$fixture_root/lock-failure.stdout" >&2
+  cat "$fixture_root/lock-failure.stderr" >&2
+  exit 1
+fi
+grep -F '跨事务/行锁文本索引扫描超时或失败' "$fixture_root/lock-failure.stderr" >/dev/null || {
+  echo 'lock scan failure did not fail closed with a diagnostic' >&2
+  cat "$fixture_root/lock-failure.stderr" >&2
   exit 1
 }
 

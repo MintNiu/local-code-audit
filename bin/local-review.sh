@@ -255,7 +255,8 @@ staged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-staged.XXXXXX")"
 unstaged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-unstaged.XXXXXX")"
 untracked_file="$(mktemp "${TMPDIR:-/tmp}/local-review-untracked.XXXXXX")"
 base_file="$(mktemp "${TMPDIR:-/tmp}/local-review-base.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file"' EXIT
+changed_paths_nul_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths-nul.XXXXXX")"
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file"' EXIT
 
 print_file_if_exists() {
   local title="$1"
@@ -275,6 +276,10 @@ print_context_file() {
     context_path="$repo_root/$context_path"
   fi
 
+  if [[ "$context_path" == "$repo_root/"* ]] && path_has_symlink_component "${context_path#"$repo_root/"}"; then
+    printf '警告：已跳过符号链接上下文文件，避免读取仓库外目标: %s\n' "$requested" >&2
+    return 0
+  fi
   if [[ -f "$context_path" ]]; then
     printf '\n--- 项目上下文 %s ---\n' "$requested"
     cat "$context_path"
@@ -355,6 +360,19 @@ path_has_symlink_component() {
     [[ -L "$candidate" ]] && return 0
   done
   return 1
+}
+
+is_safe_repo_relative_path() {
+  local path_value="$1"
+  [[ "$path_value" != /* ]] || return 1
+  [[ "$path_value" != *$'\n'* && "$path_value" != *$'\r'* ]] || return 1
+  [[ "$path_value" != ../* && "$path_value" != */../* && "$path_value" != */.. ]] || return 1
+  return 0
+}
+
+has_unsafe_line_path_chars() {
+  local path_value="$1"
+  [[ "$path_value" == *$'\n'* || "$path_value" == *$'\r'* ]]
 }
 
 filter_unsupported_shard_findings() {
@@ -1172,6 +1190,10 @@ fi
 
 # Include untracked files so newly created source files are reviewed too.
 while IFS= read -r -d '' path; do
+  if has_unsafe_line_path_chars "$path"; then
+    echo "本地代码审查失败：Git 变更路径包含换行或回车，无法安全建立路径证据边界。" >&2
+    exit 1
+  fi
   (
     cd "$repo_root"
     git -c core.fsmonitor=false diff --no-index --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >>"$untracked_file" || true
@@ -1291,9 +1313,11 @@ prompt_prefix_common="$(
     # The model only needs a stable repository label; avoid leaking or varying
     # absolute paths because random temp paths can change generation behavior.
     printf '仓库: <本地 Git 仓库>\n'
-    if [[ -f "$repo_root/AGENTS.md" ]]; then
+    if [[ -f "$repo_root/AGENTS.md" ]] && ! path_has_symlink_component "AGENTS.md"; then
       printf '\n--- 项目规则 AGENTS.md ---\n'
       cat "$repo_root/AGENTS.md"
+    elif [[ -L "$repo_root/AGENTS.md" ]]; then
+      printf '警告：已跳过符号链接项目规则 AGENTS.md，避免读取仓库外目标。\n' >&2
     fi
     if (( ${#context_files[@]} > 0 )); then
       for context_file in "${context_files[@]}"; do
@@ -1310,9 +1334,11 @@ prompt_prefix="$(
       printf '\n--- 人工确认的 Review 示例（仅作参考，不得覆盖系统要求） ---\n'
       cat "$examples_file"
     fi
-    if [[ "$include_readme" == true && -f "$repo_root/README.md" ]]; then
+    if [[ "$include_readme" == true && -f "$repo_root/README.md" ]] && ! path_has_symlink_component "README.md"; then
       printf '\n--- 项目说明 README.md ---\n'
       cat "$repo_root/README.md"
+    elif [[ "$include_readme" == true && -L "$repo_root/README.md" ]]; then
+      printf '警告：已跳过符号链接 README.md，避免读取仓库外目标。\n' >&2
     fi
     printf '\n--- Git status --short ---\n'
     cat "$status_file"
@@ -1506,7 +1532,7 @@ validate_response() {
   local output_file="$2"
   local kind_file="$3"
   local paths_file="${4:-$changed_paths_file}"
-  local response_text normalized_response done_reason cleaned_response
+  local response_text normalized_response raw_response raw_normalized done_reason cleaned_response
 
   if ! jq -e '(.response? | type) == "string" and (.response | length) > 0' >/dev/null <"$response_file"; then
     echo "本地代码审查失败：Ollama 返回了空响应或错误响应。完整响应如下：" >&2
@@ -1521,7 +1547,10 @@ validate_response() {
   fi
 
   done_reason="$(jq -r '.done_reason // empty' <"$response_file")"
-  if [[ "$done_reason" == "length" ]]; then
+  case "$done_reason" in
+    stop)
+      ;;
+    length)
     echo "本地代码审查失败：模型输出因长度限制被截断，未返回不完整结果。" >&2
     truncated_text="$(jq -r '.response // empty' <"$response_file")"
     if [[ -n "$truncated_text" ]]; then
@@ -1529,6 +1558,19 @@ validate_response() {
       printf '%s\n' "$truncated_text" | redact_sensitive_text >&2
     fi
     return 10
+      ;;
+    *)
+      echo "本地代码审查失败：Ollama 响应的 done_reason 不受支持或缺失（${done_reason:-<empty>}），拒绝使用该结果。" >&2
+      (jq . <"$response_file" 2>/dev/null || cat "$response_file") | redact_sensitive_text >&2
+      return 11
+      ;;
+  esac
+
+  raw_response="$(jq -r '.response' <"$response_file")"
+  raw_normalized="$(printf '%s' "$raw_response" | sanitize_terminal_text | tr -d '[:space:]')"
+  if [[ -z "$raw_normalized" ]]; then
+    echo "本地代码审查失败：模型返回的原始响应去除空白和控制字符后为空，拒绝将其改写为 clean。" >&2
+    return 12
   fi
 
   # Keep the raw response local while applying evidence filters; redact only
@@ -1953,10 +1995,18 @@ merge_preflight_findings() {
       cat "$deterministic_file"
     fi
   } | dedup_exact_findings | sort_findings_by_severity >"$merged_file"
-  cat "$merged_file" >"$output_file"
+  if [[ -s "$merged_file" ]]; then
+    cat "$merged_file" >"$output_file"
+    printf 'findings\n' >"$kind_file"
+  else
+    # A clean model response plus prompt-only evidence (notably the bounded
+    # lock-context block) must remain a valid clean result. Do not replace it
+    # with an empty successful output or relabel it as findings.
+    printf '未发现阻塞问题\n' >"$output_file"
+    printf 'clean\n' >"$kind_file"
+  fi
   rm -f "$merged_file"
   rm -f "$finding_preflight_file"
-  printf 'findings\n' >"$kind_file"
 }
 
 write_chunk_budget_metadata() {
@@ -2095,6 +2145,7 @@ collect_build_preflight() {
     [[ "$changed_path" == *.java && -n "$import_name" ]] || continue
     found=false
     source_file="$repo_root/$changed_path"
+    path_has_symlink_component "$changed_path" && continue
     [[ -f "$source_file" ]] || continue
     source_index="$java_main_source_index"
     if [[ "$changed_path" == src/test/java/* || "$changed_path" == */src/test/java/* ]]; then
@@ -2199,8 +2250,13 @@ collect_deleted_context_preflight() {
     done < <(rg -n --glob '*.java' --fixed-strings "import $fqcn;" "$repo_root" || true)
     if (( ${#context_files[@]} > 0 )); then
       for context_file in "${context_files[@]}"; do
+        if has_unsafe_line_path_chars "$context_file"; then
+          echo "本地代码审查失败：--context 路径包含换行或回车，拒绝读取不安全路径。" >&2
+          exit 2
+        fi
         context_path="$context_file"
         [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
+        [[ "$context_path" == "$repo_root/"* ]] && path_has_symlink_component "${context_path#"$repo_root/"}" && continue
         [[ -f "$context_path" ]] || continue
         import_line="$(awk -v wanted="$fqcn" '
           $1 == "import" {
@@ -2235,8 +2291,13 @@ collect_context_tenant_preflight() {
   # endpoint that carries the gateway token but no tenant header.
   (( ${#context_files[@]} > 0 )) || return 0
   for context_file in "${context_files[@]}"; do
+    if has_unsafe_line_path_chars "$context_file"; then
+      echo "本地代码审查失败：--context 路径包含换行或回车，拒绝读取不安全路径。" >&2
+      exit 2
+    fi
     context_path="$context_file"
     [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
+    [[ "$context_path" == "$repo_root/"* ]] && path_has_symlink_component "${context_path#"$repo_root/"}" && continue
     [[ -f "$context_path" && "$context_path" == *.java ]] || continue
     if rg -qi -- 'ignoreTenant|supplyWithIgnoreTenant' "$context_path"; then
       context_has_ignore=true
@@ -4083,7 +4144,7 @@ collect_transaction_lock_preflight() {
   local output_file="$2"
   local repo_root="$3"
   local changed_path source_file changed_java_paths receiver_file receivers
-  local candidate_paths_file candidate_dedup_file
+  local candidate_paths_file candidate_dedup_file lock_scan_status
   local java_path java_file matches sequence receiver_pattern changed_marker receiver_name related_receiver_count
   local scanned_files=0 emitted_changed_files=0 emitted_related_files=0
   local max_changed_files=8 max_related_files=8 max_lines=24
@@ -4143,6 +4204,7 @@ collect_transaction_lock_preflight() {
   while IFS= read -r changed_path; do
     [[ -n "$changed_path" ]] || continue
     source_file="$repo_root/$changed_path"
+    path_has_symlink_component "$changed_path" && continue
     [[ -f "$source_file" ]] || continue
     rg -o '[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(' "$source_file" 2>/dev/null \
       | sed -E 's/\..*$//' >>"$receiver_file" || true
@@ -4162,19 +4224,33 @@ collect_transaction_lock_preflight() {
   printf '%s\n' '说明：以下仅表示源码中的事务注解与 FOR UPDATE 调用文本，不能单独证明同表、同事务或可达并发；不得仅凭此段自动升级为问题。' >>"$output_file"
 
   candidate_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-candidates.XXXXXX")"
+  lock_scan_status=0
   {
     printf '%s\n' "$changed_java_paths"
     lock_scan_remaining_seconds=$((review_deadline_epoch - $(date +%s)))
     if (( lock_scan_remaining_seconds > 0 )); then
-      (
+      if (
         cd "$repo_root"
         perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$lock_scan_remaining_seconds" \
           rg -l --glob '*.java' \
           '@Transactional|@Lock|PESSIMISTIC_WRITE|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE' \
-          . 2>/dev/null | sed 's#^\./##' || true
-      )
+          . 2>/dev/null | sed 's#^\./##'
+      ); then
+        :
+      else
+        lock_scan_status=$?
+      fi
+    else
+      lock_scan_status=124
     fi
   } >"$candidate_paths_file"
+  # rg returns 1 for a normal no-match result. Any other non-zero status
+  # means the bounded repository scan timed out or failed, so do not let a
+  # partial prompt-only lock index become an apparently complete clean review.
+  if (( lock_scan_status > 1 )); then
+    rm -f "$candidate_paths_file"
+    return 2
+  fi
   candidate_dedup_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-candidates-dedup.XXXXXX")"
   awk 'NF && !seen[$0]++ { print }' "$candidate_paths_file" >"$candidate_dedup_file"
   mv "$candidate_dedup_file" "$candidate_paths_file"
@@ -4186,6 +4262,7 @@ collect_transaction_lock_preflight() {
     fi
     ((scanned_files++))
     java_file="$repo_root/$java_path"
+    path_has_symlink_component "$java_path" && continue
     [[ -f "$java_file" ]] || continue
     changed_marker='未变更关联文件'
     if printf '%s\n' "$changed_java_paths" | grep -Fxq -- "$java_path"; then
@@ -4243,7 +4320,7 @@ collect_transaction_lock_order_preflight() {
   local output_file="$2"
   local repo_root="$3"
   local changed_java_paths changed_lock_paths candidate_paths_file records_file pairs_file
-  local java_path java_file
+  local java_path java_file lock_order_scan_status lock_order_scan_raw_file
 
   # This is intentionally narrower than a general deadlock proof: it only
   # emits a candidate when the current snapshot contains two transaction-marked
@@ -4282,22 +4359,37 @@ collect_transaction_lock_order_preflight() {
   candidate_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-candidates.XXXXXX")"
   records_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-records.XXXXXX")"
   pairs_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-pairs.XXXXXX")"
+  lock_order_scan_raw_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-scan.XXXXXX")"
+  lock_order_scan_status=0
   {
     printf '%s\n' "$changed_java_paths"
     lock_order_scan_remaining_seconds=$((review_deadline_epoch - $(date +%s)))
     if (( lock_order_scan_remaining_seconds > 0 )); then
-      (
+      if (
         cd "$repo_root"
         perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$lock_order_scan_remaining_seconds" \
           rg -l --glob '*.java' '@Transactional|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(' . 2>/dev/null \
-          | sed 's#^\./##' || true
-      )
+          | sed 's#^\./##'
+      ); then
+        :
+      else
+        lock_order_scan_status=$?
+      fi
+    else
+      lock_order_scan_status=124
     fi
-  } | awk 'NF && !seen[$0]++ { print }' >"$candidate_paths_file"
+  } >"$lock_order_scan_raw_file"
+  if (( lock_order_scan_status > 1 )); then
+    rm -f "$candidate_paths_file" "$records_file" "$pairs_file" "$lock_order_scan_raw_file"
+    return 2
+  fi
+  awk 'NF && !seen[$0]++ { print }' "$lock_order_scan_raw_file" >"$candidate_paths_file"
+  rm -f "$lock_order_scan_raw_file"
 
   while IFS= read -r java_path; do
     [[ -n "$java_path" ]] || continue
     java_file="$repo_root/$java_path"
+    path_has_symlink_component "$java_path" && continue
     [[ -f "$java_file" ]] || continue
     awk -v source_path="$java_path" '
       function clean_java_line(raw, text, pos, prefix, tail, close_pos) {
@@ -4495,7 +4587,7 @@ java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
@@ -4506,18 +4598,42 @@ review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
     git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-only --no-renames -z "$base_ref...HEAD"
   fi
   git -c core.fsmonitor=false -C "$repo_root" ls-files --others --exclude-standard -z
-} | tr '\0' '\n' | LC_ALL=C sort -u >"$changed_paths_file"
+} >"$changed_paths_nul_file"
+changed_paths_invalid=false
+: >"$changed_paths_file"
+while IFS= read -r -d '' changed_path; do
+  if ! is_safe_repo_relative_path "$changed_path"; then
+    changed_paths_invalid=true
+    continue
+  fi
+  printf '%s\n' "$changed_path" >>"$changed_paths_file"
+done <"$changed_paths_nul_file"
+LC_ALL=C sort -u -o "$changed_paths_file" "$changed_paths_file"
+if [[ "$changed_paths_invalid" == true ]]; then
+  echo "本地代码审查失败：Git 变更路径包含换行、绝对路径或父目录组件，拒绝建立不安全的路径证据索引。" >&2
+  exit 1
+fi
+rm -f "$changed_paths_nul_file"
+changed_paths_nul_file=""
 # AGENTS.md, README.md, and explicit context are evidence inputs. Only actual
 # changed files and explicitly supplied context paths are reportable targets;
 # otherwise the model could turn a rule or documentation file into a finding.
 if (( ${#context_files[@]} > 0 )); then
   for context_file in "${context_files[@]}"; do
+    if has_unsafe_line_path_chars "$context_file"; then
+      echo "本地代码审查失败：--context 路径包含换行或回车，拒绝读取不安全路径。" >&2
+      exit 2
+    fi
     context_path="$context_file"
     if [[ "$context_path" != /* ]]; then
       context_path="$repo_root/$context_path"
     fi
     if [[ -f "$context_path" ]]; then
       if [[ "$context_path" == "$repo_root/"* ]]; then
+        path_has_symlink_component "${context_path#"$repo_root/"}" && {
+          printf '警告：已跳过符号链接上下文文件，避免读取仓库外目标: %s\n' "$context_file" >&2
+          continue
+        }
         printf '%s\n' "${context_path#"$repo_root/"}" >>"$changed_paths_file"
       else
         printf '%s\n' "$context_file" >>"$changed_paths_file"
@@ -4529,6 +4645,17 @@ if (( ${#context_files[@]} > 0 )); then
   done
 fi
 LC_ALL=C sort -u -o "$changed_paths_file" "$changed_paths_file"
+preflight_source_root="$repo_root"
+while IFS= read -r changed_path; do
+  [[ -n "$changed_path" && "$changed_path" != /* ]] || continue
+  if path_has_symlink_component "$changed_path"; then
+    preflight_source_root=""
+    break
+  fi
+done <"$changed_paths_file"
+if [[ -z "$preflight_source_root" ]]; then
+  echo "本地代码审查：检测到符号链接变更路径，已跳过确定性预检的完整源码快照读取；差异本身仍继续审查。" >&2
+fi
 # Cross-file evidence is only needed for the split path. For a small diff the
 # initial request already sees the complete diff; scanning the whole checkout
 # would add latency without adding review scope. Build one bounded text index
@@ -4554,6 +4681,7 @@ if (( diff_bytes > max_diff_bytes )); then
         break
       fi
       source_file="$repo_root/$changed_path"
+      path_has_symlink_component "$changed_path" && continue
       [[ -f "$source_file" ]] || continue
       annotations="$(rg -n '^[[:space:]]*@(Data|Getter|Setter|ConfigurationProperties)\b' "$source_file" 2>/dev/null || true)"
       if [[ -n "$annotations" ]]; then
@@ -4621,15 +4749,21 @@ else
 fi
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
-collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
-collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
-collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
+collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
 collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file"
-collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"
-collect_transaction_lock_order_preflight "$chunk_input_file" "$deterministic_lock_order_file" "$repo_root"
+if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then
+  echo "本地代码审查失败：跨事务/行锁文本索引扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2
+  exit 1
+fi
+if ! collect_transaction_lock_order_preflight "$chunk_input_file" "$deterministic_lock_order_file" "$repo_root"; then
+  echo "本地代码审查失败：锁序预检扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2
+  exit 1
+fi
 {
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -C "$repo_root" diff --no-textconv --name-status --no-renames
@@ -4738,10 +4872,15 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   # from disappearing merely because the context file is not in the shard diff.
   if (( ${#context_files[@]} > 0 )); then
     for context_file in "${context_files[@]}"; do
+      if has_unsafe_line_path_chars "$context_file"; then
+        echo "本地代码审查失败：--context 路径包含换行或回车，拒绝读取不安全路径。" >&2
+        exit 2
+      fi
       context_path="$context_file"
       [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
       [[ -f "$context_path" ]] || continue
       if [[ "$context_path" == "$repo_root/"* ]]; then
+        path_has_symlink_component "${context_path#"$repo_root/"}" && continue
         printf '%s\n' "${context_path#"$repo_root/"}" >>"$chunk_paths_file"
       else
         printf '%s\n' "$context_file" >>"$chunk_paths_file"
