@@ -29,6 +29,7 @@ jobs:
           ./evals/test-shard-preflight-routing.sh
           ./evals/test-shard-integrity.sh
           ./evals/test-config-findings.sh
+          ./evals/test-path-safety.sh
           ./evals/test-history.sh
           ./evals/test-label-migration.sh
           ./evals/test-scorecard.sh

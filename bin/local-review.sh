@@ -426,7 +426,12 @@ filter_unsupported_shard_findings() {
       # set of contradiction guards, also load the current snapshot of that
       # changed source file.  This is evidence for filtering only; it never
       # invents a finding or turns an unseen file into review scope.
+      # The model output is untrusted.  Only load a full source snapshot for a
+      # path that was actually present in this diff evidence; otherwise a
+      # crafted `../outside.yml` finding could make the contradiction guard
+      # read an arbitrary file before normal location validation rejects it.
       if (repo_root != "" && finding_path_value != "" &&
+          (finding_path_value in evidence_by_path) &&
           finding_path_value ~ /\.(java|ya?ml|properties|sql)$/ &&
           !(finding_path_value in full_loaded)) {
         full_file = repo_root "/" finding_path_value
