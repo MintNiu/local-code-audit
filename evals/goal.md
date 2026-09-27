@@ -247,3 +247,5 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 2026-09-27：根据真实 `platform-hr-service:a8bf560` 的人工复核，系统规则补充 Spring `Propagation.MANDATORY`、MySQL 生成列 `STORED/VIRTUAL` 和字典 `sort` 重排三类窄边界；新增生成列 clean 夹具。合成门禁首轮发现 `java-token-url` 偶发附带“标准库无需额外依赖”的非问题信息，导致文本哈希漂移；运行器现在只过滤这一类没有缺少/冲突/编译失败证据的泛化信息，不影响 P1 或具体兼容性问题。当前 tuned 运行态重新完成 `SYNTHETIC_REVIEW_RUNS=5`：7 类正例各 5/5 命中、6 类 clean 共 30/30 通过，所有输出哈希稳定，截断路径显式失败。该轮仍只验证稳定性与误报边界，不扩大真实人工 P0/P1 分母；规则和运行器改动尚未替代多样化真实 holdout。
 
 同日对真实 `platform-hr-service:a8bf560` 重新执行冻结父提交复核，使用 9KB 分片以覆盖大提交路径：28/28 分片成功，`output_complete=true`，耗时 877 秒，结果完整保留 4 条候选（硬编码凭据 P1、触发器名称不一致 P1、ERP 内部路由契约 P1、租户条件 P2）。旧结果中的字典排序、生成列和事务边界误报不再出现；这只是一次真实回归和待人工确认的候选集合，不直接改写既有 scorecard。过程中还修复了 Git 默认八进制转义中文文件名导致的分片路径路由失败，并加入无模型中文路径回归。
+
+随后针对上述 `HrPersonMapper.xml` 租户 P2 误报增加了窄范围证据门：`EXISTS`/子查询已可见 `inner.tenant_id = outer.tenant_id` 时，过滤“缺少租户隔离”的泛化段落；别名不一致、权限、SQL 注入或其他独立证据仍保留。该规则只放在确定性输出过滤和无模型回归中，没有再次写入 SYSTEM；尝试写入 SYSTEM 会让预签名票据夹具超过 180 秒无响应，回滚后旧运行态恢复到约 45–51 秒。当前 tuned SYSTEM SHA 保持 `bfc4993dec3bc0c45d3a81e4f7712c645971e65cbd63e6aafb5904226442d783`，五轮合成门禁重新通过。

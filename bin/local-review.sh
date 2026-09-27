@@ -491,6 +491,19 @@ filter_unsupported_shard_findings() {
       if (text ~ /缺少|冲突|不兼容|编译失败|构建失败|依赖版本|风险|问题/) return 0
       return 1
     }
+    function correlated_tenant_guard(text, evidence) {
+      # A correlated EXISTS/subquery that compares the inner and outer
+      # tenant_id is direct evidence of tenant scoping.  Do not let the model
+      # report a generic "missing tenant isolation" finding for that shape;
+      # keep concrete alias mismatches, permission, SQL-injection, and other
+      # independent claims visible.
+      if (text !~ /租户|tenant|Tenant|TENANT/) return 0
+      if (text !~ /缺少|未.*限制|未.*校验|没有.*租户|隔离/) return 0
+      if (text ~ /错误|不一致|不匹配|绕过|越权.*已发生|SQL[[:space:]]*注入|权限/) return 0
+      if (evidence !~ /EXISTS|子查询/) return 0
+      if (evidence !~ /[A-Za-z_][A-Za-z0-9_]*[.]tenant_id[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[.]tenant_id/) return 0
+      return 1
+    }
     function flush(    invalid, path_evidence) {
       if (block == "") return
       finding_path_value = finding_path(block)
@@ -623,6 +636,7 @@ filter_unsupported_shard_findings() {
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
       if (generic_standard_library_info(block)) invalid = 1
+      if (correlated_tenant_guard(block, path_evidence)) invalid = 1
       # Do not suppress configuration findings just because their consequence
       # includes "可能"/"如果". Wording is not evidence against a defect;
       # invalid locations and incomplete fields must reach validation below.

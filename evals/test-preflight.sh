@@ -2866,6 +2866,33 @@ if printf '%s\n' "$guarded_output" | grep -F 'GuardedClientAutoConfiguration.jav
   exit 1
 fi
 
+# A correlated tenant predicate inside an EXISTS subquery is direct evidence
+# of tenant scoping. A generic model warning about missing isolation must not
+# survive when the changed mapper visibly compares inner and outer tenant_id.
+mkdir -p "$repo/src/main/resources"
+cat >"$repo/src/main/resources/TenantScopedMapper.xml" <<'EOF'
+<select id="findSelectable">
+  SELECT * FROM hr_employment employment
+  WHERE EXISTS (
+    SELECT 1 FROM hr_assignment selectable_primary
+    WHERE selectable_primary.tenant_id = employment.tenant_id
+      AND selectable_primary.employment_id = employment.id
+  )
+</select>
+EOF
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"P2 src/main/resources/TenantScopedMapper.xml:4-6 - EXISTS 子查询未显式限制租户隔离，可能返回其他租户数据。\n影响：跨租户查询可能泄漏数据。\n修复建议：增加 tenant_id 约束。\n验证方式：使用两个租户执行查询。","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+tenant_guard_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" 2>/dev/null)"
+if printf '%s\n' "$tenant_guard_output" | grep -F 'TenantScopedMapper.xml' >/dev/null; then
+  echo 'correlated tenant predicate did not filter the contradictory finding' >&2
+  printf '%s\n' "$tenant_guard_output" >&2
+  exit 1
+fi
+
 cat >"$repo/src/main/java/com/example/api/client/PresignedReplay.java" <<'EOF'
 final class PresignedReplay {
     private final Store store;
