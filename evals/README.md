@@ -46,7 +46,7 @@ SQL 迁移预检还会识别同一文件内 DROP/CREATE 触发器名称仅差前
 
 运行结果仍需人工确认真实问题、误报、行号和无问题提交，不能把模型输出直接当作标注。
 
-完成人工标注后，建议把每个提交去重为一行，并明确填写 `gold_p0_p1`（人工确认的 P0/P1 根因数）和 `p0_p1_found`（模型实际命中的 P0/P1 根因数）。可复制 [scorecard.template.tsv](scorecard.template.tsv) 开始填写。使用以下命令汇总，脚本会校验必需列（允许保留额外元数据列）、重复提交、非法数字、`p0_p1_found` 超过人工真值或未完成的输出：
+完成人工标注后，建议把每个提交去重为一行，并明确填写 `gold_p0_p1`（人工确认的 P0/P1 根因数）和 `p0_p1_found`（模型实际命中的 P0/P1 根因数）。可复制 [scorecard.template.tsv](scorecard.template.tsv) 开始填写；阶段一评测还必须填写 `split`、`feature_cluster`、`location_accurate` 和 `repeat_stable`。使用以下命令汇总，脚本会校验必需列（允许保留额外元数据列）、重复提交、非法数字、`p0_p1_found` 超过人工真值或未完成的输出：
 
 ```bash
 ./evals/summarize-scorecard.sh ~/.local/share/local-review/evals/platform-api-labels/stage1-consolidated-scorecard.tsv
