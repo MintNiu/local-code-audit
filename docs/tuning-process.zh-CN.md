@@ -639,3 +639,5 @@ reserve 和 effective budget，方便后续复核。
 真实 `platform-api:cbe47ea0` 随后使用当前 tuned profile 做了两轮重复审查：单轮 11 个分片，分别约 32/33 秒，均 exit=0、完整返回 clean；重复门禁确认结果内容、模型、SYSTEM、脚本和分片签名稳定。该提交此前曾有 8 条 Lombok/安全/查询令牌误报，本轮全部消失。这只证明一个已知 clean 误报簇得到改善，不增加 P0/P1 召回分母，也不替代跨项目人工真值。
 
 真实 `platform-api:63d520b` 的复测暴露个人 profile 默认 16K 上下文不足：固定规则和跨文件证据占满预算时，审查器必须 fail-closed，不能只把确定性 token P1 当作完整结果。个人 `local-review-local` 默认窗口现提升到 32K；过滤器同时读取当前变更文件和显式绑定的 `*Properties` 类，仅在源码已展示 guard、默认值或 `@ConditionalOnClass` 时移除模型矛盾段。32K、14 个分片、182 秒的完整复测只保留该提交人工确认的查询 token P1，原有 properties/null/可选依赖误报消失。该证据改善了真实大提交的可用性和精度，但不扩大 P0/P1 真值分母。
+
+随后发现模型返回的 `../outside.yml` 等伪造路径可能在正常位置校验前触发证据过滤器读取仓库外文件。现在完整源码证据只允许从当前 diff 中真实出现的路径加载，路径穿越回归会 fail-closed；该修复不改变正常 diff 的过滤逻辑。修复后个人 profile 五轮合成门禁仍保持 7 类正例 5/5、5 类 clean 共 25/25、输出哈希稳定和截断显式失败。
