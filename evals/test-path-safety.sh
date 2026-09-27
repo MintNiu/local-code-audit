@@ -60,4 +60,33 @@ grep -F '缺少可验证的严重级别或文件/行号' "$fixture_root/stderr" 
   cat "$fixture_root/stderr" >&2
   exit 1
 }
+
+# A changed symlink is a real diff path but must not make the contradiction
+# guard read its target outside the repository. The finding should remain
+# visible instead of being turned into clean by the target's default value.
+mkdir -p "$repo/src/main/resources"
+ln -s "$outside_file" "$repo/src/main/resources/Changed.yml"
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"P1 src/main/resources/Changed.yml:1 - baseUrl 缺少默认值和空值检查。\n影响：可能失败。\n修复建议：增加检查。\n验证方式：传入空值。","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+if PATH="$fake_bin:$PATH" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  "$repo_root/bin/local-review.sh" --repo "$repo" \
+  >"$fixture_root/symlink-stdout" 2>"$fixture_root/symlink-stderr"; then
+  :
+else
+  echo 'changed symlink review failed before returning the finding' >&2
+  cat "$fixture_root/symlink-stdout" >&2
+  cat "$fixture_root/symlink-stderr" >&2
+  exit 1
+fi
+grep -F 'P1 src/main/resources/Changed.yml:1' "$fixture_root/symlink-stdout" >/dev/null || {
+  echo 'changed symlink target was read and contradicted the finding' >&2
+  cat "$fixture_root/symlink-stdout" >&2
+  cat "$fixture_root/symlink-stderr" >&2
+  exit 1
+}
 echo 'path safety regression passed'

@@ -329,12 +329,50 @@ redact_sensitive_text() {
   '
 }
 
+path_has_symlink_component() {
+  local input_path="$1" relative_path candidate component
+  if [[ "$input_path" == /* ]]; then
+    candidate="/"
+    relative_path="${input_path#/}"
+  else
+    candidate="$repo_root"
+    relative_path="$input_path"
+  fi
+  while [[ -n "$relative_path" ]]; do
+    if [[ "$relative_path" == */* ]]; then
+      component="${relative_path%%/*}"
+      relative_path="${relative_path#*/}"
+    else
+      component="$relative_path"
+      relative_path=""
+    fi
+    [[ -n "$component" && "$component" != "." ]] || continue
+    # A path containing `..` is not a safe source snapshot either; normal
+    # Git diff paths never need it, and refusing it keeps the guard closed
+    # if an untrusted path is ever added to the evidence list.
+    [[ "$component" == ".." ]] && return 0
+    candidate="$candidate/$component"
+    [[ -L "$candidate" ]] && return 0
+  done
+  return 1
+}
+
 filter_unsupported_shard_findings() {
   # A shard is intentionally incomplete. Drop only findings whose stated
   # reason is that incompleteness itself, rather than hiding any finding with
   # concrete code evidence. This is a deterministic guard for a recurrent
   # model failure mode ("please provide the complete file").
-  awk -v evidence_file="$current_evidence_file" -v repo_root="$repo_root" '
+  local symlink_paths_file candidate_path filter_status
+  symlink_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-symlink-paths.XXXXXX")"
+  if [[ -f "${changed_paths_file:-}" ]]; then
+    while IFS= read -r candidate_path; do
+      [[ -n "$candidate_path" ]] || continue
+      path_has_symlink_component "$candidate_path" || continue
+      printf '%s\n' "$candidate_path"
+    done <"$changed_paths_file" >"$symlink_paths_file"
+  fi
+  LC_ALL=C sort -u -o "$symlink_paths_file" "$symlink_paths_file"
+  if awk -v evidence_file="$current_evidence_file" -v repo_root="$repo_root" -v symlink_file="$symlink_paths_file" '
     BEGIN {
       if (evidence_file != "") {
         evidence_path = ""
@@ -351,6 +389,12 @@ filter_unsupported_shard_findings() {
           if (evidence_path != "") evidence_by_path[evidence_path] = evidence_by_path[evidence_path] line "\n"
         }
         close(evidence_file)
+      }
+      if (symlink_file != "") {
+        while ((getline line < symlink_file) > 0) {
+          if (line != "") symlink_by_path[line] = 1
+        }
+        close(symlink_file)
       }
     }
     function finding_path(text,    header) {
@@ -432,6 +476,7 @@ filter_unsupported_shard_findings() {
       # read an arbitrary file before normal location validation rejects it.
       if (repo_root != "" && finding_path_value != "" &&
           (finding_path_value in evidence_by_path) &&
+          !(finding_path_value in symlink_by_path) &&
           finding_path_value ~ /\.(java|ya?ml|properties|sql)$/ &&
           !(finding_path_value in full_loaded)) {
         full_file = repo_root "/" finding_path_value
@@ -562,6 +607,13 @@ filter_unsupported_shard_findings() {
     { block = block $0 "\n" }
     END { flush() }
   '
+  then
+    filter_status=0
+  else
+    filter_status=$?
+  fi
+  rm -f "$symlink_paths_file"
+  return "$filter_status"
 }
 
 dedup_exact_findings() {
@@ -734,6 +786,10 @@ validate_finding_line_ranges() {
     if [[ "$resolved_path" != /* ]]; then
       resolved_path="$repo_root/$resolved_path"
     fi
+    # Do not follow a changed or context symlink merely to validate a model
+    # supplied line number. The path may remain visible as a finding, but its
+    # target is outside the evidence boundary.
+    path_has_symlink_component "$report_path" && continue
     [[ -f "$resolved_path" ]] || continue
     line_count="$(awk 'END { print NR + 0 }' "$resolved_path")"
     printf '%s\t%s\n' "$report_path" "$line_count" >>"$line_counts_file"
