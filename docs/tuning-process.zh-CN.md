@@ -688,3 +688,13 @@ reserve 和 effective budget，方便后续复核。
 在 `num_ctx=16384`、3KB 分片、`num_predict=1024`/分片预算 1024 的受限评测配置下，权限留出 13/13 个分片完整结束，exit=0，耗时 124 秒；两轮重复为 123/128 秒，结果 SHA-256 和两条预检 P1 finding 完全一致。私有 scorecard 记录 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=1`、`false_positives=0`、`output_complete=true`、`location_accurate=1`、`repeat_stable=true`。该过程把“能发现但超时”的样本转成可重复的完整审查，同时保留 fail-closed 边界；它只增加一个权限根因证据，阶段一仍未满足 20 个独立 holdout P0/P1 根因和 90% 生产门槛。
 
 同轮五轮合成门禁又暴露 `java-generated-column-safe` 的信息级 DDL 误报：模型把没有显式租户列、以及已经明确使用 `GENERATED ALWAYS ... STORED` 的合法 CASE 生成列分别写成问题。运行器新增窄范围 DDL 证据门，只过滤带“可能/或许”措辞、没有明确契约/越权/泄漏/权限/SQL 注入证据的信息段落；P0–P3 和具体 SQL/租户冲突不受影响。`test-filter-evidence.sh` 扩展为 8 个用例，随后五轮合成恢复为 7 类正例 5/5、6 类 clean 30/30，所有结果哈希稳定。
+
+### 2026-09-28：声明式权限注解回归与大提交预算
+
+真实 `platform-erp-service:4451b5b24ab544fc7344182347a83158e93702b5` 暴露了一个新的漏报/重复模式：四个主数据控制器把 `@PreAuthorize` 注释掉，模型能发现 P1，但会按方法重复输出，并额外产生“可读性”信息。新增的确定性预检只识别 diff 新增的注释授权行，按文件聚合并保留所有证据行；纯维护性信息由证据过滤器移除，独立租户、SQL、并发和凭据问题不受影响。模型重复范围解析支持 `44-46,66-68` 这类逗号行号。
+
+为了不让大提交在 16K 上下文下因重复预检文本失败，授权预检段从分片模型提示词和预算探测中排除，只在响应合并阶段恢复，用于过滤模型重复和输出确定性 P1。第三轮曾因固定提示词预算不足而 fail-closed；压缩预检文本并调整预算路由后，最终 11/11 分片完整完成、耗时 447 秒，四个控制器各保留一条 P1。两轮重复 398/441 秒通过 `run-history-repeat.sh`，结果文本与配置签名一致。重复脚本同时修复了全角括号紧邻变量名触发 `set -u` 的脚本缺陷。
+
+验证：`test-filter-evidence.sh` 10 个场景、预检/分片/路径安全/历史/评分卡/运行态回归均通过；私有 scorecard 标记 `gold_p0_p1=1`、`p0_p1_found=1`、`predicted_candidates=4`、`false_positives=0`、`location_accurate=1`、`repeat_stable=true`。这只新增一个人工确认的 ERP endpoint 授权根因，阶段 1 仍未达到至少 20 个独立 holdout P0/P1 根因和 90% 召回/定位门槛。
+
+随后五轮合成门禁发现 `java-token-header` clean 样例把“安全边界负例”写成信息项；过滤器扩展这一精确同义措辞后重新跑通：7 类正例 5/5、6 类 clean 30/30、预签名 5/5，所有结果哈希稳定，截断路径仍显式失败。

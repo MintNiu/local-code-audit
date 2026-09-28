@@ -535,7 +535,7 @@ filter_unsupported_shard_findings() {
       # shape is removable; concrete leakage, tenancy, permission, or other
       # risk wording remains visible.
       if (text !~ /^[[:space:]]*信息[[:space:]:：]/) return 0
-      if (text !~ /安全负例|符合安全负例/) return 0
+      if (text !~ /安全负例|安全边界负例|符合安全负例/) return 0
       if (text !~ /无需修复|不构成问题/) return 0
       if (text !~ /没有证据|未见|没有.*(日志|外部|持久化)/) return 0
       if (text ~ /仍.*(泄漏|越权|风险|问题)|同时.*(泄漏|越权|风险|问题)|但是|然而/) return 0
@@ -755,6 +755,15 @@ filter_unsupported_shard_findings() {
           block ~ /性能|复杂|索引|优化/ &&
           path_evidence ~ /GENERATED[[:space:]]+ALWAYS[[:space:]]+AS/ &&
           path_evidence ~ /(^|[^[:alnum:]_])(STORED|VIRTUAL)([^[:alnum:]_]|$)/) invalid = 1
+      # Commenting out an authorization annotation is a concrete P1 when the
+      # same block says the endpoint is now reachable without permission. A
+      # separate information paragraph that only complains about readability
+      # or maintenance is not an actionable finding and must not survive the
+      # clean-output contract.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /权限注解|@PreAuthorize/ &&
+          block ~ /可读性|维护人员|代码一致性/ &&
+          block !~ /绕过|越权|未授权|未认证|敏感操作|数据破坏|权限控制失效/) invalid = 1
       # A deleted migration file has no current contents to inspect. Do not
       # turn that absence itself into an information-level finding; the
       # deletion/upgrade-path risk remains reportable as a concrete finding.
@@ -1147,14 +1156,22 @@ filter_security_preflight_duplicates() {
       loc_path = value
       loc_start = 0
       loc_end = 0
-      if (match(value, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?$/)) {
+      if (match(value, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*[[:space:]]*$/)) {
         suffix = substr(value, RSTART, RLENGTH)
         loc_path = substr(value, 1, RSTART - 1)
         sub(/^:/, "", suffix)
         gsub(/[[:space:]]+/, "", suffix)
-        split(suffix, pieces, "-")
-        loc_start = pieces[1] + 0
-        loc_end = (pieces[2] == "" ? loc_start : pieces[2] + 0)
+        gsub(/，/, ",", suffix)
+        split(suffix, ranges, ",")
+        loc_start = 0
+        loc_end = 0
+        for (r = 1; r <= length(ranges); r++) {
+          split(ranges[r], pieces, "-")
+          start_line = pieces[1] + 0
+          end_line = (pieces[2] == "" ? start_line : pieces[2] + 0)
+          if (loc_start == 0 || start_line < loc_start) loc_start = start_line
+          if (end_line > loc_end) loc_end = end_line
+        }
       }
       loc_path = canonicalize_key(loc_path)
     }
@@ -1240,6 +1257,89 @@ filter_security_preflight_duplicates() {
         duplicate_security = 1
       }
       if (!duplicate_security && !duplicate_java_null && !duplicate_java_zero && !duplicate_hardcoded_credential) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
+filter_authorization_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-authorization-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function canonicalize(value) {
+      sub(/^[.][\/]/, "", value)
+      sub(/^a[\/]/, "", value)
+      sub(/^b[\/]/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function set_location(line,    value, suffix, pieces) {
+      value = line
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", value)
+      sub(/[[:space:]]+-.*$/, "", value)
+      loc_path = value
+      loc_start = 0
+      loc_end = 0
+      if (match(value, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*[[:space:]]*$/)) {
+        suffix = substr(value, RSTART, RLENGTH)
+        loc_path = substr(value, 1, RSTART - 1)
+        sub(/^:/, "", suffix)
+        gsub(/[[:space:]]+/, "", suffix)
+        gsub(/，/, ",", suffix)
+        split(suffix, ranges, ",")
+        for (r = 1; r <= length(ranges); r++) {
+          split(ranges[r], pieces, "-")
+          start_line = pieces[1] + 0
+          end_line = (pieces[2] == "" ? start_line : pieces[2] + 0)
+          if (loc_start == 0 || start_line < loc_start) loc_start = start_line
+          if (end_line > loc_end) loc_end = end_line
+        }
+      }
+      loc_path = canonicalize(loc_path)
+    }
+    function overlaps(path, start, finish, other_path, other_start, other_finish) {
+      return path == other_path && start > 0 && other_start > 0 && start <= other_finish && other_start <= finish
+    }
+    function independent_root(text) {
+      return text ~ /租户|tenant|跨租户|SSRF|请求伪造|路径遍历|重放|竞态|并发|SQL[[:space:]]*注入|迁移脚本|数据库升级|编译失败|构建失败|凭据|令牌.*日志|日志.*令牌/
+    }
+    FILENAME == ARGV[1] {
+      if ($0 ~ /^[[:space:]]*P1[[:space:]:：]+/ && $0 ~ /声明式权限注解被注释\/(删除|或删除)/) {
+        set_location($0)
+        auth_path[++auth_count] = loc_path
+        auth_start[auth_count] = loc_start
+        auth_end[auth_count] = loc_end
+      }
+      next
+    }
+    function flush(    header, i, duplicate) {
+      if (block == "") return
+      header = block
+      sub(/[\r\n].*$/, "", header)
+      set_location(header)
+      duplicate = 0
+      if (block ~ /权限|授权|PreAuthorize|RequiresPermissions|权限检查/) {
+        for (i = 1; i <= auth_count; i++) {
+          if (overlaps(loc_path, loc_start, loc_end, auth_path[i], auth_start[i], auth_end[i])) {
+            duplicate = 1
+            break
+          }
+        }
+      }
+      if (duplicate && independent_root(block)) duplicate = 0
+      if (!duplicate) {
         if (printed) printf "\n"
         printf "%s", block
         printed = 1
@@ -1543,6 +1643,8 @@ SQL schema 目标边界：如果同一新增或修改的 SQL 文件中恰好可�
 构建完整性优先：检查新增或修改的 import、类型引用和自动配置入口是否能在当前提交快照中解析。构建预检只对当前源码索引中可证明属于本仓库的类型给出证据；只有差异、预检证据和项目构建上下文共同证明类型无法解析并会导致编译或启动失败时，才报告具体文件和行号的 P1 构建阻断。不要假设后续提交会补齐；外部依赖、生成源码、通配符 import 或无法确认的候选不得直接升级为问题。
 
 XXL-JOB 权限迁移边界：如果输入包含“权限修复完整性预检”并已列出 `JobInfoController`、`JobLogController` 或同一权限拦截器迁移涉及的具体缺口，预检段本身就是该授权根因的确定性证据。不要因为当前分片没有展示服务层、其他控制器或调用链，就追加“如果/若未校验/可能绕过”的条件式问题，也不要把同一根因拆成每个方法一条；只有当前分片直接展示了与预检不同的独立授权缺陷时才新增一条。预检已覆盖的根因不要重复输出。
+
+声明式权限注解删除：如果差异把同一个控制器中多个方法的 `@PreAuthorize`、`@RequiresPermissions` 或等价授权注解注释/删除，必须把它视为当前差异直接证明的 P1 授权回归；按控制器或同一授权根因合并为一条，并在文件路径后列出全部受影响方法/行号范围。不要再为同一批被注释的注解输出信息级“可读性/维护性”问题；只有存在不同授权机制或不同资源边界的独立根因时才拆分。
 
 有问题时按 P0、P1、P2、P3、信息排序。每条问题首行必须以 `P0 path/to/File.java:12-15 -` 或 `信息 path/to/File.java:12 -` 开头，随后在同一段连续输出问题、证据、影响、修复建议和验证方式；问题段内部不得插入空行，不要使用 Markdown 粗体标题。每条问题都必须明确包含 `影响：`、`修复建议：` 和 `验证方式：` 三个字段，否则视为不完整结果并失败。不要输出无级别的 Problem/Evidence/Impact 清单。若没有任何可修复问题（包括没有 P0-P3 或信息级问题），最终输出必须且只能是“未发现阻塞问题”；不得把“实现正确”“符合契约”“没有风险”写成信息级问题。若有问题时只输出问题段，绝不输出该短语，也不要添加总评或总结。
 
@@ -2259,6 +2361,7 @@ merge_preflight_findings() {
   fi
   if [[ -s "$finding_preflight_file" ]]; then
     filter_security_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_authorization_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
@@ -2312,7 +2415,7 @@ resolve_chunk_budget() {
   local configured_bytes="$1"
   local available_tokens probe_tokens remaining_tokens budget_bytes
   local probe_prompt probe_body probe_base_prompt probe_variable_prompt
-  local probe_base_tokens probe_variable_tokens dynamic_reserve_tokens
+  local probe_base_tokens probe_variable_tokens dynamic_reserve_tokens budget_preflight_file
   local adjusted=false
 
   effective_max_diff_bytes="$configured_bytes"
@@ -2353,7 +2456,15 @@ $(cat "$changed_paths_file")
   # evidence. Estimate that exact variable section instead of reserving a
   # fixed guess: a credential-heavy config diff can otherwise exceed the
   # budget by a small amount before the first model request is sent.
-  probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$build_preflight_file")"
+  # Large authorization-annotation preflight blocks are merged deterministically
+  # after each shard and intentionally omitted from the actual shard prompt;
+  # exclude the same blocks from this budget probe or they would reserve
+  # context that no request will consume and reject otherwise valid diffs.
+  budget_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-preflight.XXXXXX")"
+  awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "声明式权限注解被注释/删除") == 0 { print }' \
+    "$build_preflight_file" >"$budget_preflight_file"
+  probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$budget_preflight_file")"
+  rm -f "$budget_preflight_file"
   probe_base_tokens="$(estimate_prompt_tokens "$probe_base_prompt")"
   probe_variable_tokens=$(( $(estimate_prompt_tokens "$probe_variable_prompt") - probe_base_tokens ))
   if (( probe_variable_tokens < 0 )); then probe_variable_tokens=0; fi
@@ -3510,6 +3621,59 @@ collect_url_prefix_whitelist_preflight() {
       if (prefix == "+" || prefix == " ") line_no++
     }
     END { flush_candidate() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_authorization_annotation_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # A diff that comments out a declarative authorization annotation is itself
+  # sufficient evidence of an endpoint authorization regression. Emit one
+  # stable finding per controller/file so the model cannot miss it when the
+  # change is split across many shards or vary between duplicate prose.
+  awk '
+    function add_location(path, line_no,    key) {
+      if (path == "" || line_no <= 0) return
+      key = path SUBSEP line_no
+      if (seen[key]++) return
+      if (!(path in min_line) || line_no < min_line[path]) min_line[path] = line_no
+      if (!(path in max_line) || line_no > max_line[path]) max_line[path] = line_no
+      locations[path] = locations[path] (locations[path] == "" ? "" : ",") line_no
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      line_no = 0
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      line_no = 0
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && text ~ /\/\/[[:space:]]*@([Pp]re[Aa]uthorize|[Rr]equires[Pp]ermissions|Secured)/) {
+        add_location(path, line_no)
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END {
+      for (path in locations) {
+        printf "P1 %s:%d-%d - 声明式权限注解被注释/删除，端点失去授权校验。\n影响：普通认证用户可调用原受保护的查询或写入端点。\n修复建议：恢复注解或接入等价权限校验。\n验证方式：无对应权限用户调用证据行端点应返回拒绝。\n证据行：%s\n\n", path, min_line[path], max_line[path], locations[path]
+      }
+    }
   ' "$diff_file" >>"$output_file"
   dedup_preflight_blocks "$output_file"
 }
@@ -5167,6 +5331,7 @@ collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"
 collect_xxl_job_permission_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
@@ -5262,6 +5427,7 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_paths_file="$chunk_output_dir/$chunk_name.paths"
   chunk_status_file="$chunk_output_dir/$chunk_name.status"
   chunk_preflight_file="$chunk_output_dir/$chunk_name.preflight"
+  chunk_merge_preflight_file="$chunk_output_dir/$chunk_name.merge-preflight"
   : >"$chunk_paths_file"
   while IFS= read -r candidate_path; do
     [[ -n "$candidate_path" ]] || continue
@@ -5340,6 +5506,13 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
           next
         }
       }
+      # Authorization-annotation preflight is merged deterministically after
+      # the model call and its full paragraph is only needed by the duplicate
+      # filter. Omitting it from large shard prompts avoids spending the fixed
+      # context budget on repeated evidence for every controller shard.
+      if (index(header, "声明式权限注解被注释/删除") > 0) {
+        next
+      }
       sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
       # Keep comma-separated locations (for example `:3,4,5`) attached to
       # the same path when routing aggregated deterministic findings.
@@ -5354,6 +5527,13 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
       }
     }
   ' "$build_preflight_file" >"$chunk_preflight_file"
+  # Keep authorization-annotation findings out of the model prompt (they are
+  # deterministic evidence), but restore them for post-response duplicate
+  # filtering and final merge. They are repeated per shard deliberately;
+  # dedup_exact_findings removes identical deterministic blocks later.
+  cp "$chunk_preflight_file" "$chunk_merge_preflight_file"
+  awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "声明式权限注解被注释/删除") > 0 { print }' \
+    "$build_preflight_file" >>"$chunk_merge_preflight_file"
   chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_preflight_file")"
   # Give each shard the complete changed-path inventory as scope metadata.
   # This is intentionally paths-only (no extra source content): it prevents
@@ -5392,7 +5572,7 @@ $(cat "$changed_paths_file")
     echo "本地代码审查失败：分片 $chunk_name 未完成，整次审查失败；已完成分片仅作诊断，不作为完整结果返回。" >&2
     exit 1
   fi
-  merge_preflight_findings "$chunk_output" "$chunk_kind" "$chunk_preflight_file" "$deterministic_lock_order_file"
+  merge_preflight_findings "$chunk_output" "$chunk_kind" "$chunk_merge_preflight_file" "$deterministic_lock_order_file"
 done
 
 has_findings=false

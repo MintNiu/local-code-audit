@@ -293,8 +293,57 @@ if ! grep -Fx '未发现阻塞问题' "$ddl_output" >/dev/null || grep -Eq '^[[:
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
+# Commented authorization annotations are a concrete P1, but a second
+# information paragraph that only repeats the readability/maintenance angle
+# must not leak into the final report.
+permission_info_output="$(run_review permission-info "$permission_repo" '信息 src/main/java/example/JobInfoController.java:1-8 - 注释掉的权限注解会降低代码可读性，可能导致维护人员忽略权限要求。
+影响：代码一致性下降。
+修复建议：移除注释并保持代码一致性。
+验证方式：检查代码风格规范。')"
+if ! grep -F '权限拦截器重构后仍有同类任务/日志入口未执行' "$permission_info_output" >/dev/null ||
+   grep -Eq '^[[:space:]]*信息[[:space:]:：]' "$permission_info_output"; then
+  printf 'FAIL permission-info: non-actionable authorization information was not filtered\n' >&2
+  cat "$permission_info_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
+# A changed controller that comments out an authorization annotation must be
+# covered by deterministic preflight. The model's duplicate wording and its
+# maintenance-only information paragraph are both discarded.
+authorization_repo="$(new_repo authorization-annotation)"
+mkdir -p "$authorization_repo/src/main/java/example"
+cat >"$authorization_repo/src/main/java/example/BrandController.java" <<'EOF'
+package example;
+
+class BrandController {
+  @PreAuthorize("brand:read")
+  void page() { }
+}
+EOF
+git -C "$authorization_repo" add .
+git -C "$authorization_repo" commit -qm base
+sed -i.bak 's/^  @PreAuthorize/  \/\/\@PreAuthorize/' \
+  "$authorization_repo/src/main/java/example/BrandController.java"
+rm -f "$authorization_repo/src/main/java/example/BrandController.java.bak"
+authorization_output="$(run_review authorization-annotation "$authorization_repo" 'P1 src/main/java/example/BrandController.java:4 - MODEL_AUTH_DUPLICATE：删除授权注解导致端点失去权限检查。
+影响：普通用户可能调用该端点。
+修复建议：恢复注解。
+验证方式：用无权限用户调用接口。
+
+信息 src/main/java/example/BrandController.java:4 - 注释掉的权限注解会降低代码可读性，可能导致维护人员忽略权限要求。
+影响：代码一致性下降。
+修复建议：移除注释。
+验证方式：检查代码风格。')"
+if ! grep -F '声明式权限注解被注释/删除' "$authorization_output" >/dev/null ||
+   grep -F 'MODEL_AUTH_DUPLICATE' "$authorization_output" >/dev/null ||
+   grep -Eq '^[[:space:]]*信息[[:space:]:：]' "$authorization_output"; then
+  printf 'FAIL authorization-annotation: deterministic auth preflight did not replace duplicates\n' >&2
+  cat "$authorization_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 8 cases\n'
+printf 'filter evidence regression passed: 10 cases\n'

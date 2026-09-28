@@ -267,3 +267,13 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 2026-09-27：对真实 `platform-dac-service:36da7ae`、`platform-workflow-service:beab22f`、`platform-publishing-service:908b633`、`platform-auth:d5317b6` 和 `platform-gateway:052b848` 做跨仓库 holdout 探测。当前 tuned profile 均完整返回 clean；人工复核确认 workflow 租户排序、PDF 页预览缓存、小程序手机号回传和网关工作流路由没有可由差异证明的 P0/P1。DAC 提交仍记录两条需要后续契约确认的 P2 候选：`DacDirectoryGateway.users(boolean includeDisabled)` 丢弃旧参数且 HR 目录固定只返回 ACTIVE，以及 `/dac/v1/sso/me` 同步依赖 HR 服务、无本地上下文降级；两者不计入阶段 1 P0/P1 分母，避免把有意的目录契约调整冒充安全根因。
 
 同日发现输出过滤器的两个真实漏报边界：路径级租户条件会把同一 Mapper 中另一条不安全查询或已删除租户条件误当作安全证据；“缺少日志”降噪会吞掉结构化 token 明文日志 P1。修复为仅使用报告行号附近的当前源码窗口，并保留明确 token/凭据日志；新增 `evals/test-filter-evidence.sh` 五用例回归，覆盖混合查询、删除行、别名错误、token 日志和安全负例信息。无模型确定性套件与五轮合成门禁均通过，五轮正例/负例输出哈希稳定，截断失败仍显式保留。
+
+### 2026-09-28：声明式权限注解回归预检与大差异预算修复
+
+新加入的真实 `platform-erp-service:4451b5b24ab544fc7344182347a83158e93702b5`（父提交 `8a4223e993d7287acd18944e27bf188845d7351f`）把四个主数据控制器的 `@PreAuthorize` 全部注释掉。模型原始完整输出能发现授权回归，但会把同一根因拆成多条并附带“可读性/维护性”信息；人工将其聚合为一个 `erp-endpoint-auth-bypass` P1 根因。
+
+运行器新增窄范围声明式权限预检：只对 diff 新增的 `//@PreAuthorize`、`//@RequiresPermissions` 或 `//@Secured` 注释行生成确定性 P1，按文件聚合并保留全部证据行；分片提示词省略这段重复证据，但最终合并阶段重新注入并过滤模型重复段，逗号分隔行号范围也纳入重叠判断。纯维护性信息不再作为 finding，租户、SQL、并发、凭据等独立证据不受影响。预检文本同时压缩，并从预算探测中排除，避免四个控制器的大提交在 16K 上下文下因固定提示词不足而 fail-closed。
+
+真实复测使用 `num_ctx=16384`、3KB 分片、`num_predict=1024`：11/11 分片完成，`output_complete=true`，耗时 447 秒，最终稳定输出四条按控制器聚合的 P1，覆盖全部注解证据行；两轮重复为 398/441 秒，`run-history-repeat.sh` 通过，结果文本、模型/SYSTEM/脚本和分片签名一致。重复脚本同时修复了全角括号紧邻 shell 变量名导致的 `set -u` 误报。`evals/test-filter-evidence.sh` 现为 10 个用例，过滤、预检、分片和运行态回归均通过。
+
+同轮探测的 `platform-job:730c1066`（完整补齐 `/jobgroup` 管理端点管理员注解）和 `c6a4df2`（完整转义调度日志 XSS 输出）均返回 clean；它们是正确修复，不计入漏报。当前仍未达到阶段 1 的至少 20 个独立 holdout P0/P1 根因、90% 召回/定位和误报率门槛；本轮只新增一个已人工确认的 ERP endpoint 授权根因。

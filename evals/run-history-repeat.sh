@@ -149,7 +149,7 @@ for ((run = 2; run <= runs; run++)); do
       exit 1
     }
     if ! cmp -s "$baseline_file" "$current_file"; then
-      echo "历史评测输出漂移: $relative_file（run-1 vs run-${run}）" >&2
+      echo "历史评测输出漂移: ${relative_file}（run-1 vs run-${run}）" >&2
       diff -u "$baseline_file" "$current_file" >&2 || true
       exit 1
     fi
@@ -157,7 +157,7 @@ for ((run = 2; run <= runs; run++)); do
     baseline_meta="${baseline_file%.txt}.meta.tsv"
     current_meta="${current_file%.txt}.meta.tsv"
     [[ -f "$baseline_meta" && -f "$current_meta" ]] || {
-      echo "历史评测 metadata 缺失: $relative_file（run-1 vs run-${run}）" >&2
+      echo "历史评测 metadata 缺失: ${relative_file}（run-1 vs run-${run}）" >&2
       exit 1
     }
     # elapsed_seconds and stderr diagnostics are intentionally excluded from
