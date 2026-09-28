@@ -192,6 +192,14 @@ scorecard 汇总器也有独立的输入校验回归：
 
 最近三组真实 clean holdout 也已记录：`platform-job:0885d7d8`（密码 CSRF 修复，2/2 分片、44 秒）、`platform-job:e5a84a1b`（bigint 兼容性修复，1/1 分片、34 秒）和 `platform-ai-service:ddc7b767`（SSE 错误内容协商修复，3/3 分片、27 秒）。三组均完整返回 clean，并经人工确认没有当前提交引入的 P0/P1；它们只用于跨功能簇精度与稳定性覆盖，不计入阶段一召回分母。
 
+`platform-hr-service:6192b5e6` 的内部人员目录新增接口作为 clean holdout 完整通过（5/5 分片、82 秒）。全局 `GatewayAuthFilter`、租户上下文过滤器和 README 内部直连契约构成了当前证据范围，不能仅凭控制器缺少显式 `@PreAuthorize` 判定越权；该样本 `gold_p0_p1=0`，重复稳定性因资源争用未验证。
+
+`platform-job:cb1bd548` 会话重放候选的串行重跑在第 31/59 分片触发行号越界（实际 `application.properties` 最后一行 74，模型报告到 76），因此结果保持失败和不完整。严格位置门禁在这里阻止了把确定性预检或前 30 个分片的半截结果伪装成完整审查。
+
+真实 `platform-job:ae26cb0c` 暴露了模型对 RPC 出站 SSRF 的漏报：4/4 分片完整、130 秒却返回 clean；人工确认控制器把请求参数 `executorAddress` 直接传入 `NetComClientProxy`，后续提交已改为从数据库日志加载地址。运行器新增窄范围三元证据预检（请求映射 + `String executorAddress` + 新增 RPC sink），并将 `evals/test-filter-evidence.sh` 扩展为 14 个场景；重复模型段和同形状的长度截断只在无独立根因时恢复，只有这三项在同一变更 Java 控制器中同时可见时才输出 P1。
+
+最新复跑已完成 5/5 分片、154 秒并准确输出单条 P1（`gold=1`、`found=1`、`predicted=1`、无误报、定位准确）；首片模型重复达到长度上限时由直接地址预检恢复，其他长度截断仍保持失败闭门。第二轮 186 秒结果文本与运行签名一致，正式 scorecard 标记 `repeat_stable=true`。
+
 中文路径回归：Git diff 使用 `core.quotePath=false`，使包含中文文件名的分片头与 NUL 安全路径索引保持一致；`evals/test-sharding.sh` 包含无模型中文文件名分片夹具。真实 `platform-hr-service:a8bf560` 复核中 28 个分片均成功，避免因路径显示编码差异把完整审查误判为失败。
 
 租户子查询误报回归：当变更的 `EXISTS`/子查询已经显式比较内外层 `tenant_id` 时，确定性过滤器会移除泛化的“缺少租户隔离”段落，但保留别名错误、权限、SQL 注入等独立问题。该边界未写入 SYSTEM，因为实测会让预签名票据夹具超过请求超时；当前 tuned SYSTEM 规则保持上一版，证据门和回归测试独立承担该降噪职责。

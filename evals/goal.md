@@ -285,3 +285,11 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 受控 `num_ctx=16384`、`num_predict=2048`、关闭重试的五轮合成门禁已通过：7 类正例各 5/5、clean 30/30、预签名 5/5，哈希稳定；个人入口仍默认 32K，但一般 32K 资源超时不会被恢复为通过。
 
 补充的真实 clean holdout：`platform-job:0885d7d8` 密码修改旧密码校验（2/2 分片、44 秒）、`platform-job:e5a84a1b` bigint 兼容性修复（1/1 分片、34 秒）、`platform-ai-service:ddc7b767` SSE 错误内容协商修复（3/3 分片、27 秒）。均完整结束并由人工确认是安全/兼容性修复，不增加阶段一 P0/P1 分母；原始结果与 scorecard 保存在私有评测目录。
+
+跨仓库内部目录 clean holdout `platform-hr-service:6192b5e6` 也已完整结束（5/5 分片、82 秒）。README 与全局 GatewayAuthFilter 证明其内部 token/租户边界已有统一门禁，控制器无显式方法注解不单独构成漏洞；该样本 `gold_p0_p1=0`，重复审查因 Ollama 资源争用中止，稳定性不作通过结论。
+
+会话重放候选 `platform-job:cb1bd548` 串行重跑仍未达到完整性：59 个分片前 30 个成功，第 31 个分片的模型行号超过 `application.properties` 实际末行，严格定位门禁使整次 `output_complete=false`。该结果保留为失败诊断，不纳入召回/稳定性指标，也不放宽行号校验。
+
+真实 `platform-job:ae26cb0c` SSRF 留出审查完整返回 clean，但人工确认 `executorAddress` 请求参数直接进入 `NetComClientProxy`，gold=1、found=0。已新增窄范围 RPC 出站地址预检和无模型回归（证据测试 14 个用例），并为重复/长度截断增加同形状恢复；预检只覆盖同一变更控制器中可见的请求映射、地址参数与 sink 三元证据，不把普通地址变量升级为 SSRF。
+
+最新脚本复跑该提交得到 5/5 分片完整结果（154 秒）：模型首片重复预检触发 length，但过滤后安全恢复，最终输出单条确定性 P1，`gold=1/found=1/predicted=1/false_positive=0/location_accurate=1`；第二轮 186 秒结果文本与运行签名一致，`repeat_stable=true`，一般截断仍失败闭门。

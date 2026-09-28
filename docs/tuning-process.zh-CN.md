@@ -712,3 +712,11 @@ reserve 和 effective budget，方便后续复核。
 在 `num_ctx=16384`、`num_predict=2048`、重试关闭的受控配置下重新执行五轮合成门禁：7 类正例各 5/5、clean 30/30、预签名 5/5，所有文本哈希稳定，截断路径显式失败。个人入口仍默认 32K 以覆盖真实大差异；若本机显存/内存使 32K 请求无首字节超时，窄恢复只适用于上述单文件、单预检形状，不会把一般超时当作通过。
 
 继续补充三组真实跨仓库 clean holdout：`platform-job:0885d7d8`（密码修改增加旧密码校验的 CSRF 安全修复，2/2 分片、44 秒）、`platform-job:e5a84a1b`（`int` 到 `long` 的 bigint 兼容性修复，1/1 分片、34 秒）以及 `platform-ai-service:ddc7b767`（SSE 异常响应显式 JSON 内容协商修复，3/3 分片、27 秒）。三次均 `output_complete=true`、exit=0，模型均返回 clean；人工复核确认当前提交是修复而非引入问题，因此不把它们计入 P0/P1 召回分母，也不把 clean 结果当作生产正确性证明。结果文本、metadata 和 scorecard 仅保存在本机私有评测目录。
+
+对 `platform-hr-service:6192b5e6` 的内部人员目录新增接口做了跨仓库 clean holdout：5/5 分片、82 秒、完整返回 clean。人工复核了 README 所声明的 `GatewayAuthFilter` 全局 `X-Gateway-Token` 门禁、租户上下文过滤器和可信服务直连契约；控制器没有显式 `@PreAuthorize` 不是独立漏洞，因此该样本 `gold_p0_p1=0`，不计入召回分母。重复审查因与长样本争用 Ollama 被中止，稳定性保持未验证。
+
+会话重放候选 `platform-job:cb1bd548` 继续采用严格失败闭门：串行重跑 59 个分片时前 30 个完成，第 31 个分片出现 `application.properties` 实际 70--74 行、模型报 70--76 行的越界定位，输出门禁拒绝整次结果并保留 `output_complete=false`。即使确定性权限预检已经发现候选 P1，也不把半截结果计入阶段一指标；该失败暴露的是行号幻觉而非传输故障，暂不通过放宽定位校验来修复。
+
+真实 `platform-job:ae26cb0c` 留出审查又暴露一个不同的 SSRF 漏报：4/4 分片完整结束、130 秒，模型返回 clean，但 `JobLogController.logDetailCat` 将请求参数 `executorAddress` 直接传给 `NetComClientProxy`，后续 `9293c61c` 已改为按日志 ID从数据库加载执行器地址，人工金标为 1 个 P1。运行器新增窄范围预检，只有同一变更 Java 控制器同时展示请求映射、`String executorAddress` 参数和新增 RPC sink 时才生成 P1；无模型回归现为 14 个用例，并对模型重复/长度截断提供同样窄的恢复门，不把普通变量名或受信数据库加载地址泛化成 SSRF。
+
+该真实提交随后用最新脚本复跑：5/5 分片、154 秒、`output_complete=true`，最终只保留一条 `executorAddress -> NetComClientProxy` P1，定位到 sink 行并列出请求映射/参数/sink 三项证据；首分片的模型重复达到长度上限时由窄恢复过滤，其他截断路径仍 fail-closed。正式 scorecard 记录 `gold=1`、`found=1`、`predicted=1`、`false_positive=0`、`location_accurate=1`；第二轮 186 秒结果文本与运行签名一致，`repeat_stable=true`。

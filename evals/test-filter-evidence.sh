@@ -398,8 +398,86 @@ if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_t
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
+# A controller must not pass a request-supplied executorAddress directly to
+# the XXL-JOB RPC client. The narrow preflight needs all three pieces of
+# evidence in the changed Java path: request mapping, String parameter, and
+# the NetComClientProxy sink. A clean fake model response must still expose
+# the deterministic P1.
+ssrf_repo="$(new_repo direct-address-ssrf)"
+mkdir -p "$ssrf_repo/src/main/java/example"
+cat >"$ssrf_repo/src/main/java/example/JobLogController.java" <<'EOF'
+package example;
+
+class JobLogController {
+  @RequestMapping("/logDetailCat")
+  ReturnT<?> logDetailCat(String executorAddress, int logId) {
+    return null;
+  }
+}
+EOF
+git -C "$ssrf_repo" add .
+git -C "$ssrf_repo" commit -qm base
+cat >"$ssrf_repo/src/main/java/example/JobLogController.java" <<'EOF'
+package example;
+
+class JobLogController {
+  @RequestMapping("/logDetailCat")
+  ReturnT<?> logDetailCat(String executorAddress, int logId) {
+    ExecutorBiz executorBiz = (ExecutorBiz) new NetComClientProxy(ExecutorBiz.class, executorAddress).getObject();
+    return executorBiz.log(logId);
+  }
+}
+EOF
+ssrf_output="$(run_review direct-address-ssrf "$ssrf_repo" '未发现阻塞问题')"
+if ! grep -F '直接传入 NetComClientProxy' "$ssrf_output" >/dev/null ||
+   ! grep -F 'Web 端点把请求参数 executorAddress' "$ssrf_output" >/dev/null; then
+  printf 'FAIL direct-address-ssrf: deterministic request-address sink preflight missing\n' >&2
+  cat "$ssrf_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+export LOCAL_REVIEW_TEST_DONE_REASON=length
+ssrf_truncated_output="$(run_review direct-address-ssrf-truncated "$ssrf_repo" 'P1 src/main/java/example/JobLogController.java:6 - MODEL_DIRECT_ADDRESS_DUPLICATE：请求参数 executorAddress 直接传入 NetComClientProxy，可能造成 SSRF。
+影响：攻击者可能让服务端访问内网地址。
+修复建议：只从日志记录加载执行器地址。
+验证方式：拒绝 localhost 和 metadata 地址。
+
+P1 src/main/java/example/JobLogController.java:6 - MODEL_DIRECT_ADDRESS_DUPLICATE_2：RPC sink 使用了外部 executorAddress。
+影响：请求目标可被探测。
+修复建议：校验目标地址。
+验证方式：执行 SSRF 回归。')"
+export LOCAL_REVIEW_TEST_DONE_REASON=stop
+if ! grep -F '直接传入 NetComClientProxy' "$ssrf_truncated_output" >/dev/null ||
+   grep -F 'MODEL_DIRECT_ADDRESS_DUPLICATE' "$ssrf_truncated_output" >/dev/null; then
+  printf 'FAIL direct-address-ssrf-truncated: deterministic preflight recovery did not remove duplicate model text\n' >&2
+  cat "$ssrf_truncated_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+safe_ssrf_repo="$(new_repo direct-address-ssrf-safe)"
+mkdir -p "$safe_ssrf_repo/src/main/java/example"
+cat >"$safe_ssrf_repo/src/main/java/example/JobLogController.java" <<'EOF'
+package example;
+
+class JobLogController {
+  @RequestMapping("/logDetailCat")
+  ReturnT<?> logDetailCat(String executorAddress, int logId) {
+    XxlJobLog jobLog = dao.load(logId);
+    return new NetComClientProxy(ExecutorBiz.class, jobLog.getExecutorAddress()).getObject();
+  }
+}
+EOF
+git -C "$safe_ssrf_repo" add .
+git -C "$safe_ssrf_repo" commit -qm base
+printf '%s\n' '// no direct request address sink' >>"$safe_ssrf_repo/src/main/java/example/JobLogController.java"
+safe_ssrf_output="$(run_review direct-address-ssrf-safe "$safe_ssrf_repo" '未发现阻塞问题')"
+if ! grep -Fx '未发现阻塞问题' "$safe_ssrf_output" >/dev/null ||
+   grep -F '直接传入 NetComClientProxy' "$safe_ssrf_output" >/dev/null; then
+  printf 'FAIL direct-address-ssrf-safe: trusted persisted address was over-reported\n' >&2
+  cat "$safe_ssrf_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 11 cases\n'
+printf 'filter evidence regression passed: 14 cases\n'

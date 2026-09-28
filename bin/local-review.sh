@@ -1388,6 +1388,44 @@ filter_presigned_replay_preflight_duplicates() {
   mv "$filtered_file" "$findings_file"
 }
 
+filter_direct_address_ssrf_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '请求参数 executorAddress 直接传入 NetComClientProxy' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-direct-address-ssrf-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      # The authoritative direct-address block itself mentions "请求凭据" as
+      # impact. Do not mistake that wording for an independent credential
+      # leakage root; a real credential finding must have its own evidence
+      # such as URL/query propagation or literal secret exposure.
+      if (text ~ /executorAddress|NetComClientProxy|SSRF|请求伪造|内网执行器|metadata|RPC sink/) gsub(/请求凭据/, "", text)
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|路径遍历|凭据|密钥|密码|XSS|反序列化|命令执行|任意文件|反射漏洞|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    function flush() {
+      if (block == "") return
+      # The deterministic preflight is authoritative for the exact direct
+      # request-address sink. Keep a paragraph only when it carries another
+      # independently evidenced root cause.
+      direct_address = block ~ /executorAddress|NetComClientProxy|SSRF|请求伪造|内网执行器|metadata|RPC sink/
+      if (!(direct_address && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
 filter_migration_preflight_duplicates() {
   local findings_file="$1"
   local preflight_file="$2"
@@ -1679,6 +1717,8 @@ SQL schema 目标边界：如果同一新增或修改的 SQL 文件中恰好可�
 
 XXL-JOB 权限迁移边界：如果输入包含“权限修复完整性预检”并已列出 `JobInfoController`、`JobLogController` 或同一权限拦截器迁移涉及的具体缺口，预检段本身就是该授权根因的确定性证据。不要因为当前分片没有展示服务层、其他控制器或调用链，就追加“如果/若未校验/可能绕过”的条件式问题，也不要把同一根因拆成每个方法一条；只有当前分片直接展示了与预检不同的独立授权缺陷时才新增一条。预检已覆盖的根因不要重复输出。
 
+XXL-JOB 直接地址 SSRF 预检边界：如果输入包含“Web 端点把请求参数 executorAddress 直接传入 NetComClientProxy”的确定性预检段，该预检段本身就是该 SSRF 根因的权威证据，必须保留但不得重复抄写；只报告当前分片中另有独立根因。不要因为预检已给出完整影响、修复建议和验证方式而输出重复段，也不能把该预检误改成 clean。
+
 声明式权限注解删除：如果差异把同一个控制器中多个方法的 `@PreAuthorize`、`@RequiresPermissions` 或等价授权注解注释/删除，必须把它视为当前差异直接证明的 P1 授权回归；按控制器或同一授权根因合并为一条，并在文件路径后列出全部受影响方法/行号范围。不要再为同一批被注释的注解输出信息级“可读性/维护性”问题；只有存在不同授权机制或不同资源边界的独立根因时才拆分。
 变量与空指针证据边界：只有当前差异或同一方法可见源码明确展示变量未声明、未初始化、不可达赋值或可达的 null 值时，才报告“变量未定义/可能空指针”。如果调用方法的返回值已经赋给同名局部变量，不得仅凭方法名、猜测返回值或业务分支未使用就声称变量未定义或必然为空；同一证据只保留一条具体问题。
 
@@ -1967,6 +2007,27 @@ validate_response() {
           return 0
           ;;
       esac
+    fi
+    # The direct-address SSRF preflight has the same narrow shape: the model
+    # may repeat the exact deterministic P1 until the chunk reaches its
+    # length cap. Drop only those duplicate paragraphs; if no independent
+    # model finding remains, the deterministic block is merged below. Other
+    # truncated security findings remain fail-closed.
+    if [[ -n "$truncated_text" && -s "${build_preflight_file:-}" ]] &&
+       grep -Fq '请求参数 executorAddress 直接传入 NetComClientProxy' "$build_preflight_file" &&
+       grep -Eq 'executorAddress|NetComClientProxy|SSRF|请求伪造|内网执行器|metadata' <<<"$truncated_text"; then
+      recoverable_file="$(mktemp "${TMPDIR:-/tmp}/local-review-direct-address-ssrf-recover.XXXXXX")"
+      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings | dedup_exact_findings >"$recoverable_file"
+      filter_direct_address_ssrf_preflight_duplicates "$recoverable_file" "$build_preflight_file"
+      if ! grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$recoverable_file" ||
+         ! grep -Eq '租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|路径遍历|凭据|密钥|密码|XSS|反序列化|命令执行|任意文件|反射漏洞|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败' "$recoverable_file"; then
+        printf '未发现阻塞问题\n' >"$output_file"
+        printf 'clean\n' >"$kind_file"
+        rm -f "$recoverable_file"
+        echo "本地代码审查：模型分片因重复直接地址 SSRF 预检文本达到长度上限，已丢弃重复文本并保留确定性预检；未发现其他可验证模型 finding。" >&2
+        return 0
+      fi
+      rm -f "$recoverable_file"
     fi
     # The presigned-ticket preflight has the same narrow authoritative shape:
     # a small fixture can make the model repeat speculative ticket/cleanup
@@ -2421,6 +2482,7 @@ merge_preflight_findings() {
     filter_security_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_authorization_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_presigned_replay_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_direct_address_ssrf_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
@@ -3676,6 +3738,70 @@ collect_url_prefix_whitelist_preflight() {
           text ~ /(^|[^[:alnum:]_])(url|uri|target|endpoint)[[:space:]]*[.]?[[:space:]]*startsWith/) {
         candidate_path = candidate_path
         candidate_line = line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { flush_candidate() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_direct_address_ssrf_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # Keep this intentionally narrow. A controller request parameter named
+  # executorAddress must not be passed directly to the XXL-JOB RPC client;
+  # require the same changed Java hunk to show a request mapping, the address
+  # parameter and the new NetComClientProxy sink. We do not infer SSRF from a
+  # variable name alone, and an address loaded from a persisted log/DB is out
+  # of scope for this preflight.
+  awk '
+    function flush_candidate(    key) {
+      if (path == "" || route_line == 0 || param_line == 0 || sink_line == 0) return
+      key = path SUBSEP sink_line
+      if (seen[key]++) return
+      printf "P1 %s:%d - Web 端点把请求参数 executorAddress 直接传入 NetComClientProxy，未看到目标地址校验，存在服务端请求伪造风险。\n影响：攻击者可控制调度中心向内网执行器、云 metadata 或其他非预期地址发起 RPC，请求凭据或内部服务被探测/访问。\n修复建议：不要从请求接收执行器地址；只接收日志 ID 并从受信数据库记录加载 executorAddress/triggerTime，再校验执行器归属与允许协议/主机。\n验证方式：使用外部地址、localhost、内网和 metadata 地址调用该端点，确认地址只能来自受信日志记录且非允许目标在出站前被拒绝。\n证据行：请求映射 %d；地址参数 %d；RPC sink %d。\n\n", path, sink_line, route_line, param_line, sink_line
+    }
+    /^diff --git / {
+      flush_candidate()
+      path = $4
+      sub(/^b\//, "", path)
+      route_line = 0
+      param_line = 0
+      sink_line = 0
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_candidate()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      route_line = 0
+      param_line = 0
+      sink_line = 0
+      next
+    }
+    /^@@ / {
+      flush_candidate()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      route_line = 0
+      param_line = 0
+      sink_line = 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if ((prefix == "+" || prefix == " ") && path ~ /\.java$/) {
+        if (text ~ /@RequestMapping[[:space:]]*\(/) route_line = line_no
+        if (text ~ /(^|[^[:alnum:]_])String[[:space:]]+executorAddress([^[:alnum:]_]|$)/) param_line = line_no
+      }
+      if (prefix == "+" && path ~ /\.java$/ &&
+          text ~ /new[[:space:]]+NetComClientProxy[[:space:]]*\([^,;]*,[[:space:]]*executorAddress[[:space:]]*\)/) {
+        sink_line = line_no
       }
       if (prefix == "+" || prefix == " ") line_no++
     }
@@ -5405,6 +5531,7 @@ collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"
 collect_xxl_job_permission_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
