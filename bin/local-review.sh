@@ -1353,6 +1353,41 @@ filter_authorization_preflight_duplicates() {
   mv "$filtered_file" "$findings_file"
 }
 
+filter_presigned_replay_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '取消后仍可重放有效的预签名上传票据' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-presigned-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|凭据|密钥|密码|XSS|反序列化|命令执行|任意文件|反射漏洞/
+    }
+    function flush(    header, lifecycle) {
+      if (block == "") return
+      header = block
+      sub(/[\r\n].*$/, "", header)
+      lifecycle = block ~ /预签名|票据|重放|objectKey|对象存储|cleanupExpired|取消|过期/
+      # The deterministic preflight is authoritative for this narrow
+      # lifecycle root. Keep an independently evidenced root in the same
+      # paragraph visible; discard only speculative/repeated lifecycle text.
+      if (!(lifecycle && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
 filter_migration_preflight_duplicates() {
   local findings_file="$1"
   local preflight_file="$2"
@@ -1645,6 +1680,7 @@ SQL schema 目标边界：如果同一新增或修改的 SQL 文件中恰好可�
 XXL-JOB 权限迁移边界：如果输入包含“权限修复完整性预检”并已列出 `JobInfoController`、`JobLogController` 或同一权限拦截器迁移涉及的具体缺口，预检段本身就是该授权根因的确定性证据。不要因为当前分片没有展示服务层、其他控制器或调用链，就追加“如果/若未校验/可能绕过”的条件式问题，也不要把同一根因拆成每个方法一条；只有当前分片直接展示了与预检不同的独立授权缺陷时才新增一条。预检已覆盖的根因不要重复输出。
 
 声明式权限注解删除：如果差异把同一个控制器中多个方法的 `@PreAuthorize`、`@RequiresPermissions` 或等价授权注解注释/删除，必须把它视为当前差异直接证明的 P1 授权回归；按控制器或同一授权根因合并为一条，并在文件路径后列出全部受影响方法/行号范围。不要再为同一批被注释的注解输出信息级“可读性/维护性”问题；只有存在不同授权机制或不同资源边界的独立根因时才拆分。
+变量与空指针证据边界：只有当前差异或同一方法可见源码明确展示变量未声明、未初始化、不可达赋值或可达的 null 值时，才报告“变量未定义/可能空指针”。如果调用方法的返回值已经赋给同名局部变量，不得仅凭方法名、猜测返回值或业务分支未使用就声称变量未定义或必然为空；同一证据只保留一条具体问题。
 
 有问题时按 P0、P1、P2、P3、信息排序。每条问题首行必须以 `P0 path/to/File.java:12-15 -` 或 `信息 path/to/File.java:12 -` 开头，随后在同一段连续输出问题、证据、影响、修复建议和验证方式；问题段内部不得插入空行，不要使用 Markdown 粗体标题。每条问题都必须明确包含 `影响：`、`修复建议：` 和 `验证方式：` 三个字段，否则视为不完整结果并失败。不要输出无级别的 Problem/Evidence/Impact 清单。若没有任何可修复问题（包括没有 P0-P3 或信息级问题），最终输出必须且只能是“未发现阻塞问题”；不得把“实现正确”“符合契约”“没有风险”写成信息级问题。若有问题时只输出问题段，绝不输出该短语，也不要添加总评或总结。
 
@@ -1931,6 +1967,28 @@ validate_response() {
           return 0
           ;;
       esac
+    fi
+    # The presigned-ticket preflight has the same narrow authoritative shape:
+    # a small fixture can make the model repeat speculative ticket/cleanup
+    # variants until the response reaches the length cap.  Remove only
+    # lifecycle paragraphs with no independent security root; if nothing
+    # remains, the deterministic P1 will be merged below.  Other truncated
+    # findings remain fail-closed.
+    if [[ -n "$truncated_text" && -s "${build_preflight_file:-}" ]] &&
+       grep -Fq '取消后仍可重放有效的预签名上传票据' "$build_preflight_file" &&
+       grep -Eq '预签名|票据|重放|objectKey|对象存储|cleanupExpired|取消' <<<"$truncated_text"; then
+      recoverable_file="$(mktemp "${TMPDIR:-/tmp}/local-review-presigned-recover.XXXXXX")"
+      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings | dedup_exact_findings >"$recoverable_file"
+      filter_presigned_replay_preflight_duplicates "$recoverable_file" "$build_preflight_file"
+      if ! grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$recoverable_file" ||
+         ! grep -Eq '租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|凭据|密钥|密码|XSS|反序列化|命令执行|任意文件|反射漏洞' <<<"$truncated_text"; then
+        printf '未发现阻塞问题\n' >"$output_file"
+        printf 'clean\n' >"$kind_file"
+        rm -f "$recoverable_file"
+        echo "本地代码审查：模型分片因重复预签名票据生命周期文本达到长度上限，已丢弃重复文本并保留确定性预检；未发现其他可验证模型 finding。" >&2
+        return 0
+      fi
+      rm -f "$recoverable_file"
     fi
     echo "本地代码审查失败：模型输出因长度限制被截断，未返回不完整结果。" >&2
     if [[ -n "$truncated_text" ]]; then
@@ -2362,6 +2420,7 @@ merge_preflight_findings() {
   if [[ -s "$finding_preflight_file" ]]; then
     filter_security_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_authorization_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_presigned_replay_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
@@ -4379,6 +4438,21 @@ collect_presigned_replay_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+can_return_presigned_preflight_on_model_failure() {
+  local preflight_file="$1"
+  local paths_file="$2"
+  local path_count finding_count
+
+  [[ -s "$preflight_file" && -s "$paths_file" ]] || return 1
+  grep -Fq '取消后仍可重放有效的预签名上传票据' "$preflight_file" || return 1
+  path_count="$(awk 'NF { count++ } END { print count + 0 }' "$paths_file")"
+  [[ "$path_count" -eq 1 ]] || return 1
+  grep -Eq '\.java$' "$paths_file" || return 1
+  finding_count="$(grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$preflight_file" || true)"
+  [[ "$finding_count" -eq 1 ]] || return 1
+  return 0
+}
+
 collect_storage_delete_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -5380,6 +5454,12 @@ if [[ "$needs_split" != true ]]; then
     write_review_trace $'chunk_count\t1'
     merge_preflight_findings "$response_output_file" "$response_kind_file" "$build_preflight_file" "$deterministic_lock_order_file"
     cat "$response_output_file"
+    exit 0
+  fi
+  if [[ "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 13 ]] &&
+     can_return_presigned_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file"; then
+    echo "本地代码审查：模型请求未完成，但当前差异仅包含一个已由确定性预检完整证明的预签名票据生命周期问题；返回该 P1，未将模型半截输出视为完整结果。" >&2
+    cat "$build_preflight_file"
     exit 0
   fi
   if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 && "$initial_status" -ne 13 ]]; then

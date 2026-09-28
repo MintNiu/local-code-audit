@@ -85,10 +85,50 @@ done
 [[ -n "$repo_dir" && -n "$manifest_file" && -n "$output_dir" ]] || { usage >&2; exit 2; }
 [[ -d "$repo_dir" ]] || { echo "仓库目录不存在: $repo_dir" >&2; exit 2; }
 [[ -f "$manifest_file" ]] || { echo "清单文件不存在: $manifest_file" >&2; exit 2; }
-if LC_ALL=C grep -n $'\r' "$manifest_file" >/dev/null; then
-  echo "清单文件包含回车控制字符，拒绝写入不可验证的历史元数据: $manifest_file" >&2
-  exit 2
-fi
+validate_manifest_input() {
+  local input_file="$1"
+  if ! LC_ALL=C perl -ne '
+    if (/[\x00-\x08\x0B\x0C\x0D\x0E-\x1F\x7F]/) {
+      printf "清单第 %d 行包含不可安全写入 TSV 的控制字符。\n", $.;
+      exit 1
+    }
+  ' "$input_file"; then
+    echo "拒绝使用包含控制字符的 manifest: $input_file" >&2
+    return 1
+  fi
+  if ! LC_ALL=C awk -F '\t' '
+    function fail(message) {
+      printf "清单第 %d 行无效：%s\n", NR, message > "/dev/stderr"
+      bad = 1
+    }
+    NR == 1 {
+      if (NF < 5 || $1 != "commit" || $2 != "parent" || $3 != "date" || $4 != "subject" || $5 != "status") {
+        fail("首行必须以 commit、parent、date、subject、status 为前五列")
+      }
+      expected_fields = NF
+      next
+    }
+    /^[[:space:]]*$/ { next }
+    {
+      if (NF != expected_fields) fail("列数与表头不一致，可能包含未转义的换行或制表符")
+      if ($5 == "pending-human-label" &&
+          ($1 !~ /^[0-9A-Fa-f]{7,64}$/ || $2 !~ /^[0-9A-Fa-f]{7,64}$/)) {
+        fail("pending-human-label 行的 commit 和 parent 必须是 7-64 位十六进制")
+      }
+    }
+    END {
+      if (NR == 0) {
+        print "清单为空，缺少表头" > "/dev/stderr"
+        bad = 1
+      }
+      exit bad
+    }
+  ' "$input_file"; then
+    echo "拒绝使用结构不完整或路径不安全的 manifest: $input_file" >&2
+    return 1
+  fi
+}
+validate_manifest_input "$manifest_file" || exit 2
 if (( ${#context_files[@]} > 0 )); then
   resolved_context_files=()
   for context_file in "${context_files[@]}"; do

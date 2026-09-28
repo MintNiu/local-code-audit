@@ -29,6 +29,9 @@ EOF
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${LOCAL_REVIEW_TEST_TRANSPORT_FAIL:-0}" == "1" ]]; then
+  exit 28
+fi
 done_reason="${LOCAL_REVIEW_TEST_DONE_REASON:-stop}"
 exec jq -n --rawfile response "$LOCAL_REVIEW_TEST_RESPONSE" --arg done_reason "$done_reason" \
   '{response: $response, done: true, done_reason: $done_reason}'
@@ -342,8 +345,61 @@ if ! grep -F '声明式权限注解被注释/删除' "$authorization_output" >/d
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
+# A presigned-ticket fixture has a deterministic replay preflight. Repeated
+# lifecycle variants from the model are duplicates, not independent findings;
+# keep the deterministic P1 and discard the model's speculative paragraphs.
+presigned_repo="$(new_repo presigned-replay)"
+mkdir -p "$presigned_repo/src"
+cp "$repo_root/evals/fixtures/java-presigned-replay/src/UploadSessionService.java" \
+  "$presigned_repo/src/UploadSessionService.java"
+git -C "$presigned_repo" add .
+git -C "$presigned_repo" commit -qm base
+printf '%s\n' '// changed objectKey lifecycle evidence' >>"$presigned_repo/src/UploadSessionService.java"
+presigned_output="$(run_review presigned-replay "$presigned_repo" 'P1 src/UploadSessionService.java:25-27 - MODEL_PRESIGNED_DUPLICATE：取消后票据仍可重放，可能造成对象存储资源泄漏。
+影响：取消后的预签名票据仍然有效。
+修复建议：撤销票据。
+验证方式：取消后再次上传应失败。
+
+P1 src/UploadSessionService.java:18-21 - MODEL_PRESIGNED_DUPLICATE_2：缺少过期票据校验，可能接受无效票据。
+影响：过期票据可能写入对象。
+修复建议：校验过期时间。
+验证方式：使用过期票据测试。')"
+if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_output" >/dev/null ||
+   grep -F 'MODEL_PRESIGNED_DUPLICATE' "$presigned_output" >/dev/null; then
+  printf 'FAIL presigned-replay: deterministic preflight did not replace lifecycle duplicates\n' >&2
+  cat "$presigned_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+export LOCAL_REVIEW_TEST_DONE_REASON=length
+presigned_truncated_output="$(run_review presigned-replay-truncated "$presigned_repo" 'P1 src/UploadSessionService.java:25-27 - MODEL_PRESIGNED_DUPLICATE：取消后票据仍可重放，可能造成对象存储资源泄漏。
+影响：取消后的预签名票据仍然有效。
+修复建议：撤销票据。
+验证方式：取消后再次上传应失败。
+
+P1 src/UploadSessionService.java:18-21 - MODEL_PRESIGNED_DUPLICATE_2：缺少过期票据校验，可能接受无效票据。
+影响：过期票据可能写入对象。
+修复建议：校验过期时间。
+验证方式：使用过期票据测试。')"
+export LOCAL_REVIEW_TEST_DONE_REASON=stop
+if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_truncated_output" >/dev/null ||
+   grep -F 'MODEL_PRESIGNED_DUPLICATE' "$presigned_truncated_output" >/dev/null; then
+  printf 'FAIL presigned-replay-truncated: safe length recovery did not preserve preflight finding\n' >&2
+  cat "$presigned_truncated_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+export LOCAL_REVIEW_TEST_DONE_REASON=stop
+export LOCAL_REVIEW_TEST_TRANSPORT_FAIL=1
+presigned_transport_output="$(run_review presigned-replay-transport "$presigned_repo" '未使用的响应体')"
+unset LOCAL_REVIEW_TEST_TRANSPORT_FAIL
+if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_transport_output" >/dev/null ||
+   grep -F '未使用的响应体' "$presigned_transport_output" >/dev/null; then
+  printf 'FAIL presigned-replay-transport: deterministic singleton preflight was not recovered safely\n' >&2
+  cat "$presigned_transport_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 10 cases\n'
+printf 'filter evidence regression passed: 11 cases\n'

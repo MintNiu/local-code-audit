@@ -56,6 +56,37 @@ commit="$(git -C "$repo" rev-parse HEAD)"
   printf '%s\t%s\t2026-09-14\ttest duplicate\tpending-human-label\n' "$commit" "$parent"
 } >"$manifest"
 
+# Manifest control characters and unescaped tabs must fail before the output
+# directory is created; otherwise metadata/label paths could become
+# ambiguous or carry injected records.
+control_manifest="$fixture_root/control-manifest.tsv"
+printf 'commit\tparent\tdate\tsubject\tstatus\n%s\t%s\t2026-09-14\tbad\vsubject\tpending-human-label\n' \
+  "$commit" "$parent" >"$control_manifest"
+control_status=0
+"$repo_root/evals/run-history.sh" \
+  --repo "$repo" --manifest "$control_manifest" --out-dir "$fixture_root/control-results" \
+  >"$fixture_root/control-stdout" 2>"$fixture_root/control-stderr" || control_status=$?
+(( control_status == 2 )) || {
+  echo 'manifest control-character input was incorrectly accepted' >&2
+  exit 1
+}
+grep -F '控制字符' "$fixture_root/control-stderr" >/dev/null
+[[ ! -e "$fixture_root/control-results" ]]
+
+tab_manifest="$fixture_root/tab-manifest.tsv"
+printf 'commit\tparent\tdate\tsubject\tstatus\n%s\t%s\t2026-09-14\tbad\tsubject\tpending-human-label\n' \
+  "$commit" "$parent" >"$tab_manifest"
+tab_status=0
+"$repo_root/evals/run-history.sh" \
+  --repo "$repo" --manifest "$tab_manifest" --out-dir "$fixture_root/tab-results" \
+  >"$fixture_root/tab-stdout" 2>"$fixture_root/tab-stderr" || tab_status=$?
+(( tab_status == 2 )) || {
+  echo 'manifest unescaped-tab input was incorrectly accepted' >&2
+  exit 1
+}
+grep -F '列数与表头不一致' "$fixture_root/tab-stderr" >/dev/null
+[[ ! -e "$fixture_root/tab-results" ]]
+
 stderr_file="$fixture_root/stderr"
 PATH="$fake_bin:$PATH" \
   HISTORY_TEST_CURL_COUNT="$fixture_root/first-curl-count" \
@@ -84,6 +115,23 @@ grep -F 'transient transport warning' "$out_dir/$commit.stderr.log" >/dev/null
   --manifest "$manifest" --results "$out_dir" --labels-dir "$labels_out" >/dev/null
 result_sha256="$(shasum -a 256 "$out_dir/$commit.txt" | awk '{print $1}')"
 grep -F $'# source_result_sha256\t'"$result_sha256" "$labels_out/$commit.labels.tsv" >/dev/null
+
+# Label generation must reject a manifest commit that could escape
+# --labels-dir through path traversal before creating any output.
+unsafe_label_manifest="$fixture_root/unsafe-label-manifest.tsv"
+printf 'commit\tparent\tdate\tsubject\tstatus\n../../escape\t%s\t2026-09-14\tunsafe\tpending-human-label\n' \
+  "$parent" >"$unsafe_label_manifest"
+unsafe_label_status=0
+"$repo_root/evals/prepare-history-labels.sh" \
+  --manifest "$unsafe_label_manifest" --results "$out_dir" \
+  --labels-dir "$fixture_root/unsafe-labels" \
+  >"$fixture_root/unsafe-label-stdout" 2>"$fixture_root/unsafe-label-stderr" || unsafe_label_status=$?
+(( unsafe_label_status == 2 )) || {
+  echo 'unsafe manifest commit path was incorrectly accepted by label preparation' >&2
+  exit 1
+}
+grep -F 'commit 和 parent 必须是 7-64 位十六进制' "$fixture_root/unsafe-label-stderr" >/dev/null
+[[ ! -e "$fixture_root/unsafe-labels" ]]
 
 # Labels must not bind a result to a changed manifest or to a different
 # commit/parent pair. The result directory remains immutable; only the input
