@@ -720,3 +720,13 @@ reserve 和 effective budget，方便后续复核。
 真实 `platform-job:ae26cb0c` 留出审查又暴露一个不同的 SSRF 漏报：4/4 分片完整结束、130 秒，模型返回 clean，但 `JobLogController.logDetailCat` 将请求参数 `executorAddress` 直接传给 `NetComClientProxy`，后续 `9293c61c` 已改为按日志 ID从数据库加载执行器地址，人工金标为 1 个 P1。运行器新增窄范围预检，只有同一变更 Java 控制器同时展示请求映射、`String executorAddress` 参数和新增 RPC sink 时才生成 P1；无模型回归现为 14 个用例，并对模型重复/长度截断提供同样窄的恢复门，不把普通变量名或受信数据库加载地址泛化成 SSRF。
 
 该真实提交随后用最新脚本复跑：5/5 分片、154 秒、`output_complete=true`，最终只保留一条 `executorAddress -> NetComClientProxy` P1，定位到 sink 行并列出请求映射/参数/sink 三项证据；首分片的模型重复达到长度上限时由窄恢复过滤，其他截断路径仍 fail-closed。正式 scorecard 记录 `gold=1`、`found=1`、`predicted=1`、`false_positive=0`、`location_accurate=1`；第二轮 186 秒结果文本与运行签名一致，`repeat_stable=true`。
+
+### 2026-09-28：MyBatis 原始替换 SQL 注入漏报与窄范围预检
+
+新增真实 `platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` SQL 注入留出。提交在 `XxlJobInfoMapper.xml` 的 UPDATE 中新增 `executor_timeout = ${executorTimeout}`，后续 `b41d8064` 改回 `#{executorTimeout}`；人工确认这是一个 P1 SQL 注入根因。当前 tuned 模型在 20/20 分片、136 秒内完整返回“未发现阻塞问题”，两轮重复分别 124/130 秒且结果哈希一致，`output_complete=true`、`repeat_stable=true`，但 `gold=1`、`p0_p1_found=0`，确认是稳定漏报而非传输失败。
+
+运行器新增窄范围 MyBatis 预检：只对 mapper XML 中新增的标量 SQL 赋值 `${...}` 原始替换生成确定性 P1，建议改为 `#{...}`；动态标识符等非赋值形状仍交给模型，避免把白名单场景泛化为漏洞。最终合并会过滤同一文件/行范围的模型重复，同时保留独立租户、权限、凭据、并发和迁移根因。新增无模型预检夹具、SYSTEM 边界和语法/运行态回归，当前 tuned SYSTEM SHA 仍为 `b2763a461e0d2a9f46175a11a3aa35a3163da321860a594887378ab63cd0fa65`。
+
+该修复把一次可复现的 SQL 注入漏报转成可定位、可重复的确定性证据，但不把单一 SQL 形状外推为全部 SQL 安全召回；阶段 1 仍未达到至少 20 个独立 holdout P0/P1 根因、90% 召回和 90% 定位门槛。
+
+同轮五轮合成门禁还捕获三类 clean 信息漂移：`java-token-header` 的“安全边界规则”解释、未跟踪文件建议 `git add`、以及生成列 `GENERATED ALWAYS ... STORED` 的合法性说明。过滤器只在段落明确表达“无需修复/影响无/合法”且没有独立安全或兼容性证据时移除；具体凭据、SQL、租户、权限和构建问题仍保留。最终门禁为 7 类正例各 5/5、6 类 clean 共 30/30、预签名 5/5，所有哈希稳定，显式截断仍失败闭门；当前 tuned SYSTEM SHA 仍为 `b2763a461e0d2a9f46175a11a3aa35a3163da321860a594887378ab63cd0fa65`。

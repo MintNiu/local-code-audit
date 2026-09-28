@@ -3079,6 +3079,42 @@ printf '%s\n' "$xxl_permission_output" | grep -F '权限拦截器重构后仍有
   exit 1
 }
 
+# MyBatis `${...}` in a scalar SQL assignment is textual substitution, not a
+# bound parameter.  The fake model returns clean so this assertion exercises
+# the deterministic preflight and its final merge path.
+mybatis_raw_repo="$fixture_root/mybatis-raw-substitution-repo"
+mkdir -p "$mybatis_raw_repo/src/main/resources/mybatis-mapper"
+git -C "$mybatis_raw_repo" init -q
+git -C "$mybatis_raw_repo" config user.email test@example.invalid
+git -C "$mybatis_raw_repo" config user.name preflight-mybatis-test
+cat >"$mybatis_raw_repo/src/main/resources/mybatis-mapper/JobMapper.xml" <<'EOF'
+<mapper namespace="example.JobMapper">
+  <update id="update">
+    UPDATE jobs SET executor_timeout = #{executorTimeout}, retry_count = #{retryCount} WHERE id = #{id}
+  </update>
+</mapper>
+EOF
+git -C "$mybatis_raw_repo" add .
+git -C "$mybatis_raw_repo" commit -qm base
+sed -i.bak \
+  -e 's/executor_timeout = #{executorTimeout}/executor_timeout = ${executorTimeout}/' \
+  -e 's/retry_count = #{retryCount}/retry_count = ${retryCount}/' \
+  "$mybatis_raw_repo/src/main/resources/mybatis-mapper/JobMapper.xml"
+rm -f "$mybatis_raw_repo/src/main/resources/mybatis-mapper/JobMapper.xml.bak"
+mybatis_raw_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$mybatis_raw_repo")"
+printf '%s\n' "$mybatis_raw_output" | grep -F 'MyBatis Mapper 将表达式' >/dev/null || {
+  echo 'missing MyBatis raw substitution SQL injection preflight' >&2
+  printf '%s\n' "$mybatis_raw_output" >&2
+  exit 1
+}
+mybatis_raw_count="$(printf '%s\n' "$mybatis_raw_output" | grep -Fc 'MyBatis Mapper 将表达式')"
+[[ "$mybatis_raw_count" == 2 ]] || {
+  echo "MyBatis raw substitution preflight dropped a finding (count=$mybatis_raw_count)" >&2
+  printf '%s\n' "$mybatis_raw_output" >&2
+  exit 1
+}
+
 # A lock-context scan failure must not be swallowed and converted into a
 # successful clean review. The fake perl affects only the bounded lock scans;
 # the review must fail before it sends a model request.

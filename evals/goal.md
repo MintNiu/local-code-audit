@@ -293,3 +293,9 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 真实 `platform-job:ae26cb0c` SSRF 留出审查完整返回 clean，但人工确认 `executorAddress` 请求参数直接进入 `NetComClientProxy`，gold=1、found=0。已新增窄范围 RPC 出站地址预检和无模型回归（证据测试 14 个用例），并为重复/长度截断增加同形状恢复；预检只覆盖同一变更控制器中可见的请求映射、地址参数与 sink 三元证据，不把普通地址变量升级为 SSRF。
 
 最新脚本复跑该提交得到 5/5 分片完整结果（154 秒）：模型首片重复预检触发 length，但过滤后安全恢复，最终输出单条确定性 P1，`gold=1/found=1/predicted=1/false_positive=0/location_accurate=1`；第二轮 186 秒结果文本与运行签名一致，`repeat_stable=true`，一般截断仍失败闭门。
+
+2026-09-28：真实 `platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 暴露稳定的 MyBatis SQL 注入漏报：`XxlJobInfoMapper.xml` 新增 `executor_timeout = ${executorTimeout}`，后续 `b41d8064` 改回 `#{executorTimeout}`，人工金标为 1 个 P1。当前 tuned 模型 20/20 分片完整返回 clean，首轮 136 秒；重复两轮 124/130 秒，结果哈希和运行签名一致，`output_complete=true`、`repeat_stable=true`，`gold=1`、`p0_p1_found=0`。该结果证明漏报来自模型能力而不是 Ollama 传输/截断故障。
+
+运行器新增窄范围 MyBatis 原始替换预检：仅当 mapper XML 的新增 SQL 标量赋值使用 `${...}` 时确定性报告 P1，并在最终合并过滤相同行范围的模型重复；动态标识符、白名单和其它独立安全根因仍由模型结合上下文判断。无模型预检夹具、证据过滤、运行态 SYSTEM 哈希和完整语法回归均通过。该修复只覆盖可证明的原始赋值形状，不把一个样本外推为全部 SQL 注入召回；阶段 1 仍未达到 20 个独立 holdout P0/P1 根因与 90% 召回/定位门槛。
+
+同轮五轮合成门禁曾发现 clean 样例的非问题信息漂移：安全负例被解释成“安全边界规则”、未跟踪文件被要求 `git add`、合法生成列被解释为“需要确认”。这些段落现仅在明确“无需修复/影响无/合法”且不含独立安全或兼容性证据时过滤；凭据、SQL、租户、权限、构建和迁移问题继续保留。修复后最终门禁为 7 类正例各 5/5、6 类 clean 共 30/30、预签名 5/5，哈希稳定，显式截断失败；`evals/test-filter-evidence.sh` 为 16 个用例通过。

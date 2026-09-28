@@ -205,7 +205,7 @@ assert_contains token-log "$log_output" STRUCTURED_TOKEN_LOG_MARKER
 # A model explanation of a safe header-only transport is not an information
 # finding.  It must normalize to the clean marker without hiding a concrete
 # security claim.
-safe_output="$(run_review safe-negative "$mixed_repo" '信息 src/main/resources/EmployeeMapper.xml:1-13 - 令牌只通过内部请求头传递，属于安全负例，无需修复。
+safe_output="$(run_review safe-negative "$mixed_repo" '信息 src/main/resources/EmployeeMapper.xml:1-13 - 令牌只通过内部请求头传递，符合安全边界规则，无需修复。
 影响：没有证据表明该请求会进入日志或外部边界。
 修复建议：无需修复，当前实现符合安全负例契约。
 验证方式：确认差异中没有日志、持久化或外部跳转证据。')"
@@ -287,9 +287,10 @@ ddl_output="$(run_review ddl-safe-info "$ddl_repo" '信息 sql/schema.sql:1-5 - 
 修复建议：添加 tenant_id 字段。
 验证方式：检查租户查询。
 
-信息 sql/schema.sql:4 - GENERATED ALWAYS AS 子句使用 CASE WHEN 表达式，可能影响数据库性能。
-修复建议：考虑使用更简单的表达式或索引优化。
-验证方式：监控查询性能。')"
+信息 sql/schema.sql:4 - `active_person_id` 列定义使用 `GENERATED ALWAYS AS (...) STORED`，这是 MySQL 合法且明确的存储方式，不构成语法错误或缺少 `STORED`/`VIRTUAL` 的问题。
+影响：无。
+修复建议：无。
+验证方式：无。')"
 if ! grep -Fx '未发现阻塞问题' "$ddl_output" >/dev/null || grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]' "$ddl_output"; then
   printf 'FAIL ddl-safe-info: legal/generated-column information was not filtered to clean\n' >&2
   cat "$ddl_output" >&2
@@ -476,8 +477,58 @@ if ! grep -Fx '未发现阻塞问题' "$safe_ssrf_output" >/dev/null ||
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
+# A raw MyBatis scalar assignment is a deterministic SQL-injection shape. The
+# model duplicate must be removed while the authoritative preflight remains.
+mybatis_raw_repo="$(new_repo mybatis-raw-substitution)"
+mkdir -p "$mybatis_raw_repo/src/main/resources/mybatis-mapper"
+cat >"$mybatis_raw_repo/src/main/resources/mybatis-mapper/JobMapper.xml" <<'EOF'
+<mapper namespace="example.JobMapper">
+  <update id="update">
+    UPDATE jobs SET executor_timeout = #{executorTimeout} WHERE id = #{id}
+  </update>
+</mapper>
+EOF
+git -C "$mybatis_raw_repo" add .
+git -C "$mybatis_raw_repo" commit -qm base
+sed -i.bak 's/executor_timeout = #{executorTimeout}/executor_timeout = ${executorTimeout}/' \
+  "$mybatis_raw_repo/src/main/resources/mybatis-mapper/JobMapper.xml"
+rm -f "$mybatis_raw_repo/src/main/resources/mybatis-mapper/JobMapper.xml.bak"
+mybatis_raw_output="$(run_review mybatis-raw-substitution "$mybatis_raw_repo" 'P1 src/main/resources/mybatis-mapper/JobMapper.xml:3 - MODEL_MYBATIS_RAW_DUPLICATE：${executorTimeout} 被直接拼入 UPDATE，存在 SQL 注入风险。
+影响：攻击者可改变 SQL 赋值结构。
+修复建议：改为 #{executorTimeout} 参数绑定。
+验证方式：使用 SQL 片段输入执行 Mapper 集成测试。')"
+if ! grep -F 'MyBatis Mapper 将表达式' "$mybatis_raw_output" >/dev/null ||
+   grep -F 'MODEL_MYBATIS_RAW_DUPLICATE' "$mybatis_raw_output" >/dev/null; then
+  printf 'FAIL mybatis-raw-substitution: deterministic finding or duplicate filter missing\n' >&2
+  cat "$mybatis_raw_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
+# Untracked files are intentionally part of the review scope; their Git
+# status is not an information-level code defect. Concrete findings must still
+# survive, but a model request to `git add` the file must normalize to clean.
+untracked_info_repo="$(new_repo untracked-info)"
+mkdir -p "$untracked_info_repo/src/main/java/example"
+cat >"$untracked_info_repo/src/main/java/example/LocalProperties.java" <<'EOF'
+package example;
+
+final class LocalProperties {
+    String value() { return "safe"; }
+}
+EOF
+untracked_info_output="$(run_review untracked-info "$untracked_info_repo" '信息 src/main/java/example/LocalProperties.java:1-5 - UNTRACKED_INFO_MARKER：该文件是新增的未跟踪文件，未包含在 Git 仓库中，建议添加到 Git。
+影响：如果不提交，构建可能缺少配置类。
+修复建议：将该文件添加到 Git 仓库中，并检查 Git 状态。
+验证方式：确认文件已被跟踪。')"
+if ! grep -Fx '未发现阻塞问题' "$untracked_info_output" >/dev/null ||
+   grep -F 'UNTRACKED_INFO_MARKER' "$untracked_info_output" >/dev/null; then
+  printf 'FAIL untracked-info: Git status prose was not filtered\n' >&2
+  cat "$untracked_info_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 14 cases\n'
+printf 'filter evidence regression passed: 16 cases\n'

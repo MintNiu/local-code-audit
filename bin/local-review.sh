@@ -535,7 +535,7 @@ filter_unsupported_shard_findings() {
       # shape is removable; concrete leakage, tenancy, permission, or other
       # risk wording remains visible.
       if (text !~ /^[[:space:]]*信息[[:space:]:：]/) return 0
-      if (text !~ /安全负例|安全边界负例|符合安全负例/) return 0
+      if (text !~ /安全负例|安全边界负例|安全边界规则|符合安全负例/) return 0
       if (text !~ /无需修复|不构成问题/) return 0
       if (text !~ /没有证据|未见|没有.*(日志|外部|持久化)/) return 0
       if (text ~ /仍.*(泄漏|越权|风险|问题)|同时.*(泄漏|越权|风险|问题)|但是|然而/) return 0
@@ -755,6 +755,10 @@ filter_unsupported_shard_findings() {
           block ~ /性能|复杂|索引|优化/ &&
           path_evidence ~ /GENERATED[[:space:]]+ALWAYS[[:space:]]+AS/ &&
           path_evidence ~ /(^|[^[:alnum:]_])(STORED|VIRTUAL)([^[:alnum:]_]|$)/) invalid = 1
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ && finding_path_value ~ /\.sql$/ &&
+          block ~ /GENERATED[[:space:]]+ALWAYS[[:space:]]+AS/ &&
+          block ~ /STORED|VIRTUAL/ &&
+          (block ~ /影响[：:]?[[:space:]]*无|修复建议[：:]?[[:space:]]*无|合法.*(存储方式|语法)|不构成.*(问题|风险|语法错误)/)) invalid = 1
       # Commenting out an authorization annotation is a concrete P1 when the
       # same block says the endpoint is now reachable without permission. A
       # separate information paragraph that only complains about readability
@@ -776,6 +780,14 @@ filter_unsupported_shard_findings() {
       # contract; concrete secret logging remains reportable by its evidence.
       if (block ~ /缺少.*日志|没有.*日志|日志记录/ &&
           block !~ /秘密|Secret|password|密码|token|Token|令牌|凭据|credential|AccessKey/) invalid = 1
+      # An untracked file is deliberately included in the review diff, so its
+      # Git status is not itself a defect.  Drop only the informational claim
+      # that the author must `git add` it; preserve concrete code/security
+      # findings in the same paragraph.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /未跟踪|未包含在 Git|未被 Git/ &&
+          block ~ /添加到 Git|加入 Git|检查 Git 状态|确保文件已被跟踪/ &&
+          block !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
       if (generic_standard_library_info(block)) invalid = 1
@@ -1426,6 +1438,85 @@ filter_direct_address_ssrf_preflight_duplicates() {
   mv "$filtered_file" "$findings_file"
 }
 
+filter_mybatis_raw_substitution_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq 'MyBatis Mapper 将表达式' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-mybatis-raw-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function canonicalize(value) {
+      sub(/^[.][\/]/, "", value)
+      sub(/^a[\/]/, "", value)
+      sub(/^b[\/]/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function set_location(line,    value, suffix, pieces) {
+      value = line
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", value)
+      sub(/[[:space:]]+-.*$/, "", value)
+      loc_path = value
+      loc_start = 0
+      loc_end = 0
+      if (match(value, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?$/)) {
+        suffix = substr(value, RSTART, RLENGTH)
+        loc_path = substr(value, 1, RSTART - 1)
+        sub(/^:/, "", suffix)
+        gsub(/[[:space:]]+/, "", suffix)
+        split(suffix, pieces, "-")
+        loc_start = pieces[1] + 0
+        loc_end = (pieces[2] == "" ? loc_start : pieces[2] + 0)
+      }
+      loc_path = canonicalize(loc_path)
+    }
+    function overlaps(path, start, finish, other_path, other_start, other_finish) {
+      return path == other_path && start > 0 && other_start > 0 && start <= other_finish && other_start <= finish
+    }
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|权限|越权|授权|SSRF|请求伪造|路径遍历|凭据|密钥|密码|重放|竞态|并发|迁移脚本|数据库升级|XSS|反序列化|命令执行|构建失败|编译失败/
+    }
+    FILENAME == ARGV[1] {
+      if ($0 ~ /MyBatis Mapper 将表达式/) {
+        set_location($0)
+        raw_path[++raw_count] = loc_path
+        raw_start[raw_count] = loc_start
+        raw_end[raw_count] = loc_end
+      }
+      next
+    }
+    function flush(    header, duplicate, i) {
+      if (block == "") return
+      header = block
+      sub(/[\r\n].*$/, "", header)
+      set_location(header)
+      duplicate = 0
+      if (block ~ /SQL[[:space:]]*注入|MyBatis|文本拼接/) {
+        for (i = 1; i <= raw_count; i++) {
+          if (overlaps(loc_path, loc_start, loc_end, raw_path[i], raw_start[i], raw_end[i])) {
+            duplicate = 1
+            break
+          }
+        }
+      }
+      if (duplicate && !has_independent_root(block)) {
+        block = ""
+        return
+      }
+      if (printed) printf "\n"
+      printf "%s", block
+      printed = 1
+      block = ""
+    }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
 filter_migration_preflight_duplicates() {
   local findings_file="$1"
   local preflight_file="$2"
@@ -1718,6 +1809,8 @@ SQL schema 目标边界：如果同一新增或修改的 SQL 文件中恰好可�
 XXL-JOB 权限迁移边界：如果输入包含“权限修复完整性预检”并已列出 `JobInfoController`、`JobLogController` 或同一权限拦截器迁移涉及的具体缺口，预检段本身就是该授权根因的确定性证据。不要因为当前分片没有展示服务层、其他控制器或调用链，就追加“如果/若未校验/可能绕过”的条件式问题，也不要把同一根因拆成每个方法一条；只有当前分片直接展示了与预检不同的独立授权缺陷时才新增一条。预检已覆盖的根因不要重复输出。
 
 XXL-JOB 直接地址 SSRF 预检边界：如果输入包含“Web 端点把请求参数 executorAddress 直接传入 NetComClientProxy”的确定性预检段，该预检段本身就是该 SSRF 根因的权威证据，必须保留但不得重复抄写；只报告当前分片中另有独立根因。不要因为预检已给出完整影响、修复建议和验证方式而输出重复段，也不能把该预检误改成 clean。
+
+MyBatis 原始替换预检边界：如果输入包含“MyBatis Mapper 将表达式”确定性预检段，且同一文件/行范围只展示新增 SQL 赋值中的 `${...}` 原始替换，该预检段就是该 SQL 注入根因的权威证据，必须保留但不得重复抄写；只有当前分片另有独立租户、权限、凭据、并发或迁移根因时才新增问题。不要把该预检误改成 clean，也不要把模型对同一 `${...}` 的重复描述计为第二条问题。
 
 声明式权限注解删除：如果差异把同一个控制器中多个方法的 `@PreAuthorize`、`@RequiresPermissions` 或等价授权注解注释/删除，必须把它视为当前差异直接证明的 P1 授权回归；按控制器或同一授权根因合并为一条，并在文件路径后列出全部受影响方法/行号范围。不要再为同一批被注释的注解输出信息级“可读性/维护性”问题；只有存在不同授权机制或不同资源边界的独立根因时才拆分。
 变量与空指针证据边界：只有当前差异或同一方法可见源码明确展示变量未声明、未初始化、不可达赋值或可达的 null 值时，才报告“变量未定义/可能空指针”。如果调用方法的返回值已经赋给同名局部变量，不得仅凭方法名、猜测返回值或业务分支未使用就声称变量未定义或必然为空；同一证据只保留一条具体问题。
@@ -2483,6 +2576,7 @@ merge_preflight_findings() {
     filter_authorization_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_presigned_replay_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_direct_address_ssrf_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_mybatis_raw_substitution_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
@@ -4859,6 +4953,78 @@ collect_sql_trigger_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_mybatis_raw_substitution_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # MyBatis `${...}` is textual SQL substitution.  Keep this deterministic
+  # check narrow: only newly added scalar assignments in mapper XML are
+  # reported.  Dynamic identifiers such as a deliberately whitelisted table
+  # name remain model-only; an added `column = ${value}` assignment is the
+  # high-confidence injection shape this guard is meant to catch.
+  awk '
+    function reset_hunk() {
+      raw_count = 0
+      delete raw_lines
+      delete raw_expressions
+      mapper_context = 0
+    }
+    function emit_hunk(    i) {
+      if (path == "" || path !~ /\.xml$/ || raw_count == 0) return
+      if (!mapper_context && path !~ /(^|\/)(mybatis[-_]?mapper|mappers?)(\/|$)/ && path !~ /[Mm]apper\.xml$/) return
+      for (i = 1; i <= raw_count; i++) {
+        printf "P1 %s:%d - MyBatis Mapper 将表达式 ${%s} 直接文本拼接到 SQL 赋值，存在 SQL 注入风险。\n影响：请求可控或未严格白名单的参数可能改变 UPDATE/INSERT 等 SQL 结构，导致越权修改、数据篡改或数据库信息泄露。\n修复建议：改用 MyBatis `#{...}` 参数绑定；只有经过固定白名单映射的 SQL 标识符才允许使用 `${...}`，并在服务层拒绝未枚举值。\n验证方式：使用包含引号、逗号和 SQL 片段的输入执行 Mapper 集成测试，确认参数只作为值绑定且 SQL 结构不可改变；同时覆盖合法超时值的更新路径。\n\n", path, raw_lines[i], raw_expressions[i]
+      }
+    }
+    /^diff --git / {
+      emit_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      reset_hunk()
+      next
+    }
+    /^\+\+\+ b\// {
+      emit_hunk()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      reset_hunk()
+      next
+    }
+    /^@@ / {
+      emit_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      reset_hunk()
+      next
+    }
+    {
+      remaining = ""
+      if (path == "" || path !~ /\.xml$/) next
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" || prefix == "-" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        if (text ~ /<mapper([[:space:]>]|$)|<(select|insert|update|delete)([[:space:]>]|$)/) mapper_context = 1
+        if (prefix == "+") {
+          remaining = text
+          while (match(remaining, /[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=[[:space:]]*\$\{[A-Za-z_][A-Za-z0-9_.]*\}/)) {
+            raw_count++
+            raw_lines[raw_count] = line_no
+            raw_expressions[raw_count] = substr(remaining, RSTART, RLENGTH)
+            sub(/^.*=[[:space:]]*\$\{/, "", raw_expressions[raw_count])
+            sub(/\}.*/, "", raw_expressions[raw_count])
+            remaining = substr(remaining, RSTART + RLENGTH)
+          }
+        }
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { emit_hunk() }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_migration_delete_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -5539,6 +5705,7 @@ collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
+collect_mybatis_raw_substitution_preflight "$chunk_input_file" "$build_preflight_file"
 collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file"
 if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then
   echo "本地代码审查失败：跨事务/行锁文本索引扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2
