@@ -304,3 +304,7 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 2026-09-28：真实 `platform-hr-service:a8bf560e39d7bee93d9b0791dd37af9661490c47` 的 9KB 分片在第 15 片连续三次 180 秒无响应，严格记录为不完整失败；改用 6KB 有效分片后，32K 上下文、单并发双跑完成 44/44 分片，耗时 1491/1442 秒，结果和运行签名稳定。两个人工 P1（硬编码 token、触发器名称不一致）均命中且定位准确，第三个 schema 快照删除候选为误报；scorecard 为 `gold=2`、`p0_p1_found=2`、`predicted_candidates=3`、`false_positive=1`、`repeat_stable=true`。该样本证明小分片改善完整性，但长提交仍有约 24 分钟/轮的尾延迟。
 
 同日为运行器加入本机 Ollama 并发锁并通过无模型回归：多个终端同时审查时后启动者 fail-closed，避免资源争用被误判为模型漏报；孤儿锁仅在严格校验后回收，不改变审查内容或 finding 可见性。
+
+2026-09-28：补充独立并发根因 `platform-erp-service:736ef17845a9a45e55a262d6d64ea81738773059`。人工金标为事务锁顺序反向导致的潜在死锁 P1；当前运行器两轮 5/5 分片完整，102/63 秒，结果哈希一致，1/1 命中、定位准确、0 误报，`repeat_stable=true`。
+
+同日补充 `platform-system:db93e1d23569727432fcde5e07b28719c0c5310f` 网关缓存自愈 clean 负例。两轮 6/6 分片完整，31/32 秒，输出哈希一致且无候选；人工未确认 P0/P1，作为 `gateway-cache-self-heal` holdout 负例，防止把受控缺失缓存修复误报为授权或租户隔离问题。

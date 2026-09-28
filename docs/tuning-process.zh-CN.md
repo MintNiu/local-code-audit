@@ -739,3 +739,9 @@ reserve 和 effective budget，方便后续复核。
 真实 `platform-hr-service:a8bf560e39d7bee93d9b0791dd37af9661490c47` 先用 9KB 分片复测，28 个分片在第 15 片连续三次 180 秒无响应，严格失败闭门（`output_complete=false`，不计分）。随后将有效分片降到 6KB，在 32K 上下文、单并发下完成 44/44 分片双跑，耗时 1491/1442 秒，结果 SHA-256 `657d67a8f59307480dbe1922a6c9bff5d2ba75558cc8d3f25fe447f5c5645046`，运行签名稳定。人工确认两个 P1：`nacos-config/platform-hr-service-dev.yml:152` 的硬编码 token、`sql/hr_assignment_history_integrity_upgrade.sql:33` 的触发器名称不一致；模型 2/2 命中且定位准确，第三个 schema 快照删除候选因 README 明确唯一初始化脚本而标为误报。正式 scorecard 为 `gold=2`、`p0_p1_found=2`、`predicted_candidates=3`、`false_positive=1`、`repeat_stable=true`。结论是“小分片能恢复大差异完整性，但尾延迟约 24 分钟/轮，不能作为日常默认预算”。
 
 同轮观察到多个终端同时启动本地审查会各自拉起 llama-server，造成上下文/内存争用并触发长尾。运行器新增 `/tmp` 下的进程锁：已有审查时后启动者以明确错误 fail-closed，孤儿锁只在内容严格符合预期时回收；新增 `evals/test-concurrency-lock.sh` 回归。该锁只约束本机 Ollama 审查并发，不改变 finding 过滤或模型提示词。
+
+### 2026-09-28：补充并发锁序与网关缓存自愈根因
+
+重新评测 `platform-erp-service:736ef17845a9a45e55a262d6d64ea81738773059` 的事务锁序样本。该提交与凭据、迁移、对象生命周期不同，人工金标为 `SalesReturnInspectionApplication` 先锁收货/退货资源、另一事务路径反向锁定的潜在死锁 P1。当前运行器两轮均 5/5 分片完整，耗时 102/63 秒，结果 SHA-256 均为 `938481a38fa87506033dff5fe8b61008dca611fd01eb10570e379e3d7352cc8f`；命中 1/1、定位准确、候选 1、误报 0，`repeat_stable=true`。
+
+另补充 `platform-system:db93e1d23569727432fcde5e07b28719c0c5310f` 网关规则缓存自愈负例。该提交只在派生缓存 Key 缺失时修复，已有快照不覆盖，Redis 异常不阻断启动；两轮 6/6 分片完整，耗时 31/32 秒，输出均为 `未发现阻塞问题`，SHA-256 为 `b35d4b877c3b061dcff681d2630acd32b619a1cda7ca0b11c436019a50b0aba7`，`gold=0`、候选 0、`repeat_stable=true`。它用于约束模型不要把“共享缓存自愈”误报成越权或跨租户问题。
