@@ -84,6 +84,52 @@ review_trace_file="${OLLAMA_REVIEW_TRACE_FILE:-}"
 chunk_budget_preflight_reserve_tokens=512
 active_request_body_file=""
 current_evidence_file=""
+ollama_lock_dir="${OLLAMA_REVIEW_LOCK_DIR:-${TMPDIR:-/tmp}/local-review-ollama.lock}"
+ollama_lock_acquired=false
+
+release_ollama_lock() {
+  [[ "$ollama_lock_acquired" == true ]] || return 0
+  if [[ -f "$ollama_lock_dir/pid" ]] && [[ "$(cat "$ollama_lock_dir/pid" 2>/dev/null || true)" == "$$" ]]; then
+    rm -f "$ollama_lock_dir/pid" 2>/dev/null || true
+    rmdir "$ollama_lock_dir" 2>/dev/null || true
+  fi
+  ollama_lock_acquired=false
+}
+
+acquire_ollama_lock() {
+  if mkdir "$ollama_lock_dir" 2>/dev/null; then
+    if ! printf '%s\n' "$$" >"$ollama_lock_dir/pid"; then
+      rmdir "$ollama_lock_dir" 2>/dev/null || true
+      echo "本地代码审查失败：无法写入 Ollama 并发锁。" >&2
+      return 75
+    fi
+    ollama_lock_acquired=true
+    return 0
+  fi
+
+  local owner_pid=""
+  if [[ -f "$ollama_lock_dir/pid" ]]; then
+    owner_pid="$(cat "$ollama_lock_dir/pid" 2>/dev/null || true)"
+  fi
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    echo "本地代码审查失败：已有 Ollama 审查进程正在运行（PID ${owner_pid}），为避免模型并发争用，本次请求 fail-closed。" >&2
+    return 75
+  fi
+
+  # Recover only an empty, stale lock directory. Any unexpected contents are
+  # left untouched and cause a fail-closed result instead of deleting data.
+  if [[ -f "$ollama_lock_dir/pid" ]] && rm -f "$ollama_lock_dir/pid" 2>/dev/null && rmdir "$ollama_lock_dir" 2>/dev/null; then
+    if mkdir "$ollama_lock_dir" 2>/dev/null; then
+      if printf '%s\n' "$$" >"$ollama_lock_dir/pid"; then
+        ollama_lock_acquired=true
+        return 0
+      fi
+      rmdir "$ollama_lock_dir" 2>/dev/null || true
+    fi
+  fi
+  echo "本地代码审查失败：Ollama 并发锁状态异常，拒绝在不确定状态下启动模型请求。" >&2
+  return 75
+}
 
 write_review_trace() {
   [[ -n "$review_trace_file" ]] || return 0
@@ -283,7 +329,8 @@ unstaged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-unstaged.XXXXXX")"
 untracked_file="$(mktemp "${TMPDIR:-/tmp}/local-review-untracked.XXXXXX")"
 base_file="$(mktemp "${TMPDIR:-/tmp}/local-review-base.XXXXXX")"
 changed_paths_nul_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths-nul.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file"' EXIT
+acquire_ollama_lock || exit $?
 review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 
 ensure_review_deadline() {
@@ -5531,7 +5578,7 @@ java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -5787,7 +5834,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
