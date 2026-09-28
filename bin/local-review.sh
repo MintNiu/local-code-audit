@@ -5045,7 +5045,7 @@ collect_migration_delete_preflight() {
     }
     function emit_file(    range, end_line, base) {
       if (!deleted || path == "" || path !~ /(^|\/)(sql|db)\/migration\/V[0-9]{8}[^\/]*\.sql$/) return
-      if (old_text !~ /Versioned[[:space:]]+migration|existing[[:space:]]+databases?|已有数据库|升级路径|数据库升级/) return
+      if (old_text !~ /Versioned[[:space:]]+migration|existing[[:space:]]+databases?|existing[[:space:]]+[A-Za-z0-9_-]+[[:space:]]+(database|db)|适用[：:][^\n]*(已有|existing)|已有数据库|升级路径|数据库升级/) return
       if (old_start <= 0) old_start = 1
       if (old_count <= 1) range = old_start
       else {

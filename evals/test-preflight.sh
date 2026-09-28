@@ -2830,7 +2830,7 @@ fi
 
 mkdir -p "$repo/sql/migration"
 cat >"$repo/sql/migration/V20260927__existing_database.sql" <<'EOF'
--- Versioned migration for existing databases.
+-- Migration applies to existing platform_file_db database.
 ALTER TABLE old_table ADD COLUMN uploaded_at TIMESTAMP;
 EOF
 git -C "$repo" add sql/migration/V20260927__existing_database.sql

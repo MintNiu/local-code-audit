@@ -730,3 +730,5 @@ reserve 和 effective budget，方便后续复核。
 该修复把一次可复现的 SQL 注入漏报转成可定位、可重复的确定性证据，但不把单一 SQL 形状外推为全部 SQL 安全召回；阶段 1 仍未达到至少 20 个独立 holdout P0/P1 根因、90% 召回和 90% 定位门槛。
 
 同轮五轮合成门禁还捕获三类 clean 信息漂移：`java-token-header` 的“安全边界规则”解释、未跟踪文件建议 `git add`、以及生成列 `GENERATED ALWAYS ... STORED` 的合法性说明。过滤器只在段落明确表达“无需修复/影响无/合法”且没有独立安全或兼容性证据时移除；具体凭据、SQL、租户、权限和构建问题仍保留。最终门禁为 7 类正例各 5/5、6 类 clean 共 30/30、预签名 5/5，所有哈希稳定，显式截断仍失败闭门；当前 tuned SYSTEM SHA 仍为 `b2763a461e0d2a9f46175a11a3aa35a3163da321860a594887378ab63cd0fa65`。
+
+同日重跑 `platform-file:896dca8dd1e5629905db1c0dc416b9deddf2c88c` 版本化迁移删除留出：两轮均 3/3 分片完整、39 秒、结果哈希和运行签名一致。人工将模型报告的两个文件范围段聚合为同一个 `versioned-migration-delete` P1，scorecard 为 `gold=1`、`p0_p1_found=1`、`predicted_candidates=2`、`false_positive=1`、`location_accurate=1`、`repeat_stable=true`。复盘发现真实 SQL 注释使用“适用：已有 platform_file_db”，旧预检关键词没有覆盖；现已扩展为只识别明确的“已有/适用 existing <database|db>”语义，普通 SQL 删除和非版本化脚本仍不触发。
