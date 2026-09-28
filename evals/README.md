@@ -190,6 +190,8 @@ scorecard 汇总器也有独立的输入校验回归：
 
 受控稳定性记录：`num_ctx=16384`、`num_predict=2048`、关闭重试的 `SYNTHETIC_REVIEW_RUNS=5 ./evals/run-synthetic.sh` 已通过，7 类正例各 5/5、clean 30/30、预签名 5/5，输出哈希稳定；个人高性能入口仍默认 32K，资源不足时只对上述单文件单预检形状恢复。
 
+最近三组真实 clean holdout 也已记录：`platform-job:0885d7d8`（密码 CSRF 修复，2/2 分片、44 秒）、`platform-job:e5a84a1b`（bigint 兼容性修复，1/1 分片、34 秒）和 `platform-ai-service:ddc7b767`（SSE 错误内容协商修复，3/3 分片、27 秒）。三组均完整返回 clean，并经人工确认没有当前提交引入的 P0/P1；它们只用于跨功能簇精度与稳定性覆盖，不计入阶段一召回分母。
+
 中文路径回归：Git diff 使用 `core.quotePath=false`，使包含中文文件名的分片头与 NUL 安全路径索引保持一致；`evals/test-sharding.sh` 包含无模型中文文件名分片夹具。真实 `platform-hr-service:a8bf560` 复核中 28 个分片均成功，避免因路径显示编码差异把完整审查误判为失败。
 
 租户子查询误报回归：当变更的 `EXISTS`/子查询已经显式比较内外层 `tenant_id` 时，确定性过滤器会移除泛化的“缺少租户隔离”段落，但保留别名错误、权限、SQL 注入等独立问题。该边界未写入 SYSTEM，因为实测会让预签名票据夹具超过请求超时；当前 tuned SYSTEM 规则保持上一版，证据门和回归测试独立承担该降噪职责。
