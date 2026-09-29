@@ -44,6 +44,9 @@ cat >"$repo/config/rewritten.yml" <<'EOF'
 feature:
   enabled: false
 EOF
+cat >"$repo/config/mode.yml" <<'EOF'
+mode: plain
+EOF
 cat >"$repo/sql/migration/V20260928__same.sql" <<'EOF'
 -- 适用：已有 platform_file_db
 ALTER TABLE file_object ADD COLUMN reviewed tinyint;
@@ -55,6 +58,8 @@ mkdir -p "$repo/config/migration"
 git -C "$repo" mv config/application.yml config/migration/application.yml
 git -C "$repo" mv config/rewritten.yml config/migration/rewritten.yml
 printf '  enabled: true\n' >>"$repo/config/migration/rewritten.yml"
+git -C "$repo" mv config/mode.yml config/migration/mode.yml
+chmod 755 "$repo/config/migration/mode.yml"
 mkdir -p "$repo/sql/migration/archive"
 git -C "$repo" mv sql/migration/V20260928__same.sql sql/migration/archive/V20260928__same.sql
 
@@ -80,6 +85,10 @@ grep -F -- 'config/application.yml -> config/migration/application.yml' "$captur
 }
 if grep -F -- 'unstaged：config/rewritten.yml -> config/migration/rewritten.yml' "$capture" >/dev/null; then
   echo 'content-changing rename was incorrectly marked as exact R100' >&2
+  exit 1
+fi
+if grep -F -- 'unstaged：config/mode.yml -> config/migration/mode.yml' "$capture" >/dev/null; then
+  echo 'mode-changing rename was incorrectly marked as exact R100' >&2
   exit 1
 fi
 grep -F -- '不得把旧路径删除本身当作独立迁移缺陷' "$capture" >/dev/null || {

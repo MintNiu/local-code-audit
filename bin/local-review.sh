@@ -457,13 +457,13 @@ is_safe_repo_relative_path() {
 
 collect_exact_rename_context() {
   local scope="$1"
-  local raw_file status old_path new_path ignored_path
+  local raw_file raw_record old_mode new_mode old_sha new_sha status old_path new_path ignored_path
   raw_file="$(mktemp "${TMPDIR:-/tmp}/local-review-rename-status.XXXXXX")"
 
   case "$scope" in
     staged)
       if ! git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" \
-        diff --no-ext-diff --no-textconv --find-renames=100% --name-status -z --cached -- >"$raw_file"; then
+        diff --no-ext-diff --no-textconv --find-renames=100% --raw -z --cached -- >"$raw_file"; then
         rm -f "$raw_file"
         echo "本地代码审查失败：无法读取暂存区的 Git 重命名状态。" >&2
         return 1
@@ -471,7 +471,7 @@ collect_exact_rename_context() {
       ;;
     unstaged)
       if ! git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" \
-        diff --no-ext-diff --no-textconv --find-renames=100% --name-status -z -- >"$raw_file"; then
+        diff --no-ext-diff --no-textconv --find-renames=100% --raw -z -- >"$raw_file"; then
         rm -f "$raw_file"
         echo "本地代码审查失败：无法读取工作区的 Git 重命名状态。" >&2
         return 1
@@ -479,7 +479,7 @@ collect_exact_rename_context() {
       ;;
     base)
       if ! git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" \
-        diff --no-ext-diff --no-textconv --find-renames=100% --name-status -z "$base_ref...HEAD" -- >"$raw_file"; then
+        diff --no-ext-diff --no-textconv --find-renames=100% --raw -z "$base_ref...HEAD" -- >"$raw_file"; then
         rm -f "$raw_file"
         echo "本地代码审查失败：无法读取基线差异的 Git 重命名状态。" >&2
         return 1
@@ -493,8 +493,21 @@ collect_exact_rename_context() {
   esac
 
   exec 3<"$raw_file"
-  while IFS= read -r -d '' status <&3; do
-    if [[ "$status" == R100 ]]; then
+  while IFS= read -r -d '' raw_record <&3; do
+    old_mode=""
+    new_mode=""
+    old_sha=""
+    new_sha=""
+    status=""
+    read -r old_mode new_mode old_sha new_sha status <<<"$raw_record"
+    old_mode="${old_mode#:}"
+    if [[ -z "$old_mode" || -z "$new_mode" || -z "$old_sha" || -z "$new_sha" || -z "$status" ]]; then
+      exec 3<&-
+      rm -f "$raw_file"
+      echo "本地代码审查失败：Git 原始重命名记录格式不完整。" >&2
+      return 1
+    fi
+    if [[ "$status" == R100 && "$old_mode" == "$new_mode" ]]; then
       if ! IFS= read -r -d '' old_path <&3 || ! IFS= read -r -d '' new_path <&3; then
         exec 3<&-
         rm -f "$raw_file"
