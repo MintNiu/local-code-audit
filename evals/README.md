@@ -144,6 +144,7 @@ manifest SHA-256、commit 和 parent，防止清单漂移后把旧结果绑定�
 
 该入口同时运行独立的配置报告保留测试 `bash evals/test-config-findings.sh`。
 证据相关输出过滤另有独立回归 `bash evals/test-filter-evidence.sh`，覆盖同一 Mapper 中不同查询、已删除租户条件、别名错误以及真实 token 日志写入，防止降噪规则把独立安全问题静默成 clean。`bash evals/test-concurrency-lock.sh` 验证同一台机器上的 Ollama 审查并发会 fail-closed，避免多个终端争用模型资源。
+`bash evals/test-rename-evidence.sh` 验证 Git `R100` 精确重命名证据进入模型请求，内容不变的路径移动不会被误报为旧文件删除；它不豁免内容发生变化的改写型重命名。涉及 Ollama 的测试必须串行执行，否则并发锁会按设计拒绝后启动的请求。
 它使用独立临时仓库和固定假响应，验证真实端口反例不会因为“可能”一词被隐藏，
 以及未知路径、越界行号和缺字段仍会显式失败。它检验输出链路，不证明模型能发现这些问题。
 夹具必须在断言时仍有待审查变更，不能复用被前序测试提交过的配置文件来证明过滤安全。

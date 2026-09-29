@@ -140,6 +140,8 @@ Run the public synthetic regression gate before changing prompts or runtime opti
 ./evals/run-synthetic.sh
 ```
 
+For Git path-move semantics, run `bash evals/test-rename-evidence.sh`. It verifies that only an exact `R100` rename (identical content) receives anti-duplicate migration evidence; a rewritten rename remains an ordinary review target. Ollama-backed regressions should run serially because the local single-instance lock intentionally rejects a concurrent second review.
+
 The repository also runs the model-independent regression suites in GitHub Actions on macOS for every push and pull request. This catches parser, sharding, aggregation, label-migration, and runtime-verifier regressions without requiring Ollama or exposing private review data.
 
 The current gate is intentionally strict: it fails on extra P0–P3 findings, contradictory output, API errors, timeouts, or truncation. See [evals/goal.md](evals/goal.md) for the acceptance target and current status.

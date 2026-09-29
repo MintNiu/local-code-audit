@@ -329,7 +329,8 @@ unstaged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-unstaged.XXXXXX")"
 untracked_file="$(mktemp "${TMPDIR:-/tmp}/local-review-untracked.XXXXXX")"
 base_file="$(mktemp "${TMPDIR:-/tmp}/local-review-base.XXXXXX")"
 changed_paths_nul_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths-nul.XXXXXX")"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file"' EXIT
+exact_rename_context_file="$(mktemp "${TMPDIR:-/tmp}/local-review-exact-renames.XXXXXX")"
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file"' EXIT
 acquire_ollama_lock || exit $?
 review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 
@@ -452,6 +453,69 @@ is_safe_repo_relative_path() {
   [[ "$path_value" != *$'\n'* && "$path_value" != *$'\r'* ]] || return 1
   [[ "$path_value" != ../* && "$path_value" != */../* && "$path_value" != */.. ]] || return 1
   return 0
+}
+
+collect_exact_rename_context() {
+  local scope="$1"
+  local raw_file status old_path new_path ignored_path
+  raw_file="$(mktemp "${TMPDIR:-/tmp}/local-review-rename-status.XXXXXX")"
+
+  case "$scope" in
+    staged)
+      if ! git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" \
+        diff --no-ext-diff --no-textconv --find-renames=100% --name-status -z --cached -- >"$raw_file"; then
+        rm -f "$raw_file"
+        echo "本地代码审查失败：无法读取暂存区的 Git 重命名状态。" >&2
+        return 1
+      fi
+      ;;
+    unstaged)
+      if ! git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" \
+        diff --no-ext-diff --no-textconv --find-renames=100% --name-status -z -- >"$raw_file"; then
+        rm -f "$raw_file"
+        echo "本地代码审查失败：无法读取工作区的 Git 重命名状态。" >&2
+        return 1
+      fi
+      ;;
+    base)
+      if ! git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" \
+        diff --no-ext-diff --no-textconv --find-renames=100% --name-status -z "$base_ref...HEAD" -- >"$raw_file"; then
+        rm -f "$raw_file"
+        echo "本地代码审查失败：无法读取基线差异的 Git 重命名状态。" >&2
+        return 1
+      fi
+      ;;
+    *)
+      rm -f "$raw_file"
+      echo "本地代码审查失败：未知 Git 重命名状态范围: $scope" >&2
+      return 1
+      ;;
+  esac
+
+  exec 3<"$raw_file"
+  while IFS= read -r -d '' status <&3; do
+    if [[ "$status" == R100 ]]; then
+      if ! IFS= read -r -d '' old_path <&3 || ! IFS= read -r -d '' new_path <&3; then
+        exec 3<&-
+        rm -f "$raw_file"
+        echo "本地代码审查失败：Git R100 重命名记录缺少完整路径。" >&2
+        return 1
+      fi
+      if is_safe_repo_relative_path "$old_path" && is_safe_repo_relative_path "$new_path"; then
+        printf '%s：%s -> %s\n' "$scope" "$old_path" "$new_path" >>"$exact_rename_context_file"
+      fi
+    elif [[ "$status" == R* || "$status" == C* ]]; then
+      # Consume both paths for non-identical renames and copies, but do not
+      # present them as exact evidence: a partial rewrite may contain a real
+      # compatibility or migration regression that still needs model review.
+      IFS= read -r -d '' ignored_path <&3 || true
+      IFS= read -r -d '' ignored_path <&3 || true
+    else
+      IFS= read -r -d '' ignored_path <&3 || true
+    fi
+  done
+  exec 3<&-
+  rm -f "$raw_file"
 }
 
 has_unsafe_line_path_chars() {
@@ -1758,6 +1822,16 @@ while IFS= read -r -d '' path; do
   fi
 done <"$changed_paths_nul_file"
 
+# The review diff intentionally uses --no-renames so that both sides of a
+# moved file remain visible to the model.  Add a separate, narrow R100 signal
+# so an unchanged path move is not mistaken for a deletion plus a new file.
+collect_exact_rename_context staged
+collect_exact_rename_context unstaged
+if [[ -n "$base_ref" ]]; then
+  collect_exact_rename_context base
+fi
+LC_ALL=C sort -u -o "$exact_rename_context_file" "$exact_rename_context_file"
+
 ensure_review_deadline "Git 差异收集完成" || exit 124
 
 if [[ -n "$base_ref" && ! -s "$base_file" && ! -s "$staged_file" && ! -s "$unstaged_file" && ! -s "$untracked_file" ]]; then
@@ -1878,6 +1952,8 @@ MyBatis 原始替换预检边界：如果输入包含“MyBatis Mapper 将表达
 
 数据库迁移边界：删除版本化的 `sql/migration`/`db/migration` 升级脚本，且差异没有提供等价替代迁移或自动迁移框架证据时，必须检查已有数据库升级路径；若 README/部署说明同时移除已有库迁移步骤，这是可由差异证明的 P1 兼容性/部署阻断。不要把空库初始化脚本当作已有库升级替代。
 
+Git 精确重命名边界：如果输入包含“Git 精确重命名证据”段，并且某条记录明确标为 R100（旧路径与新路径内容 100% 相同），必须把它视为同一文件的路径迁移。不得仅因为 `--no-renames` 差异同时显示旧路径删除和新路径新增，就报告旧文件被删除、版本化迁移脚本缺失或同一内容被重复迁移；仍可检查新路径的引用、构建和兼容性问题，但这些必须有新路径或其他当前差异中的独立证据。
+
 凭据配置边界：如果差异把 AccessKey、Secret、Token、密码或会话秘密从环境变量/占位符改成字面量并提交到配置文件，尤其配置仍指向真实 endpoint、bucket 或其他外部资源，这是可由差异直接证明的 P1（凭据仍有效时可按组织威胁模型升级 P0）泄漏；应报告配置文件行号、暴露方式及轮换/移除建议。不要因为文件名含 localhost 或 profile 就自动豁免。只有差异确实展示了字面量秘密或其进入日志、持久化、URL/外部边界时才报告；普通内部 HTTP header 传递 token 仍按前述安全负例处理。
 
 EOF
@@ -1888,6 +1964,12 @@ prompt_prefix_common="$(
     # The model only needs a stable repository label; avoid leaking or varying
     # absolute paths because random temp paths can change generation behavior.
     printf '仓库: <本地 Git 仓库>\n'
+    if [[ -s "$exact_rename_context_file" ]]; then
+      printf '\n--- Git 精确重命名证据 ---\n'
+      printf '以下路径由 Git 判定为 R100：旧路径与新路径内容 100%% 相同，只能按同一文件的路径迁移处理：\n'
+      cat "$exact_rename_context_file"
+      printf '精确重命名证据结束；仍须检查新路径引用、构建和兼容性，但不得把旧路径删除本身当作独立迁移缺陷。\n'
+    fi
     if [[ -f "$repo_root/AGENTS.md" ]] && ! path_has_symlink_component "AGENTS.md"; then
       printf '\n--- 项目规则 AGENTS.md ---\n'
       cat "$repo_root/AGENTS.md"
@@ -5578,7 +5660,7 @@ java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {

@@ -112,6 +112,8 @@ Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最�
 ./evals/run-synthetic.sh
 ```
 
+需要单独验证 Git 路径迁移语义时运行 `bash evals/test-rename-evidence.sh`；它只对内容完全相同的 `R100` 重命名提供防误报证据，改写型重命名仍按普通差异审查。涉及 Ollama 的回归请串行执行，本机并发锁会按设计拒绝同时启动的第二个审查。
+
 仓库还会在 GitHub Actions 的 macOS 环境中，对每次 push 和 Pull Request 自动运行不依赖 Ollama 的回归套件，覆盖预检、分片、聚合、标签迁移和运行态校验；不会上传模型输出或私有审计数据。这样解析器规则变更不会等到本地再次使用时才暴露回归。
 
 当前门槛故意设置得严格：出现额外 P0～P3 问题、矛盾输出、API 错误、超时或截断都会失败。验收目标和当前状态见 [evals/goal.md](evals/goal.md)。
