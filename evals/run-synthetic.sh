@@ -96,7 +96,7 @@ run_review() {
       OLLAMA_REVIEW_TOP_K="${PRESIGNED_REVIEW_TOP_K:-1}" \
       OLLAMA_REVIEW_TOP_P="${PRESIGNED_REVIEW_TOP_P:-1}" \
         "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
-    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" ]]; then
+    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" || "$name" == "java-open-redirect-safe" || "$name" == "java-cors-safe" || "$name" == "java-weak-password-hash-safe" ]]; then
       # These new clean security boundaries need only the canonical marker.
       # Limit optional prose so a local model cannot spend the whole timeout
       # repeating non-actionable parser/query commentary; done=true and the
@@ -244,6 +244,42 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "redirect" ]]; then
+      if ! grep -Eiq '开放重定向|open redirect|任意跳转|不可信.*重定向|redirect' "$output_file"; then
+        echo "$name run $run missed the expected open-redirect risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 open-redirect finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "cors" ]]; then
+      if ! grep -Eiq 'CORS|跨域|allowedOrigin|allowCredentials|任意来源|Origin' "$output_file"; then
+        echo "$name run $run missed the expected CORS risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 CORS finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "password-hash" ]]; then
+      if ! grep -Eiq 'MD5|SHA-?1|弱哈希|密码.*哈希|password.*hash|bcrypt|PBKDF2|Argon2' "$output_file"; then
+        echo "$name run $run missed the expected weak-password-hash risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 weak-password-hash finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     elif [[ "$expected_findings" == "migration" ]]; then
       if ! grep -Eiq 'migration|迁移|已有库|升级路径|数据库' "$output_file"; then
         echo "$name run $run missed the expected migration-upgrade risk: $output_file" >&2
@@ -337,6 +373,12 @@ run_review java-xxe xxe
 run_review java-xxe-safe 0
 run_review java-idor idor
 run_review java-idor-safe 0
+run_review java-open-redirect redirect
+run_review java-open-redirect-safe 0
+run_review java-cors cors
+run_review java-cors-safe 0
+run_review java-weak-password-hash password-hash
+run_review java-weak-password-hash-safe 0
 run_review java-maintenance-safe 0
 run_review java-lombok-properties-safe 0
 run_review java-generated-column-safe 0
@@ -362,4 +404,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: positives=$((runs * 14)), divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, sql_injection=$runs, xxe=$runs, idor=$runs, clean=$((runs * 13)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: positives=$((runs * 17)), divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, sql_injection=$runs, xxe=$runs, idor=$runs, open_redirect=$runs, cors=$runs, weak_password_hash=$runs, clean=$((runs * 16)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"

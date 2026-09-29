@@ -979,6 +979,18 @@ filter_unsupported_shard_findings() {
           path_evidence ~ /ACCESS_EXTERNAL_(DTD|SCHEMA)/ &&
           path_evidence ~ /getContentLengthLong/ &&
           block !~ /XXE|外部实体.*(启用|允许)|绕过|漏洞|读取本地文件|访问内网/) invalid = 1
+      # A concrete allowed origin, methods, headers, and credentials setting
+      # is a safe CORS boundary. Drop only generic information-level advice
+      # that claims the boundary is missing; wildcard-origin findings remain
+      # visible because the source evidence still contains the wildcard.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /CORS|跨域|Origin|allowedOrigin|allowCredentials/ &&
+          block ~ /缺少|未明确|没有|可能.*风险|凭据.*泄露/ &&
+          path_evidence ~ /allowedOrigins[[:space:]]*\(/ &&
+          path_evidence !~ /allowedOriginPatterns[[:space:]]*\([[:space:]]*["\047]\*["\047]/ &&
+          path_evidence ~ /allowedMethods[[:space:]]*\(/ &&
+          path_evidence ~ /allowedHeaders[[:space:]]*\(/ &&
+          block !~ /任意来源|任意 Origin|通配符|绕过|漏洞|越权|跨站读取/) invalid = 1
       # Some clean shards use a fully formed information paragraph instead of
       # the canonical marker.  Normalize only the explicit no-finding shape;
       # any concrete security, tenancy, permission, build, or compatibility
@@ -1736,6 +1748,96 @@ filter_idor_preflight_duplicates() {
       if (block == "") return
       idor = block ~ /IDOR|对象级|裸对象 ID|裸 ID|越权|跨租户|当前用户|tenantId|授权/
       if (!(idor && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
+filter_open_redirect_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '不可信跳转目标直接进入重定向响应' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-open-redirect-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|命令注入|凭据|密钥|密码|CORS|跨域|反序列化|XXE|外部实体|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    function flush() {
+      if (block == "") return
+      redirect = tolower(block) ~ /开放重定向|open redirect|不可信跳转|任意跳转|重定向目标|redirectview|sendredirect|location\(/
+      if (!(redirect && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
+filter_cors_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq 'CORS 允许任意 Origin' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-cors-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|命令注入|凭据|密钥|密码|开放重定向|反序列化|XXE|外部实体|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    function flush() {
+      if (block == "") return
+      cors = block ~ /CORS|跨域|allowedOrigin|allowCredentials|任意来源|Origin/
+      if (!(cors && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
+filter_weak_password_hash_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '密码直接使用快速哈希算法' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-weak-password-hash-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|命令注入|凭据泄露|CORS|跨域|开放重定向|反序列化|XXE|外部实体|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    function flush() {
+      if (block == "") return
+      weak_hash = block ~ /MD5|SHA-?1|弱哈希|密码.*哈希|password.*hash|快速哈希/
+      if (!(weak_hash && !has_independent_root(block))) {
         if (printed) printf "\n"
         printf "%s", block
         printed = 1
@@ -2953,6 +3055,9 @@ merge_preflight_findings() {
     filter_unsafe_deserialization_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_xxe_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_idor_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_open_redirect_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_cors_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_weak_password_hash_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_mybatis_raw_substitution_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
@@ -4384,6 +4489,248 @@ collect_idor_preflight() {
   done <"$candidates"
   rm -f "$candidates"
   dedup_preflight_blocks "$output_file"
+}
+
+collect_open_redirect_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # Only flag a redirect response whose destination is directly derived from
+  # an HTTP parameter. A current-source check is required so an explicit
+  # scheme/host allowlist remains a clean boundary; ordinary internal
+  # redirects and fixed routes stay model-only.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-open-redirect-candidates.XXXXXX")"
+  awk '
+    function flush_hunk() {
+      if (path != "" && path ~ /\.java$/ && sink_line > 0 && sink_added && route_seen && input_seen) {
+        printf "%s\t%d\n", path, sink_line
+      }
+    }
+    /^diff --git / {
+      flush_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_hunk()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      flush_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      sink_line = 0
+      sink_added = 0
+      route_seen = 0
+      input_seen = 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        if (text ~ /@(Get|Post|Put|Delete|Patch|Request)Mapping[[:space:]]*\(/) route_seen = 1
+        if (text ~ /@RequestParam|String[[:space:]]+(next|target|returnUrl|redirectUrl)/) input_seen = 1
+        if (text ~ /location[[:space:]]*\([[:space:]]*URI[[:space:]]*\.create[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)/ ||
+            text ~ /sendRedirect[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)/ ||
+            text ~ /new[[:space:]]+RedirectView[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)/) {
+          if (sink_line == 0) sink_line = line_no
+          if (prefix == "+") sink_added = 1
+        }
+        line_no++
+      }
+    }
+    END { flush_hunk() }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! grep -Eq '@(Get|Post|Put|Delete|Patch|Request)Mapping[[:space:]]*\(' "$source_file" ||
+       ! grep -Eq '@RequestParam|String[[:space:]]+(next|target|returnUrl|redirectUrl)' "$source_file" ||
+       ! grep -Eq 'location[[:space:]]*\([[:space:]]*URI[[:space:]]*\.create[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)|sendRedirect[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)|new[[:space:]]+RedirectView[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)' "$source_file"; then
+      continue
+    fi
+    if grep -Eq 'allowed[_-]?hosts?|allowed[_-]?origins?|getHost\(\)|getScheme\(\)|isAllowedRedirect|validateRedirect|sameOrigin|trustedRedirect' "$source_file"; then
+      continue
+    fi
+    printf 'P1 %s:%s - 不可信跳转目标直接进入重定向响应，存在开放重定向风险。\n影响：攻击者可把登录后跳转或站内链接改成恶意站点，用于钓鱼、令牌转发或绕过用户对目标站点的信任判断。\n修复建议：只允许相对路径或严格校验 URI 的 scheme、host、port 和规范化路径；使用固定路由映射，不要直接信任请求参数作为 Location。\n验证方式：使用外部 HTTPS、userinfo、协议相对 URL、编码和双重跳转输入测试，确认所有非允许目标在生成响应前被拒绝。\n\n' \
+      "$candidate_path" "$candidate_line" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_cors_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # `allowedOriginPatterns("*")` combined with credentials is a high
+  # confidence CORS boundary failure in Spring MVC: the server can reflect
+  # arbitrary origins while allowing cookies/Authorization. Require both
+  # calls in the same changed Java file and skip explicit origin allowlists.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-cors-candidates.XXXXXX")"
+  awk '
+    function flush_hunk() {
+      if (path != "" && path ~ /\.java$/ && wildcard_line > 0 && credential_line > 0 && (wildcard_added || credential_added)) {
+        line = (wildcard_added ? wildcard_line : credential_line)
+        printf "%s\t%d\n", path, line
+      }
+    }
+    /^diff --git / {
+      flush_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_hunk()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      flush_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      wildcard_line = 0
+      credential_line = 0
+      wildcard_added = 0
+      credential_added = 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        if (text ~ /allowedOriginPatterns[[:space:]]*\([[:space:]]*["\047]\*["\047][[:space:]]*\)/) {
+          wildcard_line = line_no
+          if (prefix == "+") wildcard_added = 1
+        }
+        if (text ~ /allowCredentials[[:space:]]*\([[:space:]]*true[[:space:]]*\)/) {
+          credential_line = line_no
+          if (prefix == "+") credential_added = 1
+        }
+        line_no++
+      }
+    }
+    END { flush_hunk() }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    grep -Eq 'allowedOriginPatterns[[:space:]]*\([[:space:]]*["\047]\*["\047][[:space:]]*\)' "$source_file" || continue
+    grep -Eq 'allowCredentials[[:space:]]*\([[:space:]]*true[[:space:]]*\)' "$source_file" || continue
+    printf 'P1 %s:%s - CORS 允许任意 Origin 且同时开启凭据，可能把 Cookie 或 Authorization 暴露给任意恶意站点。\n影响：攻击者控制的网页可跨域读取带用户身份的响应，导致账户数据泄露或越权操作。\n修复建议：只配置明确的受信 Origin 白名单；仅在确有必要时开启凭据，并限制方法、请求头和资源路径。\n验证方式：从未信任 Origin 发起带凭据请求，确认响应不返回允许该 Origin 的 CORS 头；从受信 Origin 验证必要接口仍可正常调用。\n\n' \
+      "$candidate_path" "$candidate_line" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_weak_password_hash_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # Only flag a newly added fast digest in a Java file that visibly hashes a
+  # password. This intentionally excludes generic checksums, signatures, and
+  # migration fingerprints; a password-specific source boundary is required.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-weak-password-hash-candidates.XXXXXX")"
+  awk '
+    function flush_hunk() {
+      if (path != "" && path ~ /\.java$/ && sink_line > 0 && sink_added && password_seen) {
+        printf "%s\t%d\n", path, sink_line
+      }
+    }
+    /^diff --git / {
+      flush_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_hunk()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      flush_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      sink_line = 0
+      sink_added = 0
+      password_seen = 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        if (tolower(text) ~ /password|passwd|密码/) password_seen = 1
+        if (text ~ /MessageDigest[[:space:]]*\.getInstance[[:space:]]*\([[:space:]]*["\047](MD5|SHA-?1)["\047][[:space:]]*\)/) {
+          if (sink_line == 0) sink_line = line_no
+          if (prefix == "+") sink_added = 1
+        }
+        line_no++
+      }
+    }
+    END { flush_hunk() }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    grep -Eqi 'password|passwd|密码' "$source_file" || continue
+    grep -Eq 'MessageDigest[[:space:]]*\.getInstance[[:space:]]*\([[:space:]]*["\047](MD5|SHA-?1)["\047][[:space:]]*\)' "$source_file" || continue
+    if grep -Eqi 'BCrypt|Argon2|PBKDF2|SCrypt|scrypt|PasswordEncoder' "$source_file"; then
+      continue
+    fi
+    printf '%s\n\n' \
+      "P1 $candidate_path:$candidate_line - 密码直接使用快速哈希算法（MD5/SHA-1），无法提供抗暴力破解所需的慢速、带盐口令存储保护。" \
+      "影响：攻击者取得数据库哈希后可用彩虹表或高吞吐 GPU 快速离线猜解密码，并复用用户凭据访问其他系统。" \
+      "修复建议：使用 BCrypt、scrypt、Argon2id 或 PBKDF2 等专用口令哈希，采用库默认随机 salt 和经过基准校准的工作因子；不要自行拼接固定 salt。" \
+      "验证方式：生成并验证口令哈希，确认算法参数满足当前安全基线，并使用旧哈希迁移/重置测试验证登录兼容性。" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+can_return_weak_password_hash_preflight_on_model_failure() {
+  local preflight_file="$1"
+  local paths_file="$2"
+  local path_count finding_count
+
+  [[ -s "$preflight_file" && -s "$paths_file" ]] || return 1
+  grep -Fq '密码直接使用快速哈希算法' "$preflight_file" || return 1
+  path_count="$(awk 'NF { count++ } END { print count + 0 }' "$paths_file")"
+  [[ "$path_count" -eq 1 ]] || return 1
+  grep -Eq '\.java$' "$paths_file" || return 1
+  finding_count="$(grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$preflight_file" || true)"
+  [[ "$finding_count" -eq 1 ]] || return 1
+  return 0
 }
 
 collect_url_prefix_whitelist_preflight() {
@@ -6320,6 +6667,9 @@ collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflig
 collect_unsafe_deserialization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxe_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_idor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"
@@ -6380,7 +6730,13 @@ if [[ "$needs_split" != true ]]; then
     cat "$build_preflight_file"
     exit 0
   fi
-  if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 && "$initial_status" -ne 13 ]]; then
+  if [[ "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 12 || "$initial_status" -eq 13 ]] &&
+     can_return_weak_password_hash_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file"; then
+    echo "本地代码审查：模型请求未完成，但当前差异仅包含一个已由确定性预检完整证明的弱密码哈希问题；返回该 P1，未将模型半截输出视为完整结果。" >&2
+    cat "$build_preflight_file"
+    exit 0
+  fi
+  if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 && "$initial_status" -ne 12 && "$initial_status" -ne 13 ]]; then
     emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
     exit 1
   fi

@@ -3343,6 +3343,98 @@ grep -F '跨事务/行锁文本索引扫描超时或失败' "$fixture_root/lock-
   exit 1
 }
 
+# High-confidence security boundaries that are easy for a small model to miss
+# are covered by deterministic preflight plus safe counterparts. The fake
+# Ollama response stays clean so these assertions exercise the wrapper rules.
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+rm -f "$fake_bin/perl"
+open_redirect_repo="$fixture_root/open-redirect-repo"
+mkdir -p "$open_redirect_repo/src"
+git -C "$open_redirect_repo" init -q
+git -C "$open_redirect_repo" config user.email test@example.invalid
+git -C "$open_redirect_repo" config user.name preflight-open-redirect-test
+cat >"$open_redirect_repo/src/RedirectController.java" <<'EOF'
+import java.net.URI;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+
+final class RedirectController {
+    @GetMapping("/continue")
+    ResponseEntity<Void> continueTo(@RequestParam String next) {
+        return ResponseEntity.status(302).location(URI.create("/home")).build();
+    }
+}
+EOF
+git -C "$open_redirect_repo" add .
+git -C "$open_redirect_repo" commit -qm base
+sed -i.bak 's#URI.create("/home")#URI.create(next)#' "$open_redirect_repo/src/RedirectController.java"
+rm -f "$open_redirect_repo/src/RedirectController.java.bak"
+open_redirect_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$open_redirect_repo")"
+printf '%s\n' "$open_redirect_output" | grep -F '不可信跳转目标直接进入重定向响应' >/dev/null || {
+  echo 'missing open-redirect preflight' >&2
+  printf '%s\n' "$open_redirect_output" >&2
+  exit 1
+}
+
+cors_repo="$fixture_root/cors-repo"
+mkdir -p "$cors_repo/src"
+git -C "$cors_repo" init -q
+git -C "$cors_repo" config user.email test@example.invalid
+git -C "$cors_repo" config user.name preflight-cors-test
+cat >"$cors_repo/src/CorsConfig.java" <<'EOF'
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
+
+final class CorsConfig {
+    void configure(CorsRegistry registry) {
+        registry.addMapping("/**").allowedOrigins("https://app.example.com").allowCredentials(true);
+    }
+}
+EOF
+git -C "$cors_repo" add .
+git -C "$cors_repo" commit -qm base
+sed -i.bak 's#allowedOrigins("https://app.example.com")#allowedOriginPatterns("*")#' "$cors_repo/src/CorsConfig.java"
+rm -f "$cors_repo/src/CorsConfig.java.bak"
+cors_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$cors_repo")"
+printf '%s\n' "$cors_output" | grep -F 'CORS 允许任意 Origin' >/dev/null || {
+  echo 'missing wildcard-credentials CORS preflight' >&2
+  printf '%s\n' "$cors_output" >&2
+  exit 1
+}
+
+weak_hash_repo="$fixture_root/weak-password-hash-repo"
+mkdir -p "$weak_hash_repo/src"
+git -C "$weak_hash_repo" init -q
+git -C "$weak_hash_repo" config user.email test@example.invalid
+git -C "$weak_hash_repo" config user.name preflight-weak-password-hash-test
+cat >"$weak_hash_repo/src/PasswordHasher.java" <<'EOF'
+import java.security.MessageDigest;
+
+final class PasswordHasher {
+    String hash(String password) throws Exception {
+        return MessageDigest.getInstance("SHA-256").digest(password.getBytes()).toString();
+    }
+}
+EOF
+git -C "$weak_hash_repo" add .
+git -C "$weak_hash_repo" commit -qm base
+sed -i.bak 's#"SHA-256"#"MD5"#' "$weak_hash_repo/src/PasswordHasher.java"
+rm -f "$weak_hash_repo/src/PasswordHasher.java.bak"
+weak_hash_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$weak_hash_repo")"
+printf '%s\n' "$weak_hash_output" | grep -F '密码直接使用快速哈希算法' >/dev/null || {
+  echo 'missing weak-password-hash preflight' >&2
+  printf '%s\n' "$weak_hash_output" >&2
+  exit 1
+}
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.
