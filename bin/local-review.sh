@@ -1634,6 +1634,36 @@ filter_direct_address_ssrf_preflight_duplicates() {
   mv "$filtered_file" "$findings_file"
 }
 
+filter_unsafe_deserialization_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '不可信 HTTP 输入直接进入 Java 原生反序列化' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deserialization-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|命令注入|凭据|密钥|密码|XSS|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    function flush() {
+      if (block == "") return
+      deserialization = block ~ /反序列化|ObjectInputStream|readObject|原生对象流/
+      if (!(deserialization && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
 filter_mybatis_raw_substitution_preflight_duplicates() {
   local findings_file="$1"
   local preflight_file="$2"
@@ -2808,6 +2838,7 @@ merge_preflight_findings() {
     filter_authorization_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_presigned_replay_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_direct_address_ssrf_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_unsafe_deserialization_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_mybatis_raw_substitution_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
@@ -4005,6 +4036,80 @@ collect_security_preflight() {
       flush_credential_defaults()
     }
   ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_unsafe_deserialization_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # Only consider a newly added native deserialization sink. The current
+  # source snapshot must also show an HTTP request stream in the same Java
+  # file; trusted local ObjectInputStream usage stays out of scope.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-deserialization-candidates.XXXXXX")"
+  awk -v source_root="$source_root" '
+    function flush_hunk() {
+      if (path != "" && path ~ /\.java$/ && sink_line > 0 && sink_added && (source_seen || source_root != "")) {
+        printf "%s\t%d\n", path, sink_line
+      }
+    }
+    /^diff --git / {
+      flush_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      flush_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      sink_line = 0
+      source_seen = 0
+      sink_added = 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        trimmed = text
+        sub(/^[[:space:]]+/, "", trimmed)
+        if (trimmed !~ /^\/\// && trimmed !~ /^\/\*|^\*/) {
+          if (text ~ /getInputStream[[:space:]]*\(/ || text ~ /HttpServletRequest/) source_seen = 1
+          if (text ~ /ObjectInputStream|readObject[[:space:]]*\(/) {
+            if (sink_line == 0) sink_line = line_no
+            if (prefix == "+") sink_added = 1
+          }
+        }
+        line_no++
+      }
+    }
+    END { flush_hunk() }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! grep -Eq 'ObjectInputStream|readObject[[:space:]]*\(' "$source_file" ||
+       ! grep -Eq 'HttpServletRequest' "$source_file" ||
+       ! grep -Eq '[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\.[[:space:]]*getInputStream[[:space:]]*\(' "$source_file"; then
+      continue
+    fi
+    printf 'P1 %s:%s - 不可信 HTTP 输入直接进入 Java 原生反序列化，存在反序列化远程代码执行风险。\n影响：攻击者可构造恶意对象触发类路径上的危险 gadget，造成远程代码执行、数据泄漏或服务不可用。\n修复建议：不要对 HTTP 请求体使用 ObjectInputStream/readObject；改用带明确 schema 的 JSON/Protocol Buffers，并对允许类型、大小和字段做严格校验。\n验证方式：使用恶意序列化 payload 和合法 payload 分别测试，确认服务拒绝原生对象流且仅接受受约束的 DTO。\n\n' \
+      "$candidate_path" "$candidate_line" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
   dedup_preflight_blocks "$output_file"
 }
 
@@ -5939,6 +6044,7 @@ ensure_review_deadline "确定性预检" || exit 124
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_unsafe_deserialization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"

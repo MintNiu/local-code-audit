@@ -176,6 +176,12 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "deserialization" ]]; then
+      if ! grep -Eiq '反序列化|deserialization|ObjectInputStream|readObject|不可信对象' "$output_file"; then
+        echo "$name run $run missed the expected unsafe-deserialization risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
       finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
       if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
@@ -267,6 +273,8 @@ run_review java-path-traversal path
 run_review java-path-safe 0
 run_review java-command-injection command
 run_review java-command-safe 0
+run_review java-deserialization deserialization
+run_review java-deserialization-safe 0
 run_review java-maintenance-safe 0
 run_review java-lombok-properties-safe 0
 run_review java-generated-column-safe 0
@@ -292,4 +300,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, clean=$((runs * 9)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, clean=$((runs * 10)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"

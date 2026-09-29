@@ -2980,6 +2980,94 @@ printf '%s\n' "$presigned_output" | grep -F '取消后仍可重放有效的预�
   exit 1
 }
 
+# Native ObjectInputStream on an HTTP request body is a separate high-impact
+# root cause. The preflight must upgrade it to one P1 and the clean reader
+# counterpart must remain untouched.
+deserialization_repo="$fixture_root/deserialization-repo"
+mkdir -p "$deserialization_repo/src/main/java/example"
+git -C "$deserialization_repo" init -q
+git -C "$deserialization_repo" config user.email test@example.invalid
+git -C "$deserialization_repo" config user.name preflight-deserialization-test
+cat >"$deserialization_repo/src/main/java/example/ImportEndpoint.java" <<'EOF'
+package example;
+
+final class ImportEndpoint {
+    String read() { return "base"; }
+}
+EOF
+git -C "$deserialization_repo" add .
+git -C "$deserialization_repo" commit -qm base
+cat >"$deserialization_repo/src/main/java/example/ImportEndpoint.java" <<'EOF'
+package example;
+
+import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+
+final class ImportEndpoint {
+    Object read(HttpServletRequest request) throws IOException, ClassNotFoundException {
+        try (ObjectInputStream input = new ObjectInputStream(request.getInputStream())) {
+            return input.readObject();
+        }
+    }
+}
+EOF
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+deserialization_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$deserialization_repo")"
+printf '%s\n' "$deserialization_output" | grep -F '不可信 HTTP 输入直接进入 Java 原生反序列化' >/dev/null || {
+  echo 'missing unsafe-deserialization preflight' >&2
+  printf '%s\n' "$deserialization_output" >&2
+  exit 1
+}
+deserialization_count="$(printf '%s\n' "$deserialization_output" | grep -Fc '反序列化远程代码执行风险')"
+[[ "$deserialization_count" == 1 ]] || {
+  echo "unsafe-deserialization preflight was duplicated (count=$deserialization_count)" >&2
+  printf '%s\n' "$deserialization_output" >&2
+  exit 1
+}
+
+deserialization_safe_repo="$fixture_root/deserialization-safe-repo"
+mkdir -p "$deserialization_safe_repo/src/main/java/example"
+git -C "$deserialization_safe_repo" init -q
+git -C "$deserialization_safe_repo" config user.email test@example.invalid
+git -C "$deserialization_safe_repo" config user.name preflight-deserialization-safe-test
+cat >"$deserialization_safe_repo/src/main/java/example/ImportEndpoint.java" <<'EOF'
+package example;
+
+final class ImportEndpoint {
+    String read() { return "base"; }
+}
+EOF
+git -C "$deserialization_safe_repo" add .
+git -C "$deserialization_safe_repo" commit -qm base
+cat >"$deserialization_safe_repo/src/main/java/example/ImportEndpoint.java" <<'EOF'
+package example;
+
+import jakarta.servlet.http.HttpServletRequest;
+import java.io.BufferedReader;
+import java.io.IOException;
+
+final class ImportEndpoint {
+    String read(HttpServletRequest request) throws IOException {
+        try (BufferedReader reader = request.getReader()) {
+            return reader.readLine();
+        }
+    }
+}
+EOF
+deserialization_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$deserialization_safe_repo")"
+if printf '%s\n' "$deserialization_safe_output" | grep -F '反序列化远程代码执行风险' >/dev/null; then
+  echo 'safe HTTP reader triggered unsafe-deserialization preflight' >&2
+  printf '%s\n' "$deserialization_safe_output" >&2
+  exit 1
+fi
+
 # URL allowlists must compare parsed hosts, not raw string prefixes.
 url_allowlist_repo="$fixture_root/url-allowlist-repo"
 mkdir -p "$url_allowlist_repo/src/main/java/com/example/security"
