@@ -170,6 +170,18 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "command" ]]; then
+      if ! grep -Eiq '命令注入|command injection|shell injection|不可信命令|命令执行' "$output_file"; then
+        echo "$name run $run missed the expected command-injection risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     elif [[ "$expected_findings" == "migration" ]]; then
       if ! grep -Eiq 'migration|迁移|已有库|升级路径|数据库' "$output_file"; then
         echo "$name run $run missed the expected migration-upgrade risk: $output_file" >&2
@@ -253,6 +265,8 @@ run_review java-ssrf ssrf
 run_review java-ssrf-safe 0
 run_review java-path-traversal path
 run_review java-path-safe 0
+run_review java-command-injection command
+run_review java-command-safe 0
 run_review java-maintenance-safe 0
 run_review java-lombok-properties-safe 0
 run_review java-generated-column-safe 0
@@ -278,4 +292,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, clean=$((runs * 8)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, clean=$((runs * 9)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
