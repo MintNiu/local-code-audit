@@ -3068,6 +3068,102 @@ if printf '%s\n' "$deserialization_safe_output" | grep -F '反序列化远程代
   exit 1
 fi
 
+# Default DOM parsing of an HTTP XML body must be treated as XXE unless the
+# source explicitly disables DOCTYPE/external entities and external access.
+xxe_repo="$fixture_root/xxe-repo"
+mkdir -p "$xxe_repo/src/main/java/example"
+git -C "$xxe_repo" init -q
+git -C "$xxe_repo" config user.email test@example.invalid
+git -C "$xxe_repo" config user.name preflight-xxe-test
+cat >"$xxe_repo/src/main/java/example/ImportXmlEndpoint.java" <<'EOF'
+package example;
+
+final class ImportXmlEndpoint {
+    String read() { return "base"; }
+}
+EOF
+git -C "$xxe_repo" add .
+git -C "$xxe_repo" commit -qm base
+cat >"$xxe_repo/src/main/java/example/ImportXmlEndpoint.java" <<'EOF'
+package example;
+
+import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.io.InputStream;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.Document;
+import org.xml.sax.SAXException;
+import static java.util.Objects.requireNonNull;
+
+final class ImportXmlEndpoint {
+    Document parse(HttpServletRequest request) throws IOException, SAXException {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        return factory.newDocumentBuilder().parse(request.getInputStream());
+    }
+}
+EOF
+xxe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$xxe_repo")"
+printf '%s\n' "$xxe_output" | grep -F 'XML 解析器直接处理不可信 HTTP XML' >/dev/null || {
+  echo 'missing XXE preflight' >&2
+  printf '%s\n' "$xxe_output" >&2
+  exit 1
+}
+xxe_count="$(printf '%s\n' "$xxe_output" | grep -Fc '存在 XXE 风险')"
+[[ "$xxe_count" == 1 ]] || {
+  echo "XXE preflight was duplicated (count=$xxe_count)" >&2
+  printf '%s\n' "$xxe_output" >&2
+  exit 1
+}
+
+xxe_safe_repo="$fixture_root/xxe-safe-repo"
+mkdir -p "$xxe_safe_repo/src/main/java/example"
+git -C "$xxe_safe_repo" init -q
+git -C "$xxe_safe_repo" config user.email test@example.invalid
+git -C "$xxe_safe_repo" config user.name preflight-xxe-safe-test
+cat >"$xxe_safe_repo/src/main/java/example/ImportXmlEndpoint.java" <<'EOF'
+package example;
+
+final class ImportXmlEndpoint {
+    String read() { return "base"; }
+}
+EOF
+git -C "$xxe_safe_repo" add .
+git -C "$xxe_safe_repo" commit -qm base
+cat >"$xxe_safe_repo/src/main/java/example/ImportXmlEndpoint.java" <<'EOF'
+package example;
+
+import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.Document;
+import org.xml.sax.SAXException;
+
+final class ImportXmlEndpoint {
+    Document parse(HttpServletRequest request) throws IOException, SAXException {
+        if (request.getContentLengthLong() > 1_048_576L) {
+            throw new IOException("XML body too large");
+        }
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        factory.setXIncludeAware(false);
+        factory.setExpandEntityReferences(false);
+        InputStream body = requireNonNull(request.getInputStream(), "request body");
+        return factory.newDocumentBuilder().parse(body);
+    }
+}
+EOF
+xxe_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$xxe_safe_repo")"
+if printf '%s\n' "$xxe_safe_output" | grep -F '存在 XXE 风险' >/dev/null; then
+  echo 'safe XML hardening triggered XXE preflight' >&2
+  printf '%s\n' "$xxe_safe_output" >&2
+  exit 1
+fi
+
 # URL allowlists must compare parsed hosts, not raw string prefixes.
 url_allowlist_repo="$fixture_root/url-allowlist-repo"
 mkdir -p "$url_allowlist_repo/src/main/java/com/example/security"

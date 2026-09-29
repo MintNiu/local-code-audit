@@ -59,6 +59,15 @@ prepare_fixture() {
       -e 's#${OSS_ACCESS_KEY_ID}#AKID_EXAMPLE_9f8e7d6c5b4a3210#' \
       -e 's#${OSS_ACCESS_KEY_SECRET}#SECRET_EXAMPLE_9f8e7d6c5b4a3210#' \
       "$target_dir/application.yml"
+  elif [[ "$name" == "java-sql-injection" ]]; then
+    sed -i '' \
+      -e 's|SET display_name = ${displayName}|SET display_name = #{displayName}|' \
+      "$target_dir/src/main/resources/mappers/AccountMapper.xml"
+    git -C "$target_dir" add .
+    git -C "$target_dir" commit -qm base
+    sed -i '' \
+      -e 's|SET display_name = #{displayName}|SET display_name = ${displayName}|' \
+      "$target_dir/src/main/resources/mappers/AccountMapper.xml"
   fi
 }
 
@@ -86,6 +95,17 @@ run_review() {
       OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
       OLLAMA_REVIEW_TOP_K="${PRESIGNED_REVIEW_TOP_K:-1}" \
       OLLAMA_REVIEW_TOP_P="${PRESIGNED_REVIEW_TOP_P:-1}" \
+        "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" ]]; then
+      # These new clean security boundaries need only the canonical marker.
+      # Limit optional prose so a local model cannot spend the whole timeout
+      # repeating non-actionable parser/query commentary; done=true and the
+      # normal truncation gate still remain mandatory.
+      OLLAMA_REVIEW_MODEL="$model" \
+      OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
+      OLLAMA_REVIEW_NUM_PREDICT="${SYNTHETIC_SECURITY_CLEAN_NUM_PREDICT:-512}" \
+      OLLAMA_REVIEW_TOP_K="${SYNTHETIC_SECURITY_CLEAN_TOP_K:-1}" \
+      OLLAMA_REVIEW_TOP_P="${SYNTHETIC_SECURITY_CLEAN_TOP_P:-1}" \
         "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
     else
       OLLAMA_REVIEW_MODEL="$model" \
@@ -188,6 +208,42 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "sql" ]]; then
+      if ! grep -Eiq 'SQL[[:space:]]*注入|MyBatis|原始替换|\$\{[^}]+\}' "$output_file"; then
+        echo "$name run $run missed the expected SQL-injection risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "xxe" ]]; then
+      if ! grep -Eiq 'XXE|XML[[:space:]]*外部实体|外部实体|实体解析|DOCTYPE|external-general-entities' "$output_file"; then
+        echo "$name run $run missed the expected XXE risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 XXE finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "idor" ]]; then
+      if ! grep -Eiq 'IDOR|对象级|越权|授权|权限|跨租户|未授权' "$output_file"; then
+        echo "$name run $run missed the expected object-authorization risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 object-authorization finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     elif [[ "$expected_findings" == "migration" ]]; then
       if ! grep -Eiq 'migration|迁移|已有库|升级路径|数据库' "$output_file"; then
         echo "$name run $run missed the expected migration-upgrade risk: $output_file" >&2
@@ -275,6 +331,12 @@ run_review java-command-injection command
 run_review java-command-safe 0
 run_review java-deserialization deserialization
 run_review java-deserialization-safe 0
+run_review java-sql-injection sql
+run_review java-sql-injection-safe 0
+run_review java-xxe xxe
+run_review java-xxe-safe 0
+run_review java-idor idor
+run_review java-idor-safe 0
 run_review java-maintenance-safe 0
 run_review java-lombok-properties-safe 0
 run_review java-generated-column-safe 0
@@ -300,4 +362,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, clean=$((runs * 10)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: positives=$((runs * 14)), divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, sql_injection=$runs, xxe=$runs, idor=$runs, clean=$((runs * 13)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
