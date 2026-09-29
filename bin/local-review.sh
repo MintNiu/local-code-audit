@@ -5157,6 +5157,7 @@ collect_mybatis_raw_substitution_preflight() {
 collect_migration_delete_preflight() {
   local diff_file="$1"
   local output_file="$2"
+  local exact_rename_file="${3:-}"
 
   # A deleted versioned migration is a high-confidence upgrade-path risk only
   # when the deleted file itself says it serves existing databases.  This is
@@ -5165,7 +5166,17 @@ collect_migration_delete_preflight() {
   # job, while this preflight supplies one stable location for the proven
   # deletion.  Keeping this deterministic also prevents wording/line-range
   # drift from making repeated reviews disagree.
-  awk '
+  LC_ALL=C awk -v exact_rename_file="$exact_rename_file" '
+    BEGIN {
+      if (exact_rename_file != "") {
+        while ((getline rename_line < exact_rename_file) > 0) {
+          sub(/^[^：]*：/, "", rename_line)
+          split(rename_line, rename_parts, " -> ")
+          if (rename_parts[1] != "") exact_renamed_old[rename_parts[1]] = 1
+        }
+        close(exact_rename_file)
+      }
+    }
     function reset_file() {
       deleted = 0
       old_start = 0
@@ -5173,7 +5184,7 @@ collect_migration_delete_preflight() {
       old_text = ""
     }
     function emit_file(    range, end_line, base) {
-      if (!deleted || path == "" || path !~ /(^|\/)(sql|db)\/migration\/V[0-9]{8}[^\/]*\.sql$/) return
+      if (!deleted || path == "" || path in exact_renamed_old || path !~ /(^|\/)(sql|db)\/migration\/V[0-9]{8}[^\/]*\.sql$/) return
       if (old_text !~ /Versioned[[:space:]]+migration|existing[[:space:]]+databases?|existing[[:space:]]+[A-Za-z0-9_-]+[[:space:]]+(database|db)|适用[：:][^\n]*(已有|existing)|已有数据库|升级路径|数据库升级/) return
       if (old_start <= 0) old_start = 1
       if (old_count <= 1) range = old_start
@@ -5835,7 +5846,7 @@ collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
 collect_mybatis_raw_substitution_preflight "$chunk_input_file" "$build_preflight_file"
-collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file"
+collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file" "$exact_rename_context_file"
 if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then
   echo "本地代码审查失败：跨事务/行锁文本索引扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2
   exit 1
