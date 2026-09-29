@@ -538,6 +538,45 @@ if ! grep -Fx '未发现阻塞问题' "$untracked_clean_marker_output" >/dev/nul
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
+generic_clean_info_output="$(run_review generic-clean-info "$untracked_info_repo" '信息 src/main/java/example/LocalProperties.java:1-5 - GENERIC_CLEAN_INFO_MARKER：
+影响：该类是一个新增的 Java 类，没有任何可修复问题。
+修复建议：无。
+验证方式：无。')"
+if ! grep -Fx '未发现阻塞问题' "$generic_clean_info_output" >/dev/null ||
+   grep -F 'GENERIC_CLEAN_INFO_MARKER' "$generic_clean_info_output" >/dev/null; then
+  printf 'FAIL generic-clean-info: explicit no-finding information was not normalized\n' >&2
+  cat "$generic_clean_info_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
+path_safe_repo="$(new_repo path-safe)"
+mkdir -p "$path_safe_repo/src/main/java/example"
+cat >"$path_safe_repo/src/main/java/example/PathReader.java" <<'EOF'
+package example;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+final class PathReader {
+    String read(Path root, String filename) throws Exception {
+        Path canonicalRoot = root.toAbsolutePath().normalize();
+        Path target = canonicalRoot.resolve(filename).normalize();
+        if (!target.startsWith(canonicalRoot)) throw new IllegalArgumentException("path escapes root");
+        return Files.readString(target);
+    }
+}
+EOF
+path_safe_output="$(run_review path-safe "$path_safe_repo" '信息 src/main/java/example/PathReader.java:8-10 - PATH_SAFE_BOUNDARY_MARKER：可能存在路径遍历风险，startsWith 检查可能被绕过。
+影响：攻击者可能读取根目录之外的文件。
+修复建议：使用 normalize 后的绝对路径进行更严格检查。
+验证方式：测试 ../etc/passwd。')"
+if ! grep -Fx '未发现阻塞问题' "$path_safe_output" >/dev/null ||
+   grep -F 'PATH_SAFE_BOUNDARY_MARKER' "$path_safe_output" >/dev/null; then
+  printf 'FAIL path-safe: visible normalize/startsWith boundary was over-reported\n' >&2
+  cat "$path_safe_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 # Visible Lombok annotations supply generated members.  A missing-dependency
 # guess without compiler/build evidence is not an actionable finding; keep
 # explicit build failures and dependency-removal claims reportable.
@@ -661,4 +700,4 @@ if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 19 cases\n'
+printf 'filter evidence regression passed: 21 cases\n'

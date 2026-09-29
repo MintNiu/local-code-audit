@@ -837,6 +837,15 @@ filter_unsupported_shard_findings() {
           path_evidence ~ /DEFAULT_(CONNECT|READ)_TIMEOUT/ && path_evidence ~ /requireFinitePositiveTimeout/) invalid = 1
       if (block ~ /baseUrl/ && block ~ /缺少/ && block ~ /格式|空/ && path_evidence ~ /baseUrl[[:space:]]*=[[:space:]]*"http/) invalid = 1
       if (block ~ /TOKEN_HEADER/ && block ~ /常量|校验|定义/ && path_evidence ~ /TOKEN_HEADER[[:space:]]*=/) invalid = 1
+      # A visible normalize-and-prefix check is the intended path-traversal
+      # boundary.  Do not let an information-level model guess about a bypass
+      # when the current snapshot has no symlink, TOCTOU, or permission
+      # evidence; concrete bypasses remain visible.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /路径遍历|目录逃逸|越界/ && block ~ /可能|绕过|不严格/ &&
+          path_evidence ~ /\.resolve\([^)]*\)\.normalize\(\)/ &&
+          path_evidence ~ /startsWith\(/ &&
+          block !~ /符号链接|symlink|TOCTOU|竞态|并发|权限|越权|真实路径|toRealPath|getCanonicalPath/) invalid = 1
       # The presigned-ticket preflight is authoritative when the visible
       # source already checks expiry.  Remove only speculative duplicate
       # validation paragraphs in that lifecycle shape; a paragraph that also
@@ -956,6 +965,15 @@ filter_unsupported_shard_findings() {
           block ~ /修复建议[：:][[:space:]]*无/ &&
           block ~ /验证方式[：:][[:space:]]*无/ &&
           finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
+      # Some clean shards use a fully formed information paragraph instead of
+      # the canonical marker.  Normalize only the explicit no-finding shape;
+      # any concrete security, tenancy, permission, build, or compatibility
+      # cue keeps the paragraph visible.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /没有任何可修复问题|未发现.*(可修复|阻塞).*问题/ &&
+          block ~ /修复建议[：:][[:space:]]*无/ &&
+          block ~ /验证方式[：:][[:space:]]*无/ &&
+          finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|请求伪造|命令执行|路径遍历|构建|编译|兼容|并发|竞态|迁移/) invalid = 1
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
       if (generic_standard_library_info(block)) invalid = 1
