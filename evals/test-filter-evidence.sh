@@ -516,7 +516,7 @@ final class LocalProperties {
     String value() { return "safe"; }
 }
 EOF
-untracked_info_output="$(run_review untracked-info "$untracked_info_repo" '信息 src/main/java/example/LocalProperties.java:1-5 - UNTRACKED_INFO_MARKER：该文件是新增的未跟踪文件，未包含在 Git 仓库中，建议添加到 Git。
+untracked_info_output="$(run_review untracked-info "$untracked_info_repo" '信息 src/main/java/example/LocalProperties.java:1-5 - UNTRACKED_INFO_MARKER：代码新增但未提交到 Git 仓库，建议添加到 Git。
 影响：如果不提交，构建可能缺少配置类。
 修复建议：将该文件添加到 Git 仓库中，并检查 Git 状态。
 验证方式：确认文件已被跟踪。')"
@@ -527,8 +527,138 @@ if ! grep -Fx '未发现阻塞问题' "$untracked_info_output" >/dev/null ||
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
+untracked_clean_marker_output="$(run_review untracked-clean-marker "$untracked_info_repo" '信息 src/main/java/example/LocalProperties.java:1-5 - UNTRACKED_CLEAN_MARKER：代码新增但未提交到 Git；仅审查当前差异内容。
+影响：无阻塞问题。
+修复建议：无。
+验证方式：无。')"
+if ! grep -Fx '未发现阻塞问题' "$untracked_clean_marker_output" >/dev/null ||
+   grep -F 'UNTRACKED_CLEAN_MARKER' "$untracked_clean_marker_output" >/dev/null; then
+  printf 'FAIL untracked-clean-marker: clean Git-state prose was not filtered\n' >&2
+  cat "$untracked_clean_marker_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
+# Visible Lombok annotations supply generated members.  A missing-dependency
+# guess without compiler/build evidence is not an actionable finding; keep
+# explicit build failures and dependency-removal claims reportable.
+lombok_repo="$(new_repo lombok-safe)"
+mkdir -p "$lombok_repo/src/main/java/example"
+cat >"$lombok_repo/src/main/java/example/PlatformFileInternalClientProperties.java" <<'EOF'
+package example;
+
+import lombok.Data;
+
+@Data
+final class PlatformFileInternalClientProperties {
+    private String baseUrl;
+}
+EOF
+git -C "$lombok_repo" add .
+git -C "$lombok_repo" commit -qm base
+printf '%s\n' '// unchanged Lombok contract' >>"$lombok_repo/src/main/java/example/PlatformFileInternalClientProperties.java"
+lombok_output="$(run_review lombok-safe "$lombok_repo" '信息 src/main/java/example/PlatformFileInternalClientProperties.java:1-16 - LOMBOK_DEPENDENCY_MARKER：缺少构建依赖。
+
+影响：`@Data` 注解依赖 Lombok，但当前差异中没有显式依赖声明或构建配置证据。
+
+修复建议：在构建文件（例如 `pom.xml` 或 `build.gradle`）中添加 Lombok 依赖。
+
+验证方式：构建项目并确认 `@Data` 注解被正确处理。')"
+if ! grep -Fx '未发现阻塞问题' "$lombok_output" >/dev/null ||
+   grep -F 'LOMBOK_DEPENDENCY_MARKER' "$lombok_output" >/dev/null; then
+  printf 'FAIL lombok-safe: Lombok dependency speculation was not filtered\n' >&2
+  cat "$lombok_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
+# A presign provider's interface return and a bare delete call do not, by
+# themselves, prove nullability or rollback requirements.  The deterministic
+# lifecycle preflight must remain visible while these speculative information
+# paragraphs are removed.
+presigned_repo="$(new_repo presigned-speculation)"
+mkdir -p "$presigned_repo/src"
+cat >"$presigned_repo/src/UploadSessionService.java" <<'EOF'
+import java.time.Duration;
+import java.time.Instant;
+
+final class UploadSessionService {
+    private static final Duration TICKET_TTL = Duration.ofMinutes(15);
+    private final Store store;
+    private final Sessions sessions;
+
+    UploadSessionService(Store store, Sessions sessions) {
+        this.store = store;
+        this.sessions = sessions;
+    }
+
+    UploadTicket issueTicket(long id, String objectKey) {
+        return store.presignPut(objectKey, TICKET_TTL);
+    }
+
+    void acceptUpload(long id, UploadTicket ticket) {
+        if (ticket.expiresAt().isAfter(Instant.now())) {
+            store.put(ticket, ticket.objectKey());
+        }
+    }
+
+    void cancel(long id, String objectKey) {
+        store.delete(objectKey);
+        sessions.markCancelled(id);
+    }
+
+    void complete(long id) { sessions.markCompleted(id); }
+
+    void cleanupExpired() {
+        for (Session session : sessions.findActiveExpired()) store.delete(session.objectKey());
+    }
+
+    interface Store {
+        UploadTicket presignPut(String objectKey, Duration ttl);
+        void put(UploadTicket ticket, String objectKey);
+        void delete(String objectKey);
+    }
+    interface Sessions {
+        void markCancelled(long id);
+        void markCompleted(long id);
+        Iterable<Session> findActiveExpired();
+    }
+    interface Session { String objectKey(); }
+    record UploadTicket(String objectKey, Instant expiresAt) {}
+}
+EOF
+presigned_output="$(run_review presigned-speculation "$presigned_repo" 'P1 src/UploadSessionService.java:14 - PRESIGN_LIFECYCLE_DUPLICATE_MARKER：issueTicket 生成的预签名票据在取消后可能继续写入对象存储。
+
+影响：票据生命周期风险已在当前差异中体现。
+
+修复建议：增加票据撤销。
+
+验证方式：执行取消后上传回归。
+
+信息 src/UploadSessionService.java:14 - PRESIGN_NULL_SPECULATION_MARKER：缺少对 issueTicket 返回值的 null 检查。
+
+影响：如果 store.presignPut 返回 null，可能导致后续 NPE。
+
+修复建议：添加 null 检查，或确保 store.presignPut 不返回 null。
+
+验证方式：模拟 store.presignPut 返回 null，确认异常被正确处理。
+
+信息 src/UploadSessionService.java:24 - DELETE_EXCEPTION_SPECULATION_MARKER：cancel 方法没有处理 store.delete 可能抛出的异常。
+
+影响：如果 store.delete 失败，会话状态可能与存储状态不一致。
+
+修复建议：添加异常处理，确保会话状态与存储状态一致。
+
+验证方式：模拟 store.delete 失败，确认会话状态被正确回滚。')"
+if grep -F 'PRESIGN_LIFECYCLE_DUPLICATE_MARKER' "$presigned_output" >/dev/null ||
+   grep -F 'PRESIGN_NULL_SPECULATION_MARKER' "$presigned_output" >/dev/null ||
+   grep -F 'DELETE_EXCEPTION_SPECULATION_MARKER' "$presigned_output" >/dev/null ||
+   ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_output" >/dev/null; then
+  printf 'FAIL presigned-speculation: speculative lifecycle paragraphs were not filtered or preflight finding missing\n' >&2
+  cat "$presigned_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 16 cases\n'
+printf 'filter evidence regression passed: 19 cases\n'

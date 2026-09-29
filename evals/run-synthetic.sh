@@ -6,10 +6,16 @@ runs="${SYNTHETIC_REVIEW_RUNS:-5}"
 timeout_seconds="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-180}"
 model="${OLLAMA_REVIEW_MODEL:-devstral-small-2-review-tuned}"
 require_stable_hash="${SYNTHETIC_REQUIRE_STABLE_HASH:-1}"
+keep_results="${SYNTHETIC_KEEP_RESULTS:-0}"
+only_case="${SYNTHETIC_ONLY_CASE:-}"
 review_script="${SYNTHETIC_REVIEW_SCRIPT:-$repo_root/bin/local-review-local.sh}"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic.XXXXXX")"
 output_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic-results.XXXXXX")"
-trap 'rm -rf "$fixture_root" "$output_root"' EXIT
+if [[ "$keep_results" == "1" ]]; then
+  trap 'printf "synthetic results kept: %s\n" "$output_root" >&2; printf "synthetic fixtures kept: %s\n" "$fixture_root" >&2' EXIT
+else
+  trap 'rm -rf "$fixture_root" "$output_root"' EXIT
+fi
 
 if [[ ! "$runs" =~ ^[1-9][0-9]*$ ]]; then
   echo "SYNTHETIC_REVIEW_RUNS 必须是正整数。" >&2
@@ -60,6 +66,10 @@ run_review() {
   local name="$1"
   local expected_findings="$2"
   local output_dir="$output_root/$name"
+
+  if [[ -n "$only_case" && "$only_case" != "$name" ]]; then
+    return 0
+  fi
 
   mkdir -p "$output_dir"
   prepare_fixture "$name"
@@ -179,21 +189,32 @@ run_review() {
       fi
     fi
 
-    output_hash="$(shasum -a 256 "$output_file" | awk '{print $1}')"
+    # Stability is about the review result, not transport diagnostics or
+    # incidental blank-line formatting.  A timed-out model request may still
+    # return the same complete deterministic preflight finding; hashing the
+    # raw stderr would turn that semantically stable result into a false
+    # nondeterminism failure.  Keep all finding/body lines and the clean marker
+    # while excluding only known wrapper diagnostics.
+    stable_output_hash="$({
+      sed -E \
+        -e '/^(curl:|本地代码审查失败|本地代码审查未完成|本地代码审查：|请提高 OLLAMA|以下是截断|确定性预检回归失败)/d' \
+        -e '/^[[:space:]]*$/d' \
+        "$output_file"
+    } | shasum -a 256 | awk '{print $1}')"
     baseline_hash_file="$output_dir/baseline.sha256"
     if [[ "$run" -eq 1 ]]; then
-      printf '%s\n' "$output_hash" >"$baseline_hash_file"
+      printf '%s\n' "$stable_output_hash" >"$baseline_hash_file"
     elif [[ "$require_stable_hash" == "1" ]]; then
       baseline_hash="$(<"$baseline_hash_file")"
-      if [[ "$output_hash" != "$baseline_hash" ]]; then
-        echo "$name run $run output is not stable: expected sha256=$baseline_hash, got sha256=$output_hash" >&2
+      if [[ "$stable_output_hash" != "$baseline_hash" ]]; then
+        echo "$name run $run output is not stable: expected sha256=$baseline_hash, got sha256=$stable_output_hash" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
     fi
 
     printf '%s run=%s exit=%s elapsed=%ss sha256=%s\n' \
-      "$name" "$run" "$exit_code" "$((end - start))" "$output_hash"
+      "$name" "$run" "$exit_code" "$((end - start))" "$stable_output_hash"
   done
 }
 

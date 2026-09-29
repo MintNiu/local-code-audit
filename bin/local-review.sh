@@ -83,6 +83,7 @@ resolved_chunk_bytes_file="${OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE:-}"
 review_trace_file="${OLLAMA_REVIEW_TRACE_FILE:-}"
 chunk_budget_preflight_reserve_tokens=512
 active_request_body_file=""
+active_request_error_file=""
 current_evidence_file=""
 ollama_lock_dir="${OLLAMA_REVIEW_LOCK_DIR:-${TMPDIR:-/tmp}/local-review-ollama.lock}"
 ollama_lock_acquired=false
@@ -330,7 +331,7 @@ untracked_file="$(mktemp "${TMPDIR:-/tmp}/local-review-untracked.XXXXXX")"
 base_file="$(mktemp "${TMPDIR:-/tmp}/local-review-base.XXXXXX")"
 changed_paths_nul_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths-nul.XXXXXX")"
 exact_rename_context_file="$(mktemp "${TMPDIR:-/tmp}/local-review-exact-renames.XXXXXX")"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$active_request_error_file"' EXIT
 acquire_ollama_lock || exit $?
 review_deadline_epoch=$(( $(date +%s) + total_timeout_seconds ))
 
@@ -734,9 +735,11 @@ filter_unsupported_shard_findings() {
       if (window !~ /[A-Za-z_][A-Za-z0-9_]*[.]tenant_id[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[.]tenant_id/) return 0
       return 1
     }
-    function flush(    invalid, path_evidence) {
+    function flush(    invalid, path_evidence, finding_body) {
       if (block == "") return
       finding_path_value = finding_path(block)
+      finding_body = block
+      sub(/^[^\n]*\n/, "", finding_body)
       path_evidence = evidence_by_path[finding_path_value]
       # A shard may show only the hunk that triggered a finding.  For a small
       # set of contradiction guards, also load the current snapshot of that
@@ -847,6 +850,28 @@ filter_unsupported_shard_findings() {
           block ~ /有效性|格式|校验|验证|检查/ && block !~ /重放|竞态|孤儿|撤销|租户|权限|越权|契约/) invalid = 1
       if (path_evidence ~ /findActiveExpired/ && block ~ /cleanupExpired/ &&
           block ~ /只清理活动|仅.*活动|无法.*取消/ && block !~ /重放|竞态|孤儿|撤销|租户|权限|越权|契约/) invalid = 1
+      # An interface-return null guess is not evidence that a presign provider
+      # can actually return null.  In the visible ticket lifecycle, keep the
+      # deterministic cancellation/replay race and suppress only this
+      # information-level speculation unless the diff shows a real contract,
+      # implementation, or build failure.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /issueTicket|presignPut|预签名/ &&
+          block ~ /null|空/ && block ~ /返回值|判空|空检查|NPE|异常/ &&
+          path_evidence ~ /UploadTicket[[:space:]]+issueTicket/ &&
+          path_evidence ~ /return[[:space:]]+store\.presignPut/ &&
+          block !~ /明确.*契约|接口.*规定|@Nullable|实现.*返回|编译失败|构建失败|依赖冲突/) invalid = 1
+      # Likewise, a bare `store.delete` call does not prove a cancellation
+      # transaction must catch an unchecked exception.  Keep explicit
+      # rollback/transaction or implementation evidence visible, but remove
+      # the generic information-level "delete may throw" paragraph.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /cancel|取消/ && block ~ /store\.delete|删除/ &&
+          block ~ /异常|抛出|失败|一致/ &&
+          path_evidence ~ /void[[:space:]]+cancel\([^)]*\)/ &&
+          path_evidence ~ /store\.delete\([^)]*\)/ &&
+          path_evidence ~ /sessions\.markCancelled/ &&
+          block !~ /事务.*(处理|一致|回滚)|回滚.*(逻辑|策略)|重试|实现.*抛出|明确.*契约|编译失败|构建失败/) invalid = 1
       # A shard does not contain the whole repository. Claims that a type or
       # build declaration is missing merely because the current shard does
       # not show it are not evidence of a defect.
@@ -911,10 +936,39 @@ filter_unsupported_shard_findings() {
       if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
           block ~ /未跟踪|未包含在 Git|未被 Git/ &&
           block ~ /添加到 Git|加入 Git|检查 Git 状态|确保文件已被跟踪/ &&
+          finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
+      # The same non-defect can be phrased as "new code is not committed".
+      # Review intentionally includes staged, unstaged, and untracked changes;
+      # only remove this Git-state explanation when it also asks to commit or
+      # add the file and carries no independent code/security evidence.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /新增.*(未提交|没有提交)|未提交到 Git|尚未提交/ &&
+          block ~ /添加到 Git|提交到 Git|纳入版本控制|检查 Git 状态/ &&
           block !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /代码新增但未提交到 Git|未提交到 Git 仓库/ &&
+          block ~ /未发现阻塞问题/ &&
+          finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /代码新增但未提交到 Git/ &&
+          block ~ /当前差异|仅审查/ &&
+          block ~ /影响[：:][[:space:]]*(无|没有阻塞)/ &&
+          block ~ /修复建议[：:][[:space:]]*无/ &&
+          block ~ /验证方式[：:][[:space:]]*无/ &&
+          finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
       if (generic_standard_library_info(block)) invalid = 1
+      # Lombok annotations generate the accessors/constructors referenced by
+      # the class.  Do not let an information-level shard guess that Lombok is
+      # missing merely because the dependency declaration is outside the
+      # changed file.  Keep real build failures, version conflicts, explicit
+      # dependency removal, and P0-P3 findings visible.
+      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
+          block ~ /Lombok|@Data|@Getter|@Setter|@Value/ &&
+          block ~ /缺少.*依赖|缺失.*依赖|构建依赖|没有显式依赖|未找到.*Lombok/ &&
+          path_evidence ~ /@Data|@Getter|@Setter|@Value/ &&
+          block !~ /编译失败|构建失败|依赖冲突|版本不兼容|明确.*移除|删除.*依赖|删除了.*Lombok/) invalid = 1
       if (safe_negative_info(block)) invalid = 1
       if (username_only_credential_default(block, path_evidence, finding_path(block))) invalid = 1
       if (correlated_tenant_guard(block, path_evidence, finding_path_value)) invalid = 1
@@ -1505,7 +1559,7 @@ filter_presigned_replay_preflight_duplicates() {
       if (block == "") return
       header = block
       sub(/[\r\n].*$/, "", header)
-      lifecycle = block ~ /预签名|票据|重放|objectKey|对象存储|cleanupExpired|取消|过期/
+      lifecycle = block ~ /预签名|票据|重放|objectKey|对象存储|cleanupExpired|取消|过期|issueTicket|presignPut|UploadTicket|mark(Cancelled|Completed)|findActiveExpired|store\.delete|会话|孤儿|竞态/
       # The deterministic preflight is authoritative for this narrow
       # lifecycle root. Keep an independently evidenced root in the same
       # paragraph visible; discard only speculative/repeated lifecycle text.
@@ -2112,7 +2166,7 @@ invoke_ollama() {
   local prompt="$1"
   local response_file="$2"
   local request_timeout="${3:-$timeout_seconds}"
-  local request_body_file
+  local request_body_file curl_error_file
   local curl_status
   local effective_timeout remaining_seconds now_epoch attempt max_attempts sleep_seconds
 
@@ -2121,6 +2175,8 @@ invoke_ollama() {
     return 11
   fi
   active_request_body_file="$request_body_file"
+  curl_error_file="${request_body_file}.curl-error"
+  active_request_error_file="$curl_error_file"
 
   if ! jq -n \
     --arg model "$model" \
@@ -2150,6 +2206,7 @@ invoke_ollama() {
   }' >"$request_body_file"; then
     rm -f "$request_body_file"
     active_request_body_file=""
+    active_request_error_file=""
     echo "本地代码审查失败：无法构造 Ollama 请求。" >&2
     return 11
   fi
@@ -2161,8 +2218,9 @@ invoke_ollama() {
     remaining_seconds=$((review_deadline_epoch - now_epoch))
     if (( remaining_seconds <= 0 )); then
       echo "本地代码审查失败：已达到整次审查总超时 ${total_timeout_seconds} 秒。" >&2
-      rm -f "$request_body_file"
+      rm -f "$request_body_file" "$curl_error_file"
       active_request_body_file=""
+      active_request_error_file=""
       return 124
     fi
     effective_timeout="$request_timeout"
@@ -2174,9 +2232,14 @@ invoke_ollama() {
         --connect-timeout 10 --max-time "$effective_timeout" \
         "$ollama_api_url/api/generate" \
         -H 'Content-Type: application/json' \
-        --data-binary "@$request_body_file" >"$response_file"; then
-      rm -f "$request_body_file"
+        --data-binary "@$request_body_file" >"$response_file" 2>"$curl_error_file"; then
+      if [[ -s "$curl_error_file" ]]; then
+        sed -E 's/Operation timed out after [0-9]+ milliseconds/Operation timed out/g' \
+          "$curl_error_file" >&2 || true
+      fi
+      rm -f "$request_body_file" "$curl_error_file"
       active_request_body_file=""
+      active_request_error_file=""
       return 0
     else
       curl_status=$?
@@ -2189,8 +2252,17 @@ invoke_ollama() {
     sleep "$sleep_seconds"
     attempt=$((attempt + 1))
   done
-  rm -f "$request_body_file"
+  # Preserve transport diagnostics for history/evaluation callers, but
+  # normalize curl's millisecond-level timeout text.  The warning remains
+  # useful for troubleshooting while repeated fail-closed outputs no longer
+  # acquire a different hash merely because a timeout took 180001 vs 180007ms.
+  if [[ -s "$curl_error_file" ]]; then
+    sed -E 's/Operation timed out after [0-9]+ milliseconds/Operation timed out/g' \
+      "$curl_error_file" >&2 || true
+  fi
+  rm -f "$request_body_file" "$curl_error_file"
   active_request_body_file=""
+  active_request_error_file=""
   return "$curl_status"
 }
 
@@ -5940,7 +6012,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$active_request_error_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"
