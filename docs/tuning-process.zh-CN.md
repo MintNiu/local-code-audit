@@ -757,3 +757,5 @@ reserve 和 effective budget，方便后续复核。
 后续继续补充不同根因的真实留出时，仍按独立功能簇保存私有结果并人工标注：幂等/并发、租户查询、权限迁移、对象生命周期、SQL 注入、凭据泄漏和事务锁序不得混为同一分母；未完成或超时的运行不计入召回率，公开仓库只提交规则、夹具和脱敏过程记录。
 
 同日补充 `platform-erp-service:2c12dc921ecb8db27d54f4a1aa066fdad7e4b165` 资金充值重复幂等/并发控制 clean holdout。个人 tuned profile 两轮均 4/4 分片完整，耗时 57/20 秒，结果 SHA-256 同为 `b35d4b877c3b061dcff681d2630acd32b619a1cda7ca0b11c436019a50b0aba7`，输出均为 `未发现阻塞问题`。人工复核确认当前提交是修复重复提交路径的变更，没有新增可由差异证明的 P0/P1；它作为并发/幂等负样本保存，不把 clean 结果计入召回率。目标仓库工作树中既有的未改动 SQL 文件未被评测读取或修改。
+
+随后补充 `platform-system:3b90a2e90f5469fd5f97b4fb42135dc95f72598e` HR 批量用户查询 clean holdout。由于原始清单 SHA 多一位，评测先拒绝非法 ref，随后使用 canonical SHA 进行正式双跑；两轮均 7/7 分片完整，耗时 87/124 秒，结果 SHA-256 仍为 `b35d4b877c3b061dcff681d2630acd32b619a1cda7ca0b11c436019a50b0aba7`，输出均为 clean。人工复核了租户条件、空输入、正数与 200 条上限、`distinct`、参数化 `IN`、`tenant_id/source_system/is_deleted` 和关联条件，未发现差异支持的 P0/P1；该样本作为租户/边界/SQL 映射负样本保存。非法 SHA 的诊断结果不计入评测，目标仓库既有未改动文件也未被触碰。
