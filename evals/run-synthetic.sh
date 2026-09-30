@@ -395,31 +395,24 @@ run_review() {
       fi
     fi
 
-    # Stability is about the review result, not transport diagnostics or
-    # incidental blank-line formatting.  A timed-out model request may still
-    # return the same complete deterministic preflight finding; hashing the
-    # raw stderr would turn that semantically stable result into a false
-    # nondeterminism failure.  Keep all finding/body lines and the clean marker
-    # while excluding only known wrapper diagnostics.
-    stable_output_hash="$({
-      sed -E \
-        -e '/^(curl:|本地代码审查失败|本地代码审查未完成|本地代码审查：|请提高 OLLAMA|以下是截断|确定性预检回归失败)/d' \
-        -e '/^[[:space:]]*$/d' \
-        "$output_file"
-    } | shasum -a 256 | awk '{print $1}')"
+    # Stability is about the findings, not byte-identical model prose.  The
+    # model may phrase the same evidence differently while preserving severity,
+    # location and risk family.  The signature keeps those semantic keys (and
+    # MyBatis expressions) without changing the complete output shown to users.
+    stable_output_hash="$("$repo_root/evals/finding-signature.sh" "$output_file" | shasum -a 256 | awk '{print $1}')"
     baseline_hash_file="$output_dir/baseline.sha256"
     if [[ "$run" -eq 1 ]]; then
       printf '%s\n' "$stable_output_hash" >"$baseline_hash_file"
     elif [[ "$require_stable_hash" == "1" ]]; then
       baseline_hash="$(<"$baseline_hash_file")"
       if [[ "$stable_output_hash" != "$baseline_hash" ]]; then
-        echo "$name run $run output is not stable: expected sha256=$baseline_hash, got sha256=$stable_output_hash" >&2
+        echo "$name run $run finding signature is not stable: expected sha256=$baseline_hash, got sha256=$stable_output_hash" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
     fi
 
-    printf '%s run=%s exit=%s elapsed=%ss sha256=%s\n' \
+    printf '%s run=%s exit=%s elapsed=%ss finding_signature_sha256=%s\n' \
       "$name" "$run" "$exit_code" "$((end - start))" "$stable_output_hash"
   done
 }

@@ -19,7 +19,7 @@ SQL 迁移预检还会识别删除版本化 `sql/migration`/`db/migration` 文�
 切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
 如果评测的是删除或修改公共契约的提交，可重复传入 `--context <file>`，把下游仓库的调用方、POM 或测试作为只读证据；这些路径会记录在私有 `.meta.tsv` 中。未提供下游 context 时，结果只能按单仓库范围解释。
 
-需要验证真实历史结果的重复稳定性时，使用 `./evals/run-history-repeat.sh --runs 3`。`--runs` 最少必须为 2；单轮不能证明稳定性，脚本会在创建输出目录或调用模型前拒绝。它为每一轮创建独立子目录，并逐提交比较完整 `.txt` 输出及模型/SYSTEM/脚本哈希、参数和退出状态；任一结果内容或运行配置漂移都会以非零状态失败。仅耗时和结果文件绝对路径不参与比较。
+需要验证真实历史结果的重复稳定性时，使用 `./evals/run-history-repeat.sh --runs 3`。`--runs` 最少必须为 2；单轮不能证明稳定性，脚本会在创建输出目录或调用模型前拒绝。它为每一轮创建独立子目录，并逐提交比较完整 finding signature（严重级别、文件/行号、风险族和 MyBatis 表达式）及模型/SYSTEM/脚本哈希、参数和退出状态；同一发现的自然语言措辞变化不会被误判为漏报，但新增/消失/移动发现仍以非零状态失败。完整 `.txt` 输出和 `result_sha256` 仍保留用于人工复核和标签绑定；仅耗时、诊断日志哈希和结果文件绝对路径不参与重复门禁。
 
 更新规则或参数后，可用 `./scripts/verify-runtime.sh` 只读检查 Ollama 中的 tuned 模型是否仍与当前 `config/Modelfile` 一致。校验失败时按脚本提示同步并执行 `ollama create`；脚本不会自动重建模型。
 历史评测运行器不会替下游仓库切换 Git ref，也不会替外部文件推断目标版本；请先在下游仓库检出匹配快照，或用 `scripts/extract-context-snapshot.sh` / `git show <ref>:<path>` 提取私有快照后再传入。为避免把主仓库当前工作树误当成历史证据，`run-history.sh` 会拒绝指向主仓库的 context，并在每个提交开始前把外部 context 冻结到临时快照，模型只读取该快照。私有 `.meta.tsv` 会记录原始路径和快照 SHA-256，便于复核版本是否被意外替换。
@@ -211,6 +211,8 @@ scorecard 汇总器也有独立的输入校验回归：
 2026-09-30 扩展三组不同根因：MyBatis 标量 `${...}` 原始替换、URL `startsWith` 白名单前缀绕过、声明式权限注解删除/注释。个人 tuned profile 单轮全量门禁为 23 类正例、22 类 clean 对照；MyBatis 两个表达式分别保留，URL 前缀同文件/行号重复仅保留一条，独立根因不被去重；预签名回退和显式截断失败门均通过。新增 URL 去重回归 7/7、路径去重回归 3/3，无模型预检和其余 deterministic suites 均通过。该结果仍不替代至少 20 个独立真实 holdout 的人工标注与阶段一门禁。
 
 2026-09-30 真实 MyBatis 金标纠偏：`platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 的 `XxlJobInfo.executorTimeout` 是请求绑定后的 primitive `int`，静态源码证据表明任意 SQL 片段无法进入该 Mapper；父提交已经存在同类 `${executeTimeout}` 形态，因此该提交没有新增可证实的 P1 SQL 注入。旧的 clean 结果应保留，不能把模型重复输出的旧启发式当作金标。运行器现只把完整 Mapper 参数类型和 Java 数值 getter 作为显式线索发给模型；未知类型仍 fail-closed，且不再静默删除模型自己的问题。两轮 typed rerun 均完整、结果稳定；该纠偏降低确定性预检误报，不扩大阶段一召回分母。
+
+2026-09-30 重复稳定性门禁改为 finding signature：完整两轮合成门禁中，`java-tenant-leak` 两次都命中同一 P1 和同一行号，但模型标题/措辞不同，旧的字节哈希会误报漂移。新增 `evals/finding-signature.sh`，只用于比较严重级别、路径/行号、风险族和 MyBatis 表达式，绝不修改或隐藏用户看到的完整输出；两轮门禁现为 46 个正例和 44 个 clean 对照全部通过，截断故障仍显式失败。
 
 同日阶段一验收审计：此前用于调优 MyBatis、凭据、权限、迁移和并发预检的真实提交不能继续作为最终未见 holdout；它们只能作为开发/诊断证据。最终生产验收必须冻结当前运行器与 Modelfile 后，排除已用于规则设计的提交及同功能簇，重新选择至少 20 个跨仓库真实提交，完成双轮运行、人工 P0/P1 真值、行号核对和误报标注。未完成这次冻结前，不能从现有 scorecard 推导生产召回率。
 
