@@ -96,7 +96,7 @@ run_review() {
       OLLAMA_REVIEW_TOP_K="${PRESIGNED_REVIEW_TOP_K:-1}" \
       OLLAMA_REVIEW_TOP_P="${PRESIGNED_REVIEW_TOP_P:-1}" \
         "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
-    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" || "$name" == "java-open-redirect-safe" || "$name" == "java-cors-safe" || "$name" == "java-weak-password-hash-safe" || "$name" == "java-fail-open-safe" || "$name" == "java-check-then-act-safe" || "$name" == "java-partial-side-effect-safe" ]]; then
+    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" || "$name" == "java-open-redirect-safe" || "$name" == "java-cors-safe" || "$name" == "java-weak-password-hash-safe" || "$name" == "java-fail-open-safe" || "$name" == "java-check-then-act-safe" || "$name" == "java-partial-side-effect-safe" || "$name" == "java-mybatis-raw-substitution-safe" || "$name" == "java-url-prefix-whitelist-safe" || "$name" == "java-authorization-annotation-safe" ]]; then
       # These new clean security boundaries need only the canonical marker.
       # Limit optional prose so a local model cannot spend the whole timeout
       # repeating non-actionable parser/query commentary; done=true and the
@@ -316,6 +316,42 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "mybatis" ]]; then
+      if ! grep -Eiq 'MyBatis|原始替换|SQL[[:space:]]*注入|\$\{[^}]+\}' "$output_file"; then
+        echo "$name run $run missed the expected MyBatis raw-substitution risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -ne 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run returned $finding_count MyBatis findings instead of exactly 2: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "url-prefix" ]]; then
+      if ! grep -Eiq 'startsWith|前缀匹配|SSRF|服务端请求伪造|白名单' "$output_file"; then
+        echo "$name run $run missed the expected URL-prefix allowlist risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run returned $finding_count URL-prefix findings instead of exactly 1: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "auth-annotation" ]]; then
+      if ! grep -Eiq '权限注解|授权校验|PreAuthorize|RequiresPermissions|端点.*权限|未授权' "$output_file"; then
+        echo "$name run $run missed the expected authorization-annotation risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run returned $finding_count authorization-annotation findings instead of exactly 1: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     elif [[ "$expected_findings" == "migration" ]]; then
       if ! grep -Eiq 'migration|迁移|已有库|升级路径|数据库' "$output_file"; then
         echo "$name run $run missed the expected migration-upgrade risk: $output_file" >&2
@@ -352,8 +388,8 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
-      if grep -Eq '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file"; then
-        echo "$name run $run reported a finding for the clean fixture: $output_file" >&2
+      if grep -Eq '^[[:space:]]*(P[0-3]|信息)([[:space:]:：]+)' "$output_file"; then
+        echo "$name run $run reported a finding or information block for the clean fixture: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
@@ -421,6 +457,12 @@ run_review java-check-then-act race
 run_review java-check-then-act-safe 0
 run_review java-partial-side-effect partial
 run_review java-partial-side-effect-safe 0
+run_review java-mybatis-raw-substitution mybatis
+run_review java-mybatis-raw-substitution-safe 0
+run_review java-url-prefix-whitelist url-prefix
+run_review java-url-prefix-whitelist-safe 0
+run_review java-authorization-annotation auth-annotation
+run_review java-authorization-annotation-safe 0
 run_review java-maintenance-safe 0
 run_review java-lombok-properties-safe 0
 run_review java-generated-column-safe 0
@@ -446,4 +488,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: positives=$((runs * 20)), divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, sql_injection=$runs, xxe=$runs, idor=$runs, open_redirect=$runs, cors=$runs, weak_password_hash=$runs, fail_open=$runs, check_then_act=$runs, partial_side_effect=$runs, clean=$((runs * 19)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: positives=$((runs * 23)), divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, sql_injection=$runs, xxe=$runs, idor=$runs, open_redirect=$runs, cors=$runs, weak_password_hash=$runs, fail_open=$runs, check_then_act=$runs, partial_side_effect=$runs, mybatis_raw_substitution=$runs, url_prefix_whitelist=$runs, authorization_annotation=$runs, clean=$((runs * 22)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"

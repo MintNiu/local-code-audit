@@ -3563,6 +3563,139 @@ printf '%s\n' "$partial_output" | grep -F '事务内先执行外部副作用再�
   exit 1
 }
 
+# The three business-integrity detectors must not combine evidence from
+# separate methods in one large hunk. Keep the fake model clean so these
+# assertions exercise only the deterministic boundary checks.
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+
+race_boundary_repo="$fixture_root/check-then-act-method-boundary-repo"
+mkdir -p "$race_boundary_repo/src"
+git -C "$race_boundary_repo" init -q
+git -C "$race_boundary_repo" config user.email test@example.invalid
+git -C "$race_boundary_repo" config user.name preflight-check-then-act-boundary-test
+cat >"$race_boundary_repo/src/JobClaimService.java" <<'EOF'
+import org.springframework.stereotype.Service;
+
+@Service
+final class JobClaimService {
+    private boolean claimed;
+
+    boolean check() {
+        if (!claimed) {
+            return true;
+        }
+        return false;
+    }
+
+    void mark() {
+        claimed = false;
+    }
+}
+EOF
+git -C "$race_boundary_repo" add .
+git -C "$race_boundary_repo" commit -qm base
+sed -i.bak 's/claimed = false;/claimed = true;/' "$race_boundary_repo/src/JobClaimService.java"
+rm -f "$race_boundary_repo/src/JobClaimService.java.bak"
+race_boundary_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$race_boundary_repo")"
+if printf '%s\n' "$race_boundary_output" | grep -F '共享可变状态存在 check-then-act 竞态' >/dev/null; then
+  echo 'check-then-act preflight combined separate methods' >&2
+  printf '%s\n' "$race_boundary_output" >&2
+  exit 1
+fi
+
+partial_boundary_repo="$fixture_root/partial-side-effect-method-boundary-repo"
+mkdir -p "$partial_boundary_repo/src"
+git -C "$partial_boundary_repo" init -q
+git -C "$partial_boundary_repo" config user.email test@example.invalid
+git -C "$partial_boundary_repo" config user.name preflight-partial-side-effect-boundary-test
+cat >"$partial_boundary_repo/src/PaymentService.java" <<'EOF'
+import org.springframework.transaction.annotation.Transactional;
+
+final class PaymentService {
+    private final PaymentGateway gateway;
+    private final OrderRepository orders;
+
+    @Transactional
+    void chargeExternal(String token, long amount) {
+        gateway.charge(token, amount);
+    }
+
+    void persist(long amount) {
+        orders.delete(amount);
+    }
+
+    interface PaymentGateway { void charge(String token, long amount); }
+    interface OrderRepository { void delete(long amount); void save(long amount); }
+}
+EOF
+git -C "$partial_boundary_repo" add .
+git -C "$partial_boundary_repo" commit -qm base
+sed -i.bak 's/orders.delete(amount)/orders.save(amount)/' "$partial_boundary_repo/src/PaymentService.java"
+rm -f "$partial_boundary_repo/src/PaymentService.java.bak"
+partial_boundary_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$partial_boundary_repo")"
+if printf '%s\n' "$partial_boundary_output" | grep -F '事务内先执行外部副作用再保存本地状态' >/dev/null; then
+  echo 'partial-side-effect preflight combined separate methods' >&2
+  printf '%s\n' "$partial_boundary_output" >&2
+  exit 1
+fi
+
+fail_open_boundary_repo="$fixture_root/fail-open-method-boundary-repo"
+mkdir -p "$fail_open_boundary_repo/src"
+git -C "$fail_open_boundary_repo" init -q
+git -C "$fail_open_boundary_repo" config user.email test@example.invalid
+git -C "$fail_open_boundary_repo" config user.name preflight-fail-open-boundary-test
+cat >"$fail_open_boundary_repo/src/AdminEndpoint.java" <<'EOF'
+final class AdminEndpoint {
+    private final Authorizer authorizer;
+    private final Config config;
+
+    boolean allowed(Object request) {
+        try {
+            return authorizer.check(request);
+        } catch (RuntimeException ex) {
+            return false;
+        }
+    }
+
+    boolean featureEnabled() {
+        try {
+            return config.read();
+        } catch (RuntimeException ex) {
+            return false;
+        }
+    }
+
+    interface Authorizer { boolean check(Object request); }
+    interface Config { boolean read(); }
+}
+EOF
+git -C "$fail_open_boundary_repo" add .
+git -C "$fail_open_boundary_repo" commit -qm base
+python3 - "$fail_open_boundary_repo/src/AdminEndpoint.java" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "return config.read();\n        } catch (RuntimeException ex) {\n            return false;"
+new = "return config.read();\n        } catch (RuntimeException ex) {\n            return true;"
+if old not in text:
+    raise SystemExit("boundary fixture mutation anchor missing")
+path.write_text(text.replace(old, new, 1))
+PY
+fail_open_boundary_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$fail_open_boundary_repo")"
+if printf '%s\n' "$fail_open_boundary_output" | grep -F '授权异常路径默认放行' >/dev/null; then
+  echo 'fail-open preflight combined separate methods' >&2
+  printf '%s\n' "$fail_open_boundary_output" >&2
+  exit 1
+fi
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.

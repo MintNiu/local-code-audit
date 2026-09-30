@@ -1942,6 +1942,183 @@ filter_fail_open_preflight_duplicates() {
   mv "$filtered_file" "$findings_file"
 }
 
+filter_path_traversal_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '不可信文件名或对象 key 未经根目录边界校验' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-path-traversal-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function canonicalize(value) {
+      sub(/^[.][\/]/, "", value)
+      sub(/^a[\/]/, "", value)
+      sub(/^b[\/]/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function set_location(line,    value, suffix, pieces) {
+      value = line
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", value)
+      # Accept both `path:8-11 - title` and the model empty-title form
+      # `path:8-11 -`; the latter must still yield a usable line range.
+      sub(/[[:space:]]+-([[:space:]].*)?$/, "", value)
+      loc_path = value
+      loc_start = 0
+      loc_end = 0
+      if (match(value, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?$/)) {
+        suffix = substr(value, RSTART, RLENGTH)
+        loc_path = substr(value, 1, RSTART - 1)
+        sub(/^:/, "", suffix)
+        gsub(/[[:space:]]+/, "", suffix)
+        split(suffix, pieces, "-")
+        loc_start = pieces[1] + 0
+        loc_end = (pieces[2] == "" ? loc_start : pieces[2] + 0)
+      }
+      loc_path = canonicalize(loc_path)
+    }
+    function overlaps(path, start, finish, other_path, other_start, other_finish) {
+      return path == other_path && start > 0 && other_start > 0 && start <= other_finish && other_start <= finish
+    }
+    function has_independent_root(text) {
+      # Path-traversal wording is present in the deterministic block itself;
+      # only a separately evidenced family should keep a same-root duplicate.
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|命令注入|凭据|密钥|密码|CORS|跨域|开放重定向|反序列化|XXE|外部实体|事务|支付|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    FILENAME == ARGV[1] {
+      if ($0 ~ /不可信文件名或对象 key 未经根目录边界校验/) {
+        set_location($0)
+        raw_path[++raw_count] = loc_path
+        raw_start[raw_count] = loc_start
+        raw_end[raw_count] = loc_end
+      }
+      next
+    }
+    function flush(    header, duplicate, i) {
+      if (block == "") return
+      header = block
+      sub(/[\r\n].*$/, "", header)
+      set_location(header)
+      duplicate = 0
+      # Some model repeats copy only the deterministic impact/remediation and
+      # omit the title after the location dash; retain the body-shape cues so
+      # that such a repeat is still merged with the authoritative preflight.
+      if (block ~ /路径遍历|目录逃逸|根目录边界|不可信文件名|对象 key|normalize|canonicalize|\.\.|绝对路径|符号链接/) {
+        for (i = 1; i <= raw_count; i++) {
+          if (loc_path == raw_path[i] &&
+              (overlaps(loc_path, loc_start, loc_end, raw_path[i], raw_start[i], raw_end[i]) ||
+               loc_start == 0 || raw_start[i] == 0)) {
+            duplicate = 1
+            break
+          }
+        }
+      }
+      if (duplicate && !has_independent_root(block)) {
+        block = ""
+        return
+      }
+      if (printed) printf "\n"
+      printf "%s", block
+      printed = 1
+      block = ""
+    }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
+filter_url_prefix_whitelist_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq 'URL 白名单使用 startsWith 前缀匹配' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-url-prefix-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function canonicalize(value) {
+      sub(/^[.][\/]/, "", value)
+      sub(/^a[\/]/, "", value)
+      sub(/^b[\/]/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function set_location(line,    value, suffix, pieces) {
+      value = line
+      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", value)
+      # Strip the prose separator (` - title`) without destroying a
+      # location range such as `:9-13`; also accept an empty title (` -`).
+      sub(/[[:space:]]+-([[:space:]].*)?$/, "", value)
+      loc_path = value
+      loc_start = 0
+      loc_end = 0
+      if (match(value, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?$/)) {
+        suffix = substr(value, RSTART, RLENGTH)
+        loc_path = substr(value, 1, RSTART - 1)
+        sub(/^:/, "", suffix)
+        gsub(/[[:space:]]+/, "", suffix)
+        split(suffix, pieces, "-")
+        loc_start = pieces[1] + 0
+        loc_end = (pieces[2] == "" ? loc_start : pieces[2] + 0)
+      }
+      loc_path = canonicalize(loc_path)
+    }
+    function overlaps(path, start, finish, other_path, other_start, other_finish) {
+      return path == other_path && start > 0 && other_start > 0 && start <= other_finish && other_start <= finish
+    }
+    function has_independent_root(text) {
+      # The deterministic block itself mentions request credentials and
+      # metadata as impact.  Do not mistake those words for a second root;
+      # preserve only an independently named credential/logging finding.
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|路径遍历|命令注入|硬编码凭据|明文日志|token.*日志|password.*日志|CORS|跨域|开放重定向|反序列化|XXE|外部实体|事务|支付|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    FILENAME == ARGV[1] {
+      if ($0 ~ /URL 白名单使用 startsWith 前缀匹配/) {
+        set_location($0)
+        raw_path[++raw_count] = loc_path
+        raw_start[raw_count] = loc_start
+        raw_end[raw_count] = loc_end
+      }
+      next
+    }
+    function flush(    header, duplicate, i) {
+      if (block == "") return
+      header = block
+      sub(/[\r\n].*$/, "", header)
+      set_location(header)
+      duplicate = 0
+      # Empty-title model repeats may retain only the impact/remediation body;
+      # include those URL/host cues so the same-location deterministic finding
+      # is still recognized as the authoritative duplicate.
+      if (block ~ /startsWith|前缀匹配|URL[[:space:]]*白名单|SSRF|服务端请求伪造|前缀|host|主机白名单|非预期外部地址|内网|metadata/) {
+        for (i = 1; i <= raw_count; i++) {
+          if (loc_path == raw_path[i] &&
+              (overlaps(loc_path, loc_start, loc_end, raw_path[i], raw_start[i], raw_end[i]) ||
+               loc_start == 0 || raw_start[i] == 0)) {
+            duplicate = 1
+            break
+          }
+        }
+      }
+      if (duplicate && !has_independent_root(block)) {
+        block = ""
+        return
+      }
+      if (printed) printf "\n"
+      printf "%s", block
+      printed = 1
+      block = ""
+    }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
 filter_mybatis_raw_substitution_preflight_duplicates() {
   local findings_file="$1"
   local preflight_file="$2"
@@ -1998,7 +2175,6 @@ filter_mybatis_raw_substitution_preflight_duplicates() {
       set_location(header)
       duplicate = 0
       if (block ~ /SQL[[:space:]]*注入|MyBatis|文本拼接/) {
-        if (raw_count > 0 && !has_independent_root(block)) duplicate = 1
         for (i = 1; i <= raw_count && !duplicate; i++) {
           # Model locations can cover a whole XML statement or omit the
           # precise expression line.  Once the same mapper file has a
@@ -2325,6 +2501,8 @@ SQL schema 目标边界：如果同一新增或修改的 SQL 文件中恰好可�
 字典排序边界：如果差异只交换字典/菜单记录的 `sort`、展示顺序或同类排序字段，且没有代码/契约证明该数字是业务状态、事件类型或持久化枚举编码，不得把数值重排报告为业务语义破坏；只有明确的 code/id 语义被改变且存在可达消费者或数据兼容证据时才报告。
 
 输出前逐条自检：每条问题都必须能在当前差异或明确契约中指出具体反例、可达影响和修复依据；仅凭“没有某个注解/日志/校验/测试”不得报告。如果同一根因、同一文件和相同代码范围重复出现，只保留一条。若自检不能证明问题，删除该候选；宁可输出“未发现阻塞问题”，也不要用猜测填满输出预算。
+
+MyBatis/XML clean 负例边界：如果 Mapper/XML 差异没有可验证的 SQL 注入、XXE、权限、租户或兼容性证据，必须立即输出且只输出“未发现阻塞问题”。不要因为 XML 没有事务、日志、参数校验、异常处理、性能监控或限流就生成信息级段落；这些属于未由当前差异证明的泛化建议，不能占用输出预算。
 
 构建完整性优先：检查新增或修改的 import、类型引用和自动配置入口是否能在当前提交快照中解析。构建预检只对当前源码索引中可证明属于本仓库的类型给出证据；只有差异、预检证据和项目构建上下文共同证明类型无法解析并会导致编译或启动失败时，才报告具体文件和行号的 P1 构建阻断。不要假设后续提交会补齐；外部依赖、生成源码、通配符 import 或无法确认的候选不得直接升级为问题。
 
@@ -3151,6 +3329,8 @@ merge_preflight_findings() {
     filter_check_then_act_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_partial_side_effect_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_fail_open_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_path_traversal_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_url_prefix_whitelist_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_mybatis_raw_substitution_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
@@ -4838,10 +5018,26 @@ collect_check_then_act_preflight() {
   # this out of generic local-variable or already-synchronized code.
   candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-check-then-act-candidates.XXXXXX")"
   awk '
-    function flush_hunk() {
-      if (path != "" && path ~ /\.java$/ && sink_line > 0 && sink_added && service_seen && check_seen && set_seen) {
-        printf "%s\t%d\n", path, sink_line
+    function reset_hunk() {
+      check_line = 0
+      check_var = ""
+      set_line = 0
+      set_added = 0
+      check_scope_depth = -1
+      brace_depth = 0
+      service_seen = 0
+      emitted = 0
+    }
+    function emit_if_ready() {
+      if (!emitted && path != "" && path ~ /\.java$/ && service_seen &&
+          check_line > 0 && set_line > check_line && set_added) {
+        printf "%s\t%d\n", path, check_line
+        emitted = 1
       }
+    }
+    function flush_hunk() {
+      emit_if_ready()
+      reset_hunk()
     }
     /^diff --git / {
       flush_hunk()
@@ -4861,28 +5057,42 @@ collect_check_then_act_preflight() {
       sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
       sub(/ .*/, "", hunk)
       line_no = hunk + 0
-      sink_line = 0
-      sink_added = 0
       service_seen = 0
-      check_seen = 0
-      set_seen = 0
+      reset_hunk()
       next
     }
     {
       prefix = substr($0, 1, 1)
       text = (prefix == "+" ? substr($0, 2) : $0)
       if (prefix == "+" || prefix == " ") {
-        if (text ~ /@(Service|Component)[[:space:]]*$/) service_seen = 1
-        if (text ~ /private[[:space:]]+boolean[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) service_seen = 1
-        if (text ~ /if[[:space:]]*\([[:space:]]*![A-Za-z_][A-Za-z0-9_]*[[:space:]]*\)/) {
-          check_seen = 1
-          if (sink_line == 0) sink_line = line_no
+        opens = gsub(/\{/, "{", text)
+        closes = gsub(/\}/, "}", text)
+        if (check_scope_depth >= 0 && brace_depth < check_scope_depth) {
+          emit_if_ready()
+          check_line = 0
+          check_var = ""
+          set_line = 0
+          set_added = 0
+          check_scope_depth = -1
         }
-        if (text ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*true[[:space:]]*;/) {
-          set_seen = 1
-          if (sink_line == 0) sink_line = line_no
-          if (prefix == "+") sink_added = 1
+        if (text ~ /@(Service|Component)[[:space:]]*$/ ||
+            text ~ /private[[:space:]]+boolean[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) service_seen = 1
+        if (match(text, /if[[:space:]]*\([[:space:]]*!([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\)/)) {
+          check_var = substr(text, RSTART, RLENGTH)
+          sub(/^.*![[:space:]]*/, "", check_var)
+          sub(/[[:space:]]*\).*/, "", check_var)
+          check_line = line_no
+          check_scope_depth = brace_depth
         }
+        if (check_line > 0 && match(text, /([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*true[[:space:]]*;/)) {
+          assignment = substr(text, RSTART, RLENGTH)
+          sub(/[[:space:]]*=.*/, "", assignment)
+          if (check_var == assignment) {
+            set_line = line_no
+            if (prefix == "+") set_added = 1
+          }
+        }
+        brace_depth += opens - closes
         line_no++
       }
     }
@@ -4924,11 +5134,26 @@ collect_partial_side_effect_preflight() {
   # or arbitrary HTTP calls alone.
   candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-partial-side-effect-candidates.XXXXXX")"
   awk '
-    function flush_hunk() {
-      if (path != "" && path ~ /\.java$/ && charge_line > 0 && save_line > charge_line && (charge_added || save_added)) {
+    function reset_hunk() {
+      charge_line = 0
+      save_line = 0
+      charge_added = 0
+      save_added = 0
+      charge_scope_depth = -1
+      brace_depth = 0
+      emitted = 0
+    }
+    function emit_if_ready() {
+      if (!emitted && path != "" && path ~ /\.java$/ && charge_line > 0 &&
+          save_line > charge_line && (charge_added || save_added)) {
         line = (charge_added ? charge_line : save_line)
         printf "%s\t%d\n", path, line
+        emitted = 1
       }
+    }
+    function flush_hunk() {
+      emit_if_ready()
+      reset_hunk()
     }
     /^diff --git / {
       flush_hunk()
@@ -4948,24 +5173,33 @@ collect_partial_side_effect_preflight() {
       sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
       sub(/ .*/, "", hunk)
       line_no = hunk + 0
-      charge_line = 0
-      save_line = 0
-      charge_added = 0
-      save_added = 0
+      reset_hunk()
       next
     }
     {
       prefix = substr($0, 1, 1)
       text = (prefix == "+" ? substr($0, 2) : $0)
       if (prefix == "+" || prefix == " ") {
+        opens = gsub(/\{/, "{", text)
+        closes = gsub(/\}/, "}", text)
+        if (charge_scope_depth >= 0 && brace_depth < charge_scope_depth) {
+          emit_if_ready()
+          charge_line = 0
+          save_line = 0
+          charge_added = 0
+          save_added = 0
+          charge_scope_depth = -1
+        }
         if (text ~ /\.charge[[:space:]]*\(/ || text ~ /PaymentGateway[[:space:]]*\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/) {
           if (charge_line == 0) charge_line = line_no
+          if (charge_scope_depth < 0) charge_scope_depth = brace_depth
           if (prefix == "+") charge_added = 1
         }
-        if (text ~ /[.]save[[:space:]]*\(/ && tolower(text) !~ /outbox|event/) {
+        if (charge_line > 0 && text ~ /[.]save[[:space:]]*\(/ && tolower(text) !~ /outbox|event/) {
           if (save_line == 0) save_line = line_no
           if (prefix == "+") save_added = 1
         }
+        brace_depth += opens - closes
         line_no++
       }
     }
@@ -5004,10 +5238,43 @@ collect_fail_open_preflight() {
   # authorizer/permission check; generic exception recovery is out of scope.
   candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-fail-open-candidates.XXXXXX")"
   awk '
-    function flush_hunk() {
-      if (path != "" && path ~ /\.java$/ && catch_line > 0 && return_line > 0 && return_added) {
-        printf "%s\t%d\n", path, catch_line
+    function brace_count(text,    count) {
+      count = 0
+      while (match(text, /\{/)) {
+        count++
+        text = substr(text, RSTART + RLENGTH)
       }
+      return count
+    }
+    function close_count(text,    count) {
+      count = 0
+      while (match(text, /\}/)) {
+        count++
+        text = substr(text, RSTART + RLENGTH)
+      }
+      return count
+    }
+    function is_method_decl(text) {
+      if (text ~ /^[[:space:]]*(if|for|while|switch|catch|try|else|do|synchronized)[[:space:](]/) return 0
+      return text ~ /[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*(throws[^{]+)?\{/
+    }
+    function reset_method_state(    key) {
+      for (key in catch_line) delete catch_line[key]
+      for (key in return_line) delete return_line[key]
+      for (key in return_added) delete return_added[key]
+      catch_active = 0
+      catch_nesting = 0
+      catch_id = 0
+    }
+    function flush_hunk() {
+      if (path != "" && path ~ /\.java$/) {
+        for (method in catch_line) {
+          if ((method in return_line) && return_added[method]) {
+            printf "%s\t%d\n", path, catch_line[method]
+          }
+        }
+      }
+      reset_method_state()
     }
     /^diff --git / {
       flush_hunk()
@@ -5027,20 +5294,27 @@ collect_fail_open_preflight() {
       sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
       sub(/ .*/, "", hunk)
       line_no = hunk + 0
-      catch_line = 0
-      return_line = 0
-      return_added = 0
+      reset_method_state()
       next
     }
     {
       prefix = substr($0, 1, 1)
       text = (prefix == "+" ? substr($0, 2) : $0)
       if (prefix == "+" || prefix == " ") {
-        if (text ~ /catch[[:space:]]*\(/) catch_line = line_no
-        if (catch_line > 0 && text ~ /return[[:space:]]+true[[:space:]]*;/) {
-          return_line = line_no
-          if (prefix == "+") return_added = 1
+        opens = brace_count(text)
+        closes = close_count(text)
+        if (catch_active && catch_nesting <= 0) catch_active = 0
+        if (text ~ /catch[[:space:]]*\(/) {
+          catch_id++
+          catch_line[catch_id] = line_no
+          catch_active = catch_id
+          catch_nesting = 1
         }
+        if (catch_active && text ~ /return[[:space:]]+true[[:space:]]*;/) {
+          return_line[catch_active] = line_no
+          if (prefix == "+") return_added[catch_active] = 1
+        }
+        if (catch_active) catch_nesting += opens - closes
         line_no++
       }
     }
@@ -5055,6 +5329,48 @@ collect_fail_open_preflight() {
     grep -Eqi 'authoriz|permission|isAllowed|canAccess|securityContext|accessCheck' "$source_file" || continue
     grep -Eq 'catch[[:space:]]*\(' "$source_file" || continue
     grep -Eq 'return[[:space:]]+true[[:space:]]*;' "$source_file" || continue
+    if ! awk -v target_line="$candidate_line" '
+      function brace_count(text,    count) {
+        count = 0
+        while (match(text, /\{/)) {
+          count++
+          text = substr(text, RSTART + RLENGTH)
+        }
+        return count
+      }
+      function close_count(text,    count) {
+        count = 0
+        while (match(text, /\}/)) {
+          count++
+          text = substr(text, RSTART + RLENGTH)
+        }
+        return count
+      }
+      function is_method_decl(text) {
+        if (text ~ /^[[:space:]}]*(if|for|while|switch|catch|try|else|do|synchronized)[[:space:](]/) return 0
+        return text ~ /[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*(throws[^{]+)?\{/
+      }
+      {
+        text = $0
+        opens = brace_count(text)
+        closes = close_count(text)
+        if (method_id != 0 && brace_depth < method_end_depth) method_id = 0
+        if (method_id == 0 && is_method_decl(text) && opens > 0) {
+          method_seq++
+          method_id = method_seq
+          method_end_depth = brace_depth + opens - closes
+        }
+        if (NR == target_line) target_method = method_id
+        if (method_id != 0 && text ~ /authoriz|permission|isAllowed|canAccess|securityContext|accessCheck/) {
+          auth_method[method_id] = 1
+        }
+        brace_depth += opens - closes
+        if (method_id != 0 && brace_depth < method_end_depth) method_id = 0
+      }
+      END { exit !(target_method > 0 && auth_method[target_method]) }
+    ' "$source_file"; then
+      continue
+    fi
     printf '%s\n\n' \
       "P1 $candidate_path:$candidate_line - 授权异常路径默认放行，认证/权限检查失败时返回 true，形成 fail-open 安全边界。" \
       "影响：鉴权服务超时、解析失败或依赖不可用时，攻击者可能绕过权限检查执行删除、管理或其他受保护操作。" \

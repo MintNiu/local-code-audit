@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<mapper namespace="example.JobMapper">
+    <update id="updateJob">
+        UPDATE jobs
+        SET executor_timeout = #{executorTimeout}, retry_count = #{retryCount}
+        WHERE id = #{id}
+    </update>
+</mapper>

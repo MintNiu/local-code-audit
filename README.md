@@ -64,9 +64,10 @@ local-review-local --repo /path/to/repo --base origin/main
 ```
 
 `local-review-local` keeps the same evidence, security, and truncation gates. Its
-default budgets remain the validated 16k/4096 profile and
-it keeps the model resident for consecutive reviews; this avoids the timeout
-observed with oversized 32k/8192 requests on real cross-repository diffs.
+default budget is the validated 32k/4096 personal profile and
+it keeps the model resident for consecutive reviews; this preserves enough
+context for routed cross-file evidence without using the slower 32k/8192 output
+budget that timed out on some real cross-repository diffs.
 It keeps the validated general-purpose decoding defaults
 (`OLLAMA_REVIEW_TOP_K=40`, `OLLAMA_REVIEW_TOP_P=0.9`). For a focused,
 high-impact check you can opt into greedy decoding with

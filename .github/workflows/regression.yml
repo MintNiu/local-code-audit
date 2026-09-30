@@ -25,6 +25,9 @@ jobs:
       - name: Run deterministic regression suites
         run: |
           ./evals/test-preflight.sh
+          ./evals/test-url-prefix-dedup.sh
+          ./evals/test-mybatis-dedup.sh
+          ./evals/test-path-dedup.sh
           ./evals/test-sharding.sh
           ./evals/test-shard-preflight-routing.sh
           ./evals/test-shard-integrity.sh
