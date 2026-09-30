@@ -1852,6 +1852,96 @@ filter_weak_password_hash_preflight_duplicates() {
   mv "$filtered_file" "$findings_file"
 }
 
+filter_check_then_act_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '共享可变状态存在 check-then-act 竞态' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-check-then-act-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|命令注入|凭据|密钥|密码|CORS|跨域|开放重定向|反序列化|XXE|外部实体|事务.*外部|支付|重放|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    function flush() {
+      if (block == "") return
+      race = block ~ /竞态|并发|check.?then.?act|共享可变|线程安全|AtomicBoolean|compareAndSet|claimed/
+      if (!(race && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
+filter_partial_side_effect_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '事务内先执行外部副作用再保存本地状态' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-partial-side-effect-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|命令注入|凭据|密钥|密码|CORS|跨域|开放重定向|反序列化|XXE|外部实体|竞态|check.?then.?act|重放|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    function flush() {
+      if (block == "") return
+      partial = block ~ /事务|支付|外部副作用|部分成功|回滚|一致性|outbox|幂等|charge|gateway/
+      if (!(partial && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
+filter_fail_open_preflight_duplicates() {
+  local findings_file="$1"
+  local preflight_file="$2"
+  local filtered_file
+
+  [[ -s "$findings_file" && -s "$preflight_file" ]] || return 0
+  grep -Fq '授权异常路径默认放行' "$preflight_file" || return 0
+  filtered_file="$(mktemp "${TMPDIR:-/tmp}/local-review-fail-open-filter.XXXXXX")"
+  LC_ALL=C awk '
+    function has_independent_root(text) {
+      return text ~ /租户|跨租户|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|命令注入|凭据|密钥|密码|CORS|跨域|开放重定向|反序列化|XXE|外部实体|支付|事务.*外部|竞态|并发|重放|迁移脚本|数据库升级|编译失败|构建失败/
+    }
+    function flush() {
+      if (block == "") return
+      fail_open = block ~ /异常.*放行|默认.*允许|fail.?open|权限.*异常|授权.*异常|返回 true/
+      if (!(fail_open && !has_independent_root(block))) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
+      }
+      block = ""
+    }
+    FILENAME == ARGV[1] { next }
+    FILENAME == ARGV[2] && /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    FILENAME == ARGV[2] { block = block $0 "\n" }
+    END { if (ARGC > 2) flush() }
+  ' "$preflight_file" "$findings_file" >"$filtered_file"
+  mv "$filtered_file" "$findings_file"
+}
+
 filter_mybatis_raw_substitution_preflight_duplicates() {
   local findings_file="$1"
   local preflight_file="$2"
@@ -3058,6 +3148,9 @@ merge_preflight_findings() {
     filter_open_redirect_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_cors_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_weak_password_hash_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_check_then_act_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_partial_side_effect_preflight_duplicates "$output_file" "$finding_preflight_file"
+    filter_fail_open_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_mybatis_raw_substitution_preflight_duplicates "$output_file" "$finding_preflight_file"
     filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
   fi
@@ -4731,6 +4824,245 @@ can_return_weak_password_hash_preflight_on_model_failure() {
   finding_count="$(grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$preflight_file" || true)"
   [[ "$finding_count" -eq 1 ]] || return 1
   return 0
+}
+
+collect_check_then_act_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # A Spring singleton with a mutable boolean claim/initialization flag is a
+  # high-confidence check-then-act race when the same source uses `if
+  # (!flag)` followed by `flag = true` and has no atomic/lock boundary. Keep
+  # this out of generic local-variable or already-synchronized code.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-check-then-act-candidates.XXXXXX")"
+  awk '
+    function flush_hunk() {
+      if (path != "" && path ~ /\.java$/ && sink_line > 0 && sink_added && service_seen && check_seen && set_seen) {
+        printf "%s\t%d\n", path, sink_line
+      }
+    }
+    /^diff --git / {
+      flush_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_hunk()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      flush_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      sink_line = 0
+      sink_added = 0
+      service_seen = 0
+      check_seen = 0
+      set_seen = 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        if (text ~ /@(Service|Component)[[:space:]]*$/) service_seen = 1
+        if (text ~ /private[[:space:]]+boolean[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) service_seen = 1
+        if (text ~ /if[[:space:]]*\([[:space:]]*![A-Za-z_][A-Za-z0-9_]*[[:space:]]*\)/) {
+          check_seen = 1
+          if (sink_line == 0) sink_line = line_no
+        }
+        if (text ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*true[[:space:]]*;/) {
+          set_seen = 1
+          if (sink_line == 0) sink_line = line_no
+          if (prefix == "+") sink_added = 1
+        }
+        line_no++
+      }
+    }
+    END { flush_hunk() }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    grep -Eq '@(Service|Component)[[:space:]]*$' "$source_file" || continue
+    grep -Eq 'private[[:space:]]+boolean[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$source_file" || continue
+    grep -Eq 'if[[:space:]]*\([[:space:]]*![A-Za-z_][A-Za-z0-9_]*[[:space:]]*\)' "$source_file" || continue
+    grep -Eq '[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*true[[:space:]]*;' "$source_file" || continue
+    if grep -Eq 'AtomicBoolean|compareAndSet|ReentrantLock|java\.util\.concurrent|synchronized|Lock[[:space:]]+[A-Za-z_]' "$source_file"; then
+      continue
+    fi
+    printf '%s\n\n' \
+      "P1 $candidate_path:$candidate_line - 共享可变状态存在 check-then-act 竞态，多个请求可能同时通过检查并重复领取或初始化同一资源。" \
+      "影响：Spring 单例服务中的并发请求可能都观察到状态为 false，随后重复执行一次性操作，造成重复任务、重复扣款或状态覆盖。" \
+      "修复建议：使用 AtomicBoolean.compareAndSet、数据库唯一约束/条件更新或明确的锁边界，把检查和状态变更放在同一个原子操作中。" \
+      "验证方式：并发启动至少两个请求并断言只有一个成功；检查重复执行、数据库约束和失败重试路径均保持幂等。" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_partial_side_effect_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # Keep this business-integrity rule narrow: a single transactional method
+  # must visibly call an external payment/gateway side effect before saving a
+  # local order, and the current source must not show an outbox/idempotency or
+  # compensation boundary. The rule does not infer risk from @Transactional
+  # or arbitrary HTTP calls alone.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-partial-side-effect-candidates.XXXXXX")"
+  awk '
+    function flush_hunk() {
+      if (path != "" && path ~ /\.java$/ && charge_line > 0 && save_line > charge_line && (charge_added || save_added)) {
+        line = (charge_added ? charge_line : save_line)
+        printf "%s\t%d\n", path, line
+      }
+    }
+    /^diff --git / {
+      flush_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_hunk()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      flush_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      charge_line = 0
+      save_line = 0
+      charge_added = 0
+      save_added = 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        if (text ~ /\.charge[[:space:]]*\(/ || text ~ /PaymentGateway[[:space:]]*\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/) {
+          if (charge_line == 0) charge_line = line_no
+          if (prefix == "+") charge_added = 1
+        }
+        if (text ~ /[.]save[[:space:]]*\(/ && tolower(text) !~ /outbox|event/) {
+          if (save_line == 0) save_line = line_no
+          if (prefix == "+") save_added = 1
+        }
+        line_no++
+      }
+    }
+    END { flush_hunk() }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    grep -Eq '@Transactional' "$source_file" || continue
+    grep -Eq '\.charge[[:space:]]*\(' "$source_file" || continue
+    grep -Eq '[.]save[[:space:]]*\(' "$source_file" || continue
+    if grep -Eqi 'outbox|idempot|compensat|retryable|saga|eventual' "$source_file"; then
+      continue
+    fi
+    printf '%s\n\n' \
+      "P1 $candidate_path:$candidate_line - 事务内先执行外部副作用再保存本地状态，存在部分成功和不可回滚的不一致窗口。" \
+      "影响：支付/外部扣款成功后本地订单保存或事务提交可能失败，重试又可能重复扣款，导致资金与订单状态不一致。" \
+      "修复建议：先在事务内写入 pending 状态和 outbox 事件，再由可重试、幂等的消费者执行外部副作用；为外部请求使用幂等键和补偿/对账流程。" \
+      "验证方式：分别注入外部调用成功但数据库提交失败、数据库成功但外部调用超时、重复消费三种故障，确认最终状态可对账且不会重复扣款。" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_fail_open_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # Authorization failures must fail closed. Require a newly added catch path
+  # that returns true in a Java file whose current source visibly contains an
+  # authorizer/permission check; generic exception recovery is out of scope.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-fail-open-candidates.XXXXXX")"
+  awk '
+    function flush_hunk() {
+      if (path != "" && path ~ /\.java$/ && catch_line > 0 && return_line > 0 && return_added) {
+        printf "%s\t%d\n", path, catch_line
+      }
+    }
+    /^diff --git / {
+      flush_hunk()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_hunk()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      flush_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      catch_line = 0
+      return_line = 0
+      return_added = 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" || prefix == " ") {
+        if (text ~ /catch[[:space:]]*\(/) catch_line = line_no
+        if (catch_line > 0 && text ~ /return[[:space:]]+true[[:space:]]*;/) {
+          return_line = line_no
+          if (prefix == "+") return_added = 1
+        }
+        line_no++
+      }
+    }
+    END { flush_hunk() }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    grep -Eqi 'authoriz|permission|isAllowed|canAccess|securityContext|accessCheck' "$source_file" || continue
+    grep -Eq 'catch[[:space:]]*\(' "$source_file" || continue
+    grep -Eq 'return[[:space:]]+true[[:space:]]*;' "$source_file" || continue
+    printf '%s\n\n' \
+      "P1 $candidate_path:$candidate_line - 授权异常路径默认放行，认证/权限检查失败时返回 true，形成 fail-open 安全边界。" \
+      "影响：鉴权服务超时、解析失败或依赖不可用时，攻击者可能绕过权限检查执行删除、管理或其他受保护操作。" \
+      "修复建议：异常时拒绝请求或向上抛出可观测错误；只在明确的离线降级契约下允许有限操作，并设置短时缓存、审计和默认拒绝。" \
+      "验证方式：注入鉴权超时、异常和无效凭据，确认所有受保护端点均返回拒绝且不会调用后续写操作；恢复鉴权服务后再验证正常授权路径。" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
 }
 
 collect_url_prefix_whitelist_preflight() {
@@ -6670,6 +7002,9 @@ collect_idor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_s
 collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_check_then_act_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_partial_side_effect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"

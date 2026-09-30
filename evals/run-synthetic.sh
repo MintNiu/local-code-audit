@@ -96,7 +96,7 @@ run_review() {
       OLLAMA_REVIEW_TOP_K="${PRESIGNED_REVIEW_TOP_K:-1}" \
       OLLAMA_REVIEW_TOP_P="${PRESIGNED_REVIEW_TOP_P:-1}" \
         "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
-    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" || "$name" == "java-open-redirect-safe" || "$name" == "java-cors-safe" || "$name" == "java-weak-password-hash-safe" ]]; then
+    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" || "$name" == "java-open-redirect-safe" || "$name" == "java-cors-safe" || "$name" == "java-weak-password-hash-safe" || "$name" == "java-fail-open-safe" || "$name" == "java-check-then-act-safe" || "$name" == "java-partial-side-effect-safe" ]]; then
       # These new clean security boundaries need only the canonical marker.
       # Limit optional prose so a local model cannot spend the whole timeout
       # repeating non-actionable parser/query commentary; done=true and the
@@ -280,6 +280,42 @@ run_review() {
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
+    elif [[ "$expected_findings" == "fail-open" ]]; then
+      if ! grep -Eiq 'fail.?open|放行|默认允许|异常.*(放过|通过)|授权.*异常|权限.*异常|catch.*true|错误.*允许' "$output_file"; then
+        echo "$name run $run missed the expected fail-open authorization risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 fail-open finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "race" ]]; then
+      if ! grep -Eiq '竞态|并发|check.?then.?act|原子|线程安全|共享状态|AtomicBoolean|compareAndSet|claimed' "$output_file"; then
+        echo "$name run $run missed the expected check-then-act concurrency risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 race finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+    elif [[ "$expected_findings" == "partial" ]]; then
+      if ! grep -Eiq '事务|transaction|外部副作用|支付|部分成功|回滚|一致性|outbox|幂等|数据库.*外部' "$output_file"; then
+        echo "$name run $run missed the expected partial-side-effect risk: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
+      finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+        echo "$name run $run did not return a P0/P1 partial-side-effect finding: $output_file" >&2
+        sed -n '1,160p' "$output_file" >&2
+        return 1
+      fi
     elif [[ "$expected_findings" == "migration" ]]; then
       if ! grep -Eiq 'migration|迁移|已有库|升级路径|数据库' "$output_file"; then
         echo "$name run $run missed the expected migration-upgrade risk: $output_file" >&2
@@ -379,6 +415,12 @@ run_review java-cors cors
 run_review java-cors-safe 0
 run_review java-weak-password-hash password-hash
 run_review java-weak-password-hash-safe 0
+run_review java-fail-open fail-open
+run_review java-fail-open-safe 0
+run_review java-check-then-act race
+run_review java-check-then-act-safe 0
+run_review java-partial-side-effect partial
+run_review java-partial-side-effect-safe 0
 run_review java-maintenance-safe 0
 run_review java-lombok-properties-safe 0
 run_review java-generated-column-safe 0
@@ -404,4 +446,4 @@ if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; th
   exit 1
 fi
 
-echo "synthetic evaluation passed: positives=$((runs * 17)), divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, sql_injection=$runs, xxe=$runs, idor=$runs, open_redirect=$runs, cors=$runs, weak_password_hash=$runs, clean=$((runs * 16)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
+echo "synthetic evaluation passed: positives=$((runs * 20)), divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, sql_injection=$runs, xxe=$runs, idor=$runs, open_redirect=$runs, cors=$runs, weak_password_hash=$runs, fail_open=$runs, check_then_act=$runs, partial_side_effect=$runs, clean=$((runs * 19)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"

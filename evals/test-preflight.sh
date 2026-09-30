@@ -3435,6 +3435,134 @@ printf '%s\n' "$weak_hash_output" | grep -F '密码直接使用快速哈希算�
   exit 1
 }
 
+# Business-integrity preflights: fail-open authorization, singleton
+# check-then-act, and an external payment side effect before local commit.
+rm -f "$fake_bin/perl"
+fail_open_repo="$fixture_root/fail-open-repo"
+mkdir -p "$fail_open_repo/src"
+git -C "$fail_open_repo" init -q
+git -C "$fail_open_repo" config user.email test@example.invalid
+git -C "$fail_open_repo" config user.name preflight-fail-open-test
+cat >"$fail_open_repo/src/AdminEndpoint.java" <<'EOF'
+final class AdminEndpoint {
+    private final Authorizer authorizer;
+
+    boolean allowed(Object request) {
+        try {
+            return authorizer.check(request);
+        } catch (RuntimeException ex) {
+            return false;
+        }
+    }
+
+    interface Authorizer { boolean check(Object request); }
+}
+EOF
+git -C "$fail_open_repo" add .
+git -C "$fail_open_repo" commit -qm base
+sed -i.bak 's/return false;/return true;/' "$fail_open_repo/src/AdminEndpoint.java"
+rm -f "$fail_open_repo/src/AdminEndpoint.java.bak"
+fail_open_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$fail_open_repo")"
+printf '%s\n' "$fail_open_output" | grep -F '授权异常路径默认放行' >/dev/null || {
+  echo 'missing fail-open authorization preflight' >&2
+  printf '%s\n' "$fail_open_output" >&2
+  exit 1
+}
+
+race_repo="$fixture_root/check-then-act-repo"
+mkdir -p "$race_repo/src"
+git -C "$race_repo" init -q
+git -C "$race_repo" config user.email test@example.invalid
+git -C "$race_repo" config user.name preflight-check-then-act-test
+cat >"$race_repo/src/JobClaimService.java" <<'EOF'
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.stereotype.Service;
+
+@Service
+final class JobClaimService {
+    private final AtomicBoolean claimed = new AtomicBoolean();
+
+    boolean claim() {
+        return claimed.compareAndSet(false, true);
+    }
+}
+EOF
+git -C "$race_repo" add .
+git -C "$race_repo" commit -qm base
+python3 - "$race_repo/src/JobClaimService.java" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text('''import org.springframework.stereotype.Service;
+
+@Service
+final class JobClaimService {
+    private boolean claimed;
+
+    boolean claim() {
+        if (!claimed) {
+            claimed = true;
+            return true;
+        }
+        return false;
+    }
+}
+''')
+PY
+race_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$race_repo")"
+printf '%s\n' "$race_output" | grep -F '共享可变状态存在 check-then-act 竞态' >/dev/null || {
+  echo 'missing check-then-act preflight' >&2
+  printf '%s\n' "$race_output" >&2
+  exit 1
+}
+
+partial_repo="$fixture_root/partial-side-effect-repo"
+mkdir -p "$partial_repo/src"
+git -C "$partial_repo" init -q
+git -C "$partial_repo" config user.email test@example.invalid
+git -C "$partial_repo" config user.name preflight-partial-side-effect-test
+cat >"$partial_repo/src/PaymentService.java" <<'EOF'
+final class PaymentService {
+    void create(OrderRequest request) {
+        savePending(request.amount());
+        outbox(request.amount());
+    }
+
+    void savePending(long amount) {}
+    void outbox(long amount) {}
+    record OrderRequest(long amount) {}
+}
+EOF
+git -C "$partial_repo" add .
+git -C "$partial_repo" commit -qm base
+cat >"$partial_repo/src/PaymentService.java" <<'EOF'
+import org.springframework.transaction.annotation.Transactional;
+
+final class PaymentService {
+    private final PaymentGateway gateway;
+    private final OrderRepository orders;
+
+    @Transactional
+    void create(OrderRequest request) {
+        gateway.charge(request.cardToken(), request.amount());
+        orders.save(request.amount());
+    }
+
+    interface PaymentGateway { void charge(String cardToken, long amount); }
+    interface OrderRepository { void save(long amount); }
+    record OrderRequest(String cardToken, long amount) {}
+}
+EOF
+partial_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$partial_repo")"
+printf '%s\n' "$partial_output" | grep -F '事务内先执行外部副作用再保存本地状态' >/dev/null || {
+  echo 'missing partial-side-effect preflight' >&2
+  printf '%s\n' "$partial_output" >&2
+  exit 1
+}
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.
