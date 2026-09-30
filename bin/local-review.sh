@@ -2324,6 +2324,50 @@ dedup_preflight_blocks() {
   mv "$deduped_file" "$preflight_file"
 }
 
+annotate_preflight_blocks() {
+  local preflight_file="$1"
+  local source_label="$2"
+  local annotated_file
+
+  [[ -s "$preflight_file" ]] || return 0
+  annotated_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-annotated.XXXXXX")"
+  awk -v source_label="$source_label" '
+    BEGIN { RS = ""; ORS = "\n\n" }
+    {
+      header = $0
+      sub(/\n.*/, "", header)
+      body = $0
+      sub(/^[^\n]*\n/, "", body)
+      if (body == $0) body = ""
+      if (body == "") {
+        print header "\n来源：" source_label
+      } else {
+        print header "\n来源：" source_label "\n" body
+      }
+    }
+  ' "$preflight_file" >"$annotated_file"
+  cat "$annotated_file"
+  rm -f "$annotated_file"
+}
+
+dedup_deterministic_preflight_blocks() {
+  # A large diff may route the same deterministic evidence to several model
+  # shards. Keep every model block visible, but do not print the identical
+  # code-proven preflight once per shard. The explicit source marker makes
+  # this distinction unambiguous and keeps user-visible provenance intact.
+  LC_ALL=C awk '
+    BEGIN { RS = ""; ORS = "\n\n" }
+    {
+      if ($0 ~ /来源：确定性预检（代码证据，非模型原文）/ ||
+          $0 ~ /来源：确定性锁序预检（代码证据，非模型原文）/) {
+        if (!seen[$0]++) print
+      } else {
+        print
+      }
+    }
+  '
+}
+
 sort_findings_by_severity() {
   # Split on every severity header, not only blank lines. This keeps the
   # global P0..P3 ordering even when a model emits adjacent findings without
@@ -2856,7 +2900,7 @@ validate_response() {
     if [[ -n "$truncated_text" && -s "${build_preflight_file:-}" ]] &&
        grep -Fq '权限拦截器重构后仍有同类任务/日志入口未执行' "$build_preflight_file" &&
        grep -Eq '权限拦截器重构|服务层.*校验|job.?group' <<<"$truncated_text"; then
-      recoverable_text="$(printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings | dedup_exact_findings)"
+      recoverable_text="$(printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings)"
       recoverable_normalized="$(printf '%s' "$recoverable_text" | tr -d '[:space:]')"
       case "$recoverable_normalized" in
         ""|"未发现阻塞问题"|"未发现阻塞问题。"|"未发现阻塞问题."|"未发现阻塞问题！"|"未发现阻塞问题!")
@@ -2876,8 +2920,7 @@ validate_response() {
        grep -Fq '请求参数 executorAddress 直接传入 NetComClientProxy' "$build_preflight_file" &&
        grep -Eq 'executorAddress|NetComClientProxy|SSRF|请求伪造|内网执行器|metadata' <<<"$truncated_text"; then
       recoverable_file="$(mktemp "${TMPDIR:-/tmp}/local-review-direct-address-ssrf-recover.XXXXXX")"
-      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings | dedup_exact_findings >"$recoverable_file"
-      filter_direct_address_ssrf_preflight_duplicates "$recoverable_file" "$build_preflight_file"
+      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings >"$recoverable_file"
       if ! grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$recoverable_file" ||
          ! grep -Eq '租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|路径遍历|凭据|密钥|密码|XSS|反序列化|命令执行|任意文件|反射漏洞|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败' "$recoverable_file"; then
         printf '未发现阻塞问题\n' >"$output_file"
@@ -2898,8 +2941,7 @@ validate_response() {
        grep -Fq '取消后仍可重放有效的预签名上传票据' "$build_preflight_file" &&
        grep -Eq '预签名|票据|重放|objectKey|对象存储|cleanupExpired|取消' <<<"$truncated_text"; then
       recoverable_file="$(mktemp "${TMPDIR:-/tmp}/local-review-presigned-recover.XXXXXX")"
-      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings | dedup_exact_findings >"$recoverable_file"
-      filter_presigned_replay_preflight_duplicates "$recoverable_file" "$build_preflight_file"
+      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings >"$recoverable_file"
       if ! grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$recoverable_file" ||
          ! grep -Eq '租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|凭据|密钥|密码|XSS|反序列化|命令执行|任意文件|反射漏洞' <<<"$truncated_text"; then
         printf '未发现阻塞问题\n' >"$output_file"
@@ -2918,7 +2960,7 @@ validate_response() {
     if [[ -n "$truncated_text" ]] &&
        grep -Eq 'DocumentBuilderFactory|XML|解析|外部实体|命名空间|tenant|租户' <<<"$truncated_text"; then
       recoverable_file="$(mktemp "${TMPDIR:-/tmp}/local-review-xml-safe-recover.XXXXXX")"
-      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings | dedup_exact_findings >"$recoverable_file"
+      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings >"$recoverable_file"
       if ! grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$recoverable_file"; then
         printf '未发现阻塞问题\n' >"$output_file"
         printf 'clean\n' >"$kind_file"
@@ -2952,7 +2994,7 @@ validate_response() {
   # Keep the raw response local while applying evidence filters; redact only
   # after filtering/deduplication so guards such as `token: null` remain
   # visible to the deterministic shard-boundary checks.
-  response_text="$(jq -r '.response' <"$response_file" | sanitize_terminal_text | filter_unsupported_shard_findings | dedup_exact_findings | redact_sensitive_text)"
+  response_text="$(jq -r '.response' <"$response_file" | sanitize_terminal_text | filter_unsupported_shard_findings | redact_sensitive_text)"
   normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
 
   if [[ -z "$normalized_response" ]]; then
@@ -3355,37 +3397,18 @@ merge_preflight_findings() {
       index($0, "跨事务/行锁文本序列") == 0 { print }
     ' "$preflight_file" >"$finding_preflight_file"
   fi
-  if [[ -s "$finding_preflight_file" ]]; then
-    filter_security_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_authorization_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_presigned_replay_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_direct_address_ssrf_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_unsafe_deserialization_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_xxe_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_idor_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_open_redirect_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_cors_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_weak_password_hash_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_check_then_act_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_partial_side_effect_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_fail_open_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_path_traversal_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_url_prefix_whitelist_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_mybatis_raw_substitution_preflight_duplicates "$output_file" "$finding_preflight_file"
-    filter_migration_preflight_duplicates "$output_file" "$finding_preflight_file"
-  fi
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
   {
     if grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$output_file"; then
       cat "$output_file"
     fi
     if [[ -s "$finding_preflight_file" ]]; then
-      cat "$finding_preflight_file"
+      annotate_preflight_blocks "$finding_preflight_file" "确定性预检（代码证据，非模型原文）"
     fi
     if [[ -s "$deterministic_file" ]]; then
-      cat "$deterministic_file"
+      annotate_preflight_blocks "$deterministic_file" "确定性锁序预检（代码证据，非模型原文）"
     fi
-  } | dedup_exact_findings | sort_findings_by_severity >"$merged_file"
+  } | sort_findings_by_severity >"$merged_file"
   if [[ -s "$merged_file" ]]; then
     cat "$merged_file" >"$output_file"
     printf 'findings\n' >"$kind_file"
@@ -7924,9 +7947,8 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
     }
   ' "$build_preflight_file" >"$chunk_preflight_file"
   # Keep authorization-annotation findings out of the model prompt (they are
-  # deterministic evidence), but restore them for post-response duplicate
-  # filtering and final merge. They are repeated per shard deliberately;
-  # dedup_exact_findings removes identical deterministic blocks later.
+  # deterministic evidence), but restore them for the final merge. They are
+  # marked as deterministic additions; model findings remain intact.
   cp "$chunk_preflight_file" "$chunk_merge_preflight_file"
   awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "声明式权限注解被注释/删除") > 0 { print }' \
     "$build_preflight_file" >>"$chunk_merge_preflight_file"
@@ -7991,10 +8013,9 @@ if [[ "$has_findings" == true ]]; then
   done
   # Re-establish the global severity order after shard aggregation. Each shard
   # is ordered independently, so lexical chunk order cannot guarantee P0/P1
-  # findings appear before lower-severity findings. Keep original order within
-  # each severity. Re-run semantic deduplication after shard aggregation:
-  # shards can describe one root cause at one location with different prose.
-  sort_findings_by_severity <"$combined_output_file" | dedup_exact_findings | sort_findings_by_severity
+  # findings appear before lower-severity findings. Keep every model block;
+  # source markers distinguish deterministic preflight additions.
+  sort_findings_by_severity <"$combined_output_file" | dedup_deterministic_preflight_blocks
 else
   printf '未发现阻塞问题\n'
 fi

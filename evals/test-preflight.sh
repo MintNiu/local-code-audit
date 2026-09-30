@@ -1346,8 +1346,8 @@ chmod +x "$fake_bin/curl"
 duplicate_security_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo")"
 duplicate_security_count="$(printf '%s\n' "$duplicate_security_output" | grep -F 'P1 src/main/java/com/example/api/client/QueryTokenProxy.java:7' | wc -l | tr -d ' ')"
-[[ "$duplicate_security_count" == "1" ]] || {
-  echo 'security preflight and model duplicate were not collapsed' >&2
+[[ "$duplicate_security_count" -ge 2 ]] || {
+  echo 'security preflight or model finding was hidden' >&2
   printf '%s\n' "$duplicate_security_output" >&2
   exit 1
 }
@@ -1359,16 +1359,16 @@ EOF
 chmod +x "$fake_bin/curl"
 broad_duplicate_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$repo")"
 broad_duplicate_count="$(printf '%s\n' "$broad_duplicate_output" | grep -F 'P1 src/main/java/com/example/api/client/QueryTokenProxy.java:' | wc -l | tr -d ' ')"
-[[ "$broad_duplicate_count" == "1" ]] || {
-  echo 'broad model URL-token duplicate was not collapsed to exact preflight finding' >&2
+[[ "$broad_duplicate_count" -ge 2 ]] || {
+  echo 'broad model URL-token finding or exact preflight finding was hidden' >&2
   printf '%s\n' "$broad_duplicate_output" >&2
   exit 1
 }
-if printf '%s\n' "$broad_duplicate_output" | grep -F 'QueryTokenProxy.java:3-4' >/dev/null; then
-  echo 'broad model URL-token location was retained instead of exact preflight location' >&2
+printf '%s\n' "$broad_duplicate_output" | grep -F 'QueryTokenProxy.java:3-4' >/dev/null || {
+  echo 'broad model URL-token finding was hidden' >&2
   printf '%s\n' "$broad_duplicate_output" >&2
   exit 1
-fi
+}
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -1391,8 +1391,8 @@ chmod +x "$fake_bin/curl"
 duplicate_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo")"
 duplicate_credential_count="$(printf '%s\n' "$duplicate_credential_output" | grep -F 'application-credential.yml:3' | wc -l | tr -d ' ')"
-[[ "$duplicate_credential_count" == "1" ]] || {
-  echo 'credential preflight and model duplicate were not collapsed' >&2
+[[ "$duplicate_credential_count" -ge 3 ]] || {
+  echo 'credential preflight or model findings were hidden' >&2
   printf '%s\n' "$duplicate_credential_output" >&2
   exit 1
 }
@@ -1405,16 +1405,16 @@ chmod +x "$fake_bin/curl"
 severity_order_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo")"
 severity_order_count="$(printf '%s\n' "$severity_order_output" | grep -F 'application-credential.yml:3' | wc -l | tr -d ' ')"
-[[ "$severity_order_count" == "1" ]] || {
-  echo 'semantic dedup kept both low- and high-severity variants' >&2
+[[ "$severity_order_count" -ge 3 ]] || {
+  echo 'model severity variants or preflight finding were hidden' >&2
   printf '%s\n' "$severity_order_output" >&2
   exit 1
 }
-if printf '%s\n' "$severity_order_output" | grep -F 'P2 application-credential.yml:3' >/dev/null; then
-  echo 'semantic dedup retained an earlier lower-severity finding' >&2
+printf '%s\n' "$severity_order_output" | grep -F 'P2 application-credential.yml:3' >/dev/null || {
+  echo 'lower-severity model finding was hidden' >&2
   printf '%s\n' "$severity_order_output" >&2
   exit 1
-fi
+}
 
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -1424,8 +1424,8 @@ chmod +x "$fake_bin/curl"
 independent_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$repo")"
 independent_credential_count="$(printf '%s\n' "$independent_credential_output" | grep -c '^P1 application-credential.yml:3' || true)"
-[[ "$independent_credential_count" == "2" ]] || {
-  echo 'independent credential risk families at one location were incorrectly merged' >&2
+[[ "$independent_credential_count" -ge 3 ]] || {
+  echo 'independent credential risk families or preflight finding were hidden' >&2
   printf '%s\n' "$independent_credential_output" >&2
   exit 1
 }
@@ -1455,7 +1455,7 @@ for java_division_header in 'Integer 包装类型参与除法时未见非空保�
     printf '%s\n' "$java_division_output" >&2
     exit 1
   }
-  java_division_block="$(printf '%s\n' "$java_division_output" | sed -n "${java_division_line},$((java_division_line + 3))p")"
+  java_division_block="$(printf '%s\n' "$java_division_output" | sed -n "${java_division_line},$((java_division_line + 4))p")"
   if ! grep -Fq '影响：' <<<"$java_division_block" || \
      ! grep -Fq '修复建议：' <<<"$java_division_block" || \
      ! grep -Fq '验证方式：' <<<"$java_division_block"; then
@@ -2854,8 +2854,8 @@ printf '%s\n' "$migration_output" | grep -F '删除版本化迁移脚本会中�
   printf '%s\n' "$migration_output" >&2
   exit 1
 }
-if [[ "$(printf '%s\n' "$migration_output" | grep -c 'sql/migration/V20260927__existing_database.sql')" -ne 1 ]]; then
-  echo 'migration model duplicate was not filtered' >&2
+if [[ "$(printf '%s\n' "$migration_output" | grep -c 'sql/migration/V20260927__existing_database.sql')" -lt 2 ]]; then
+  echo 'migration model or preflight finding was hidden' >&2
   printf '%s\n' "$migration_output" >&2
   exit 1
 fi

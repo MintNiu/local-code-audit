@@ -582,6 +582,10 @@ reserve 和 effective budget，方便后续复核。
 
 `d7cda2c` 随后完成两轮历史重复审查，均 exit=0、结果 clean，重复门禁通过；两轮耗时不同但候选集合和运行签名稳定。当前 tuned profile 也重新执行了 1 轮完整合成门禁：7 类正例均命中，4 个 clean 对照通过，截断路径显式失败。新增证据只扩大了跨服务和生命周期 clean 覆盖，仍不能替代至少 20 个经人工确认且包含多种真实 P0/P1 根因的独立留出集。
 
+### 2026-10-01：最终输出保留模型原文
+
+终审发现旧的预检合并路径会把与确定性证据重叠的模型段落删除，这不符合“local-review 找到的所有问题都必须可见”的要求。当前个人版已改为：先保留经过终端清理和证据门禁的全部模型问题，再追加带来源标记的确定性预检；不再对模型问题做语义去重或用预检替换模型段落。仅明确的非问题说明、纯分片上下文提示和不完整/越界响应仍按安全门禁处理；遇到截断会失败闭门并保留诊断，不把半截结果伪装成完整审查。新增 `evals/test-output-visibility.sh`，并同步更新证据过滤回归，验证模型与预检问题同时出现在用户可见输出中。
+
 ### 2026-09-24：迁移脚本预检与删除文件输出门禁
 
 大提交 `platform-hr-service:a8bf560` 的完整个人 profile 复核在 `num_ctx=32768`、9KB 分片下 exit=0；模型候选包含 1 条真实 OSS/内部令牌 P1，但人工还确认迁移脚本中 `DROP trg_hr_employee_event_forbid_delete` 与 `CREATE hr_projection_outboxtrg_hr_employee_event_forbid_delete` 名称不一致，原始 scorecard 为 `gold_p0_p1=2`、`p0_p1_found=1`、`predicted_candidates=19`、`false_positive=6`，即 1/2（50%）召回。另一次 15KB 分片尝试在第 16 个分片连续超时，按 fail-closed 处理，不计入 scorecard；这再次证明扩大分片不能作为默认提速手段。

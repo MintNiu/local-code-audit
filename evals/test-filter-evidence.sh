@@ -339,9 +339,9 @@ authorization_output="$(run_review authorization-annotation "$authorization_repo
 修复建议：移除注释。
 验证方式：检查代码风格。')"
 if ! grep -F '声明式权限注解被注释/删除' "$authorization_output" >/dev/null ||
-   grep -F 'MODEL_AUTH_DUPLICATE' "$authorization_output" >/dev/null ||
+   ! grep -F 'MODEL_AUTH_DUPLICATE' "$authorization_output" >/dev/null ||
    grep -Eq '^[[:space:]]*信息[[:space:]:：]' "$authorization_output"; then
-  printf 'FAIL authorization-annotation: deterministic auth preflight did not replace duplicates\n' >&2
+  printf 'FAIL authorization-annotation: model and deterministic findings were not both preserved\n' >&2
   cat "$authorization_output" >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
@@ -366,8 +366,8 @@ P1 src/UploadSessionService.java:18-21 - MODEL_PRESIGNED_DUPLICATE_2：缺少过
 修复建议：校验过期时间。
 验证方式：使用过期票据测试。')"
 if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_output" >/dev/null ||
-   grep -F 'MODEL_PRESIGNED_DUPLICATE' "$presigned_output" >/dev/null; then
-  printf 'FAIL presigned-replay: deterministic preflight did not replace lifecycle duplicates\n' >&2
+   ! grep -F 'MODEL_PRESIGNED_DUPLICATE' "$presigned_output" >/dev/null; then
+  printf 'FAIL presigned-replay: model and deterministic findings were not both preserved\n' >&2
   cat "$presigned_output" >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
@@ -498,8 +498,8 @@ mybatis_raw_output="$(run_review mybatis-raw-substitution "$mybatis_raw_repo" 'P
 修复建议：改为 #{executorTimeout} 参数绑定。
 验证方式：使用 SQL 片段输入执行 Mapper 集成测试。')"
 if ! grep -F 'MyBatis Mapper 将表达式' "$mybatis_raw_output" >/dev/null ||
-   grep -F 'MODEL_MYBATIS_RAW_DUPLICATE' "$mybatis_raw_output" >/dev/null; then
-  printf 'FAIL mybatis-raw-substitution: deterministic finding or duplicate filter missing\n' >&2
+   ! grep -F 'MODEL_MYBATIS_RAW_DUPLICATE' "$mybatis_raw_output" >/dev/null; then
+  printf 'FAIL mybatis-raw-substitution: model and deterministic findings were not both preserved\n' >&2
   cat "$mybatis_raw_output" >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
@@ -687,11 +687,11 @@ presigned_output="$(run_review presigned-speculation "$presigned_repo" 'P1 src/U
 修复建议：添加异常处理，确保会话状态与存储状态一致。
 
 验证方式：模拟 store.delete 失败，确认会话状态被正确回滚。')"
-if grep -F 'PRESIGN_LIFECYCLE_DUPLICATE_MARKER' "$presigned_output" >/dev/null ||
+if ! grep -F 'PRESIGN_LIFECYCLE_DUPLICATE_MARKER' "$presigned_output" >/dev/null ||
    grep -F 'PRESIGN_NULL_SPECULATION_MARKER' "$presigned_output" >/dev/null ||
    grep -F 'DELETE_EXCEPTION_SPECULATION_MARKER' "$presigned_output" >/dev/null ||
    ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_output" >/dev/null; then
-  printf 'FAIL presigned-speculation: speculative lifecycle paragraphs were not filtered or preflight finding missing\n' >&2
+  printf 'FAIL presigned-speculation: concrete model finding or preflight finding was missing\n' >&2
   cat "$presigned_output" >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi

@@ -90,9 +90,15 @@ output="$(
   "$repo_root/bin/local-review.sh" --repo "$repo"
 )"
 
-count="$(printf '%s\n' "$output" | grep -c '^P1 src/main/java/example/Large.java:5 -' || true)"
-if [[ "$count" != 1 ]]; then
-  echo "expected one routed URL-token finding, got $count" >&2
+model_count="$(printf '%s\n' "$output" | grep -c '^P1 src/main/java/example/Large.java:5 - 认证令牌从 URL 查询参数读取' || true)"
+if [[ "$model_count" -lt 2 ]]; then
+  echo "model URL-token findings were hidden during shard aggregation (got $model_count)" >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+fi
+preflight_count="$(printf '%s\n' "$output" | grep -c 'P1 src/main/java/example/Large.java:5 - 凭据值被拼接到 URL' || true)"
+if [[ "$preflight_count" != 1 ]]; then
+  echo "expected one deduplicated routed preflight finding, got $preflight_count" >&2
   printf '%s\n' "$output" >&2
   exit 1
 fi

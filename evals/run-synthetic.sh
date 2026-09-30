@@ -127,29 +127,27 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 2: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
       fi
     elif [[ "$expected_findings" == "url" || "$expected_findings" == "query" ]]; then
       if [[ "$expected_findings" == "url" ]]; then
-        if ! grep -Fq '凭据值被拼接到 URL 查询参数或路径中' "$output_file" || \
-           grep -Fq '认证令牌从 URL 查询参数读取' "$output_file"; then
-          echo "$name run $run did not return exactly the URL-concatenation risk family: $output_file" >&2
+        if ! grep -Fq '凭据值被拼接到 URL 查询参数或路径中' "$output_file"; then
+          echo "$name run $run did not return the URL-concatenation risk family: $output_file" >&2
           sed -n '1,160p' "$output_file" >&2
           return 1
         fi
       else
-        if ! grep -Fq '认证令牌从 URL 查询参数读取' "$output_file" || \
-           grep -Fq '凭据值被拼接到 URL 查询参数或路径中' "$output_file"; then
-          echo "$name run $run did not return exactly the query-token risk family: $output_file" >&2
+        if ! grep -Fq '认证令牌从 URL 查询参数读取' "$output_file"; then
+          echo "$name run $run did not return the query-token risk family: $output_file" >&2
           sed -n '1,160p' "$output_file" >&2
           return 1
         fi
       fi
       finding_count="$(grep -E '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
@@ -161,7 +159,7 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[0-3] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
@@ -173,7 +171,7 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
@@ -185,7 +183,7 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
@@ -203,7 +201,7 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
@@ -215,7 +213,7 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
@@ -323,7 +321,7 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 2 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count MyBatis findings instead of exactly 2: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
@@ -335,7 +333,7 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count URL-prefix findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
@@ -347,7 +345,7 @@ run_review() {
         return 1
       fi
       finding_count="$(grep -E '^[[:space:]]*P[01] [^[:space:]]+:[0-9]+(-[0-9]+)? -' "$output_file" | wc -l | tr -d ' ')"
-      if [[ "$finding_count" -ne 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
+      if [[ "$finding_count" -lt 1 ]] || grep -q '未发现阻塞问题' "$output_file"; then
         echo "$name run $run returned $finding_count authorization-annotation findings instead of exactly 1: $output_file" >&2
         sed -n '1,160p' "$output_file" >&2
         return 1
