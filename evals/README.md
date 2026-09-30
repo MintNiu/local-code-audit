@@ -185,7 +185,7 @@ scorecard 汇总器也有独立的输入校验回归：
 
 声明式权限注解回归：差异把 `@PreAuthorize`、`@RequiresPermissions` 或等价注解注释/删除时，运行器会按控制器文件生成一条确定性 P1，列出全部证据行；大差异中该段只在最终合并阶段注入，避免占满每个模型分片的固定上下文预算。模型对同一证据的重复段和纯“可读性/维护性”信息会被过滤，但租户、SQL、并发、凭据等独立根因仍保留。真实 `platform-erp-service:4451b5b` 11/11 分片完整结束，4 个控制器 P1 全部定位；两轮重复 398/441 秒，结果文本与运行签名稳定。该预检只增加证据覆盖，不代表阶段 1 已满足 20 个 holdout 根因和 90% 生产门槛。
 
-历史评测清单完整性：`run-history.sh` 与 `prepare-history-labels.sh` 在创建输出目录前拒绝控制字符、未转义 TAB/列数漂移、非法 commit/parent 和路径遍历值；`test-history.sh` 已覆盖这些 fail-closed 分支。新增 ERP 幂等候选 `0e6006b` 的完整复核被人工判为未命中/误报对照，不计入召回；会话重放候选因 Ollama 并行争用导致分片超时，也不计入指标。
+历史评测清单完整性：`run-history.sh` 与 `prepare-history-labels.sh` 在创建输出目录前拒绝控制字符、未转义 TAB/列数漂移、非法 commit/parent 和路径遍历值；`test-history.sh` 已覆盖这些 fail-closed 分支。ERP 幂等候选 `0e6006b` 的旧金标已纠偏：并发缺陷属于父版本，目标提交已通过 `FOR UPDATE`、`request_no` 唯一键和重复键处理补齐；当前两轮运行均为 clean 且结果稳定，因此不计入召回分母。存量数据库缺少迁移脚本是独立的升级风险，不能与该提交的业务并发金标混为一谈；会话重放候选因 Ollama 并行争用导致分片超时，也不计入指标。
 
 预签名长尾恢复：单个 Java 文件且唯一确定性 P1 是取消后重放预签名票据时，模型长度截断或传输失败可以安全回退到该确定性 finding；存在第二个预检根因或独立租户/权限/SQL/SSRF/凭据证据时继续 fail-closed。该条件已加入证据过滤回归，当前共 16 个用例，避免把不完整模型输出伪装成完整审查。
 
@@ -210,4 +210,8 @@ scorecard 汇总器也有独立的输入校验回归：
 
 2026-09-30 扩展三组不同根因：MyBatis 标量 `${...}` 原始替换、URL `startsWith` 白名单前缀绕过、声明式权限注解删除/注释。个人 tuned profile 单轮全量门禁为 23 类正例、22 类 clean 对照；MyBatis 两个表达式分别保留，URL 前缀同文件/行号重复仅保留一条，独立根因不被去重；预签名回退和显式截断失败门均通过。新增 URL 去重回归 7/7、路径去重回归 3/3，无模型预检和其余 deterministic suites 均通过。该结果仍不替代至少 20 个独立真实 holdout 的人工标注与阶段一门禁。
 
-2026-09-30 真实 MyBatis 复测：`platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 在固定提交快照和直接父提交上用当前 tuned 运行器重复两轮，均完整返回单条 P1（`XxlJobInfoMapper.xml:155` 的 `${executorTimeout}` 原始 SQL 替换），两轮结果 SHA-256 一致，`gold=1`、`found=1`、`predicted=1`、`false_positive=0`、定位准确且 `repeat_stable=true`。旧的 clean 结果只作漏报基线，不覆盖新 scorecard；这个证据仍不能替代阶段一的整体真实 holdout 门禁。
+2026-09-30 真实 MyBatis 金标纠偏：`platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 的 `XxlJobInfo.executorTimeout` 是请求绑定后的 primitive `int`，静态源码证据表明任意 SQL 片段无法进入该 Mapper；父提交已经存在同类 `${executeTimeout}` 形态，因此该提交没有新增可证实的 P1 SQL 注入。旧的 clean 结果应保留，不能把模型重复输出的旧启发式当作金标。运行器现只把完整 Mapper 参数类型和 Java 数值 getter 作为显式线索发给模型；未知类型仍 fail-closed，且不再静默删除模型自己的问题。两轮 typed rerun 均完整、结果稳定；该纠偏降低确定性预检误报，不扩大阶段一召回分母。
+
+同日阶段一验收审计：此前用于调优 MyBatis、凭据、权限、迁移和并发预检的真实提交不能继续作为最终未见 holdout；它们只能作为开发/诊断证据。最终生产验收必须冻结当前运行器与 Modelfile 后，排除已用于规则设计的提交及同功能簇，重新选择至少 20 个跨仓库真实提交，完成双轮运行、人工 P0/P1 真值、行号核对和误报标注。未完成这次冻结前，不能从现有 scorecard 推导生产召回率。
+
+随后补强 MyBatis 类型边界：数值属性必须由精确 `parameterType` FQN 和实际 Java 数值 getter 同时证明；字段类型、简单类名、注释 getter、嵌套表达式、`<bind>` 以及 `<foreach item/index>` 遮蔽均 fail-closed 保留候选。全仓扫描在每个 Java/XML 文件前后检查总超时，测试覆盖 10 个类型边界；模型段落只有在所有 `${...}` 表达式都被同一确定性证据覆盖时才视为同根因重复，未覆盖的第二个表达式继续完整可见，新增 MyBatis 去重回归为 6 个用例。模型发现仍需人工验证，类型线索不会静默删除模型问题。

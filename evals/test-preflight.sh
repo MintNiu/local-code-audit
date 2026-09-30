@@ -3299,6 +3299,154 @@ mybatis_raw_count="$(printf '%s\n' "$mybatis_raw_output" | grep -Fc 'MyBatis Map
   exit 1
 }
 
+# A primitive numeric property is bound by the web layer before MyBatis and
+# cannot carry an arbitrary SQL fragment.  The type-aware preflight must not
+# classify this shape as an injection solely because the mapper uses `${...}`.
+mybatis_numeric_repo="$fixture_root/mybatis-numeric-property-repo"
+mkdir -p "$mybatis_numeric_repo/src/main/java/example" "$mybatis_numeric_repo/src/main/resources/mybatis-mapper"
+git -C "$mybatis_numeric_repo" init -q
+git -C "$mybatis_numeric_repo" config user.email test@example.invalid
+git -C "$mybatis_numeric_repo" config user.name preflight-mybatis-numeric-test
+cat >"$mybatis_numeric_repo/src/main/java/example/NumericParam.java" <<'EOF'
+package example;
+
+public final class NumericParam {
+    private int timeout;
+
+    public int getTimeout() {
+        return timeout;
+    }
+}
+EOF
+cat >"$mybatis_numeric_repo/src/main/resources/mybatis-mapper/NumericMapper.xml" <<'EOF'
+<mapper namespace="example.NumericMapper">
+  <update id="update" parameterType="example.NumericParam">
+    UPDATE jobs SET timeout = #{timeout} WHERE id = #{id}
+  </update>
+</mapper>
+EOF
+git -C "$mybatis_numeric_repo" add .
+git -C "$mybatis_numeric_repo" commit -qm base
+sed -i.bak 's/timeout = #{timeout}/timeout = ${timeout}/' \
+  "$mybatis_numeric_repo/src/main/resources/mybatis-mapper/NumericMapper.xml"
+rm -f "$mybatis_numeric_repo/src/main/resources/mybatis-mapper/NumericMapper.xml.bak"
+mybatis_numeric_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$mybatis_numeric_repo")"
+if printf '%s\n' "$mybatis_numeric_output" | grep -F 'MyBatis Mapper 将表达式' >/dev/null; then
+  echo 'numeric MyBatis property was incorrectly reported as SQL injection' >&2
+  printf '%s\n' "$mybatis_numeric_output" >&2
+  exit 1
+fi
+printf '%s\n' "$mybatis_numeric_output" | grep -F '未发现阻塞问题' >/dev/null || {
+  echo 'numeric MyBatis safe boundary did not remain clean' >&2
+  printf '%s\n' "$mybatis_numeric_output" >&2
+  exit 1
+}
+
+# The model may still repeat the old `${...}` heuristic even when the
+# deterministic type evidence is safe.  The review contract requires every
+# model finding to remain visible; type evidence is context for human review,
+# not a silent model-output filter.
+cat >"$fixture_root/model-mybatis-numeric-false-positive.txt" <<'EOF'
+P1 src/main/resources/mybatis-mapper/NumericMapper.xml:3 - MyBatis Mapper 将表达式 ${timeout} 直接文本拼接到 SQL 赋值，存在 SQL 注入风险。
+影响：请求输入可能改变 SQL 结构。
+修复建议：改用 MyBatis #{timeout} 参数绑定。
+验证方式：使用 SQL 片段执行 Mapper 集成测试。
+EOF
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+response_file="${OLLAMA_FAKE_RESPONSE_FILE:?}"
+jq -cn --arg response "$(cat "$response_file")" \
+  '{response:$response,done:true,done_reason:"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+mybatis_numeric_model_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" \
+  OLLAMA_FAKE_RESPONSE_FILE="$fixture_root/model-mybatis-numeric-false-positive.txt" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$mybatis_numeric_repo")"
+printf '%s\n' "$mybatis_numeric_model_output" | grep -F 'MyBatis Mapper 将表达式' >/dev/null || {
+  echo 'numeric MyBatis model finding was hidden' >&2
+  printf '%s\n' "$mybatis_numeric_model_output" >&2
+  exit 1
+}
+
+cat >"$fixture_root/model-mybatis-numeric-hardening.txt" <<'EOF'
+P3 src/main/resources/mybatis-mapper/NumericMapper.xml:3 - MyBatis 数值属性仍使用 ${timeout}，建议统一使用参数绑定以降低维护风险。
+影响：当前输入类型限制了 SQL 片段注入，但文本替换形式增加后续类型变更风险。
+修复建议：改用 MyBatis #{timeout} 参数绑定。
+验证方式：执行类型变更和 Mapper 集成回归测试。
+EOF
+mybatis_numeric_hardening_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" \
+  OLLAMA_FAKE_RESPONSE_FILE="$fixture_root/model-mybatis-numeric-hardening.txt" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$mybatis_numeric_repo")"
+printf '%s\n' "$mybatis_numeric_hardening_output" | grep -F 'P3 ' >/dev/null || {
+  echo 'numeric MyBatis hardening information was hidden' >&2
+  printf '%s\n' "$mybatis_numeric_hardening_output" >&2
+  exit 1
+}
+
+cat >"$fixture_root/model-mybatis-numeric-independent-root.txt" <<'EOF'
+P1 src/main/resources/mybatis-mapper/NumericMapper.xml:3 - MyBatis 数值表达式 ${timeout} 需要改用绑定，同时该变更缺少租户隔离。
+影响：除 SQL 维护风险外，跨租户请求可能读取或修改其他租户数据。
+修复建议：改用 MyBatis #{timeout}，并补充 tenant_id 约束。
+验证方式：执行跨租户隔离集成测试和 Mapper 回归测试。
+EOF
+mybatis_numeric_independent_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" \
+  OLLAMA_FAKE_RESPONSE_FILE="$fixture_root/model-mybatis-numeric-independent-root.txt" \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$mybatis_numeric_repo")"
+printf '%s\n' "$mybatis_numeric_independent_output" | grep -F '租户隔离' >/dev/null || {
+  echo 'independent tenant root was hidden with a safe numeric MyBatis expression' >&2
+  printf '%s\n' "$mybatis_numeric_independent_output" >&2
+  exit 1
+}
+
+# Restore the clean fake response before the mixed-expression preflight case.
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+
+# A mixed mapper line must retain the unsafe text property even when the same
+# model block also mentions the safe numeric property.
+mybatis_mixed_repo="$fixture_root/mybatis-mixed-property-repo"
+mkdir -p "$mybatis_mixed_repo/src/main/java/example" "$mybatis_mixed_repo/src/main/resources/mybatis-mapper"
+git -C "$mybatis_mixed_repo" init -q
+git -C "$mybatis_mixed_repo" config user.email test@example.invalid
+git -C "$mybatis_mixed_repo" config user.name preflight-mybatis-mixed-test
+cat >"$mybatis_mixed_repo/src/main/java/example/MixedParam.java" <<'EOF'
+package example;
+
+public final class MixedParam {
+    private int timeout;
+    private String label;
+
+    public int getTimeout() { return timeout; }
+    public String getLabel() { return label; }
+}
+EOF
+cat >"$mybatis_mixed_repo/src/main/resources/mybatis-mapper/MixedMapper.xml" <<'EOF'
+<mapper namespace="example.MixedMapper">
+  <update id="update" parameterType="example.MixedParam">
+    UPDATE jobs SET timeout = ${timeout}, label = ${label} WHERE id = #{id}
+  </update>
+</mapper>
+EOF
+git -C "$mybatis_mixed_repo" add .
+git -C "$mybatis_mixed_repo" commit -qm base
+sed -i.bak 's/timeout = \${timeout}/timeout = #{timeout}/' \
+  "$mybatis_mixed_repo/src/main/resources/mybatis-mapper/MixedMapper.xml"
+rm -f "$mybatis_mixed_repo/src/main/resources/mybatis-mapper/MixedMapper.xml.bak"
+mybatis_mixed_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" \
+  "$repo_root/bin/local-review.sh" --repo "$mybatis_mixed_repo")"
+printf '%s\n' "$mybatis_mixed_output" | grep -F '${label}' >/dev/null || {
+  echo 'mixed MyBatis line lost the unsafe text property' >&2
+  printf '%s\n' "$mybatis_mixed_output" >&2
+  exit 1
+}
+
 # A lock-context scan failure must not be swallowed and converted into a
 # successful clean review. The fake perl affects only the bounded lock scans;
 # the review must fail before it sends a model request.

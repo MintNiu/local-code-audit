@@ -56,6 +56,7 @@ local_review_data_dir="${LOCAL_REVIEW_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/sh
 examples_file="${LOCAL_REVIEW_EXAMPLES_FILE:-$local_review_data_dir/examples.md}"
 context_files=()
 build_preflight_file=""
+mybatis_safe_index_file=""
 temperature="${OLLAMA_REVIEW_TEMPERATURE:-0}"
 seed="${OLLAMA_REVIEW_SEED:-42}"
 top_k="${OLLAMA_REVIEW_TOP_K:-40}"
@@ -2159,12 +2160,33 @@ filter_mybatis_raw_substitution_preflight_duplicates() {
     function has_independent_root(text) {
       return text ~ /租户|跨租户|权限|越权|授权|SSRF|请求伪造|路径遍历|凭据|密钥|密码|重放|竞态|并发|迁移脚本|数据库升级|XSS|反序列化|命令执行|构建失败|编译失败/
     }
+    function has_unmatched_expression(text, path, start, finish,    rest, expression, i, matched) {
+      rest = text
+      while (match(rest, /\$\{[A-Za-z_][A-Za-z0-9_.]*\}/)) {
+        expression = substr(rest, RSTART + 2, RLENGTH - 3)
+        matched = 0
+        for (i = 1; i <= raw_count; i++) {
+          if (raw_path[i] != path || raw_expression[i] != expression) continue
+          if (start == 0 || raw_start[i] == 0 || overlaps(path, start, finish, raw_path[i], raw_start[i], raw_end[i])) {
+            matched = 1
+            break
+          }
+        }
+        if (!matched) return 1
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      return 0
+    }
     FILENAME == ARGV[1] {
       if ($0 ~ /MyBatis Mapper 将表达式/) {
         set_location($0)
         raw_path[++raw_count] = loc_path
         raw_start[raw_count] = loc_start
         raw_end[raw_count] = loc_end
+        raw_expression[raw_count] = ""
+        if (match($0, /\$\{[A-Za-z_][A-Za-z0-9_.]*\}/)) {
+          raw_expression[raw_count] = substr($0, RSTART + 2, RLENGTH - 3)
+        }
       }
       next
     }
@@ -2189,7 +2211,11 @@ filter_mybatis_raw_substitution_preflight_duplicates() {
           }
         }
       }
-      if (duplicate && !has_independent_root(block)) {
+      # A single model paragraph may discuss multiple `${...}` expressions on
+      # the same XML line. Drop it only when every expression is represented by
+      # the deterministic evidence; an unmatched expression remains visible.
+      if (duplicate && !has_independent_root(block) &&
+          !has_unmatched_expression(block, loc_path, loc_start, loc_end)) {
         block = ""
         return
       }
@@ -2510,7 +2536,7 @@ XXL-JOB 权限迁移边界：如果输入包含“权限修复完整性预检”
 
 XXL-JOB 直接地址 SSRF 预检边界：如果输入包含“Web 端点把请求参数 executorAddress 直接传入 NetComClientProxy”的确定性预检段，该预检段本身就是该 SSRF 根因的权威证据，必须保留但不得重复抄写；只报告当前分片中另有独立根因。不要因为预检已给出完整影响、修复建议和验证方式而输出重复段，也不能把该预检误改成 clean。
 
-MyBatis 原始替换预检边界：如果输入包含“MyBatis Mapper 将表达式”确定性预检段，且同一文件/行范围只展示新增 SQL 赋值中的 `${...}` 原始替换，该预检段就是该 SQL 注入根因的权威证据，必须保留但不得重复抄写；只有当前分片另有独立租户、权限、凭据、并发或迁移根因时才新增问题。不要把该预检误改成 clean，也不要把模型对同一 `${...}` 的重复描述计为第二条问题。
+MyBatis 原始替换预检边界：保留“MyBatis Mapper 将表达式”预检候选且不得重复抄写。数值 getter 与 parameterType 一致时，不能仅凭 `${...}` 形式判定 SQL 注入；这只是类型线索，parameterType 不保证运行时实参，仍需核对调用和动态绑定。未知类型的注入可达性必须说明不确定性。保留有证据的独立风险和硬化建议，不为凑结论隐藏候选。
 
 声明式权限注解删除：如果差异把同一个控制器中多个方法的 `@PreAuthorize`、`@RequiresPermissions` 或等价授权注解注释/删除，必须把它视为当前差异直接证明的 P1 授权回归；按控制器或同一授权根因合并为一条，并在文件路径后列出全部受影响方法/行号范围。不要再为同一批被注释的注解输出信息级“可读性/维护性”问题；只有存在不同授权机制或不同资源边界的独立根因时才拆分。
 变量与空指针证据边界：只有当前差异或同一方法可见源码明确展示变量未声明、未初始化、不可达赋值或可达的 null 值时，才报告“变量未定义/可能空指针”。如果调用方法的返回值已经赋给同名局部变量，不得仅凭方法名、猜测返回值或业务分支未使用就声称变量未定义或必然为空；同一证据只保留一条具体问题。
@@ -2609,6 +2635,7 @@ build_prompt() {
   local prefix="$prompt_prefix"
   local chunk_status_file="${3:-}"
   local preflight_file="${4:-$build_preflight_file}"
+  local mybatis_clues=""
   if [[ "${2:-with-examples}" == "without-examples" ]]; then
     prefix="$chunk_prompt_prefix"
   fi
@@ -2634,6 +2661,19 @@ build_prompt() {
   if [[ -n "$preflight_file" && -s "$preflight_file" ]]; then
     printf '\n--- 构建预检（确定性证据） ---\n'
     cat "$preflight_file"
+  fi
+  if [[ -s "${mybatis_safe_index_file:-}" ]]; then
+    while IFS=$'\t' read -r type_path type_line type_expression; do
+      [[ -n "$type_path" && -n "$type_line" && -n "$type_expression" ]] || continue
+      grep -Fq -- "+++ b/$type_path" <<<"$diff_text" || continue
+      mybatis_clues+="$(printf '%s:%s ${%s}: XML parameterType 与源码数值 getter 一致；仅凭文本替换形式不足以确认注入，仍需核对调用、动态绑定及独立风险。' \
+        "$type_path" "$type_line" "$type_expression")"
+      mybatis_clues+=$'\n'
+    done <"$mybatis_safe_index_file"
+  fi
+  if [[ -n "${mybatis_clues//$'\n'/}" ]]; then
+    printf '\n--- MyBatis 数值类型线索（不是运行时参数安全证明） ---\n'
+    printf '%s' "$mybatis_clues"
   fi
   printf '%s\n' "$diff_text"
   printf '\n--- 以上材料结束；审查规则已作为系统指令发送 ---\n'
@@ -6561,23 +6601,209 @@ collect_sql_trigger_preflight() {
 collect_mybatis_raw_substitution_preflight() {
   local diff_file="$1"
   local output_file="$2"
+  local source_root="${3:-}"
+  local numeric_index=""
+  local safe_xml_index=""
+
+  # `${...}` is unsafe when the bound value can remain arbitrary text, but a
+  # Java primitive/wrapper number is converted by the request binder before
+  # MyBatis sees it. Build a conservative class/property index from actual
+  # numeric JavaBean getters so a numeric property is not mislabeled as an
+  # injectable string. Unknown types remain findings (fail closed); this index
+  # only suppresses a finding with positive type evidence.
+  if [[ -n "$source_root" && -d "$source_root" ]]; then
+    numeric_index="$(mktemp "${TMPDIR:-/tmp}/local-review-mybatis-numeric.XXXXXX")"
+    (
+      cd "$source_root"
+      java_files="$(rg --files -g '*.java' -g '!target/**' -g '!build/**' -g '!src/test/**' -g '!test/**' 2>/dev/null || true)"
+      while IFS= read -r java_file; do
+          [[ -n "$java_file" ]] || continue
+          if declare -F ensure_review_deadline >/dev/null 2>&1; then
+            ensure_review_deadline "MyBatis Java 类型预检" || exit $?
+          fi
+          awk '
+            function register_numeric_getters(line, name) {
+              if (line !~ /^[[:space:]]*(public[[:space:]]+|protected[[:space:]]+|private[[:space:]]+|static[[:space:]]+|final[[:space:]]+|synchronized[[:space:]]+)*[[:space:]]*(byte|short|int|long|float|double|Byte|Short|Integer|Long|Float|Double|BigInteger|BigDecimal)[[:space:]]+get[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([[:space:]]*\)/) return
+              name = line
+              sub(/^.*[[:space:]]+get/, "", name)
+              sub(/[[:space:]]*\(.*/, "", name)
+              name = tolower(substr(name, 1, 1)) substr(name, 2)
+              if (name ~ /^[A-Za-z_$][A-Za-z0-9_$]*$/) print qualified_class "\t" name
+            }
+            /^[[:space:]]*package[[:space:]]/ {
+              package_name = $0
+              sub(/^[[:space:]]*package[[:space:]]+/, "", package_name)
+              sub(/[;[:space:]].*$/, "", package_name)
+              next
+            }
+            {
+              line = $0
+              sub(/[[:space:]]*\/\/.*$/, "", line)
+              if (in_block_comment) {
+                if (line !~ /\*\//) next
+                sub(/^.*\*\//, "", line)
+                in_block_comment = 0
+              }
+              if (line ~ /\/\*/) {
+                if (line ~ /\/\*.*\*\//) sub(/\/\*.*\*\//, "", line)
+                else {
+                  sub(/\/\*.*$/, "", line)
+                  in_block_comment = 1
+                }
+              }
+              if (class_name == "" && line ~ /^[[:space:]]*(public[[:space:]]+|protected[[:space:]]+|private[[:space:]]+|abstract[[:space:]]+|final[[:space:]]+|static[[:space:]]+|sealed[[:space:]]+|non-sealed[[:space:]]+)*(class|record|interface|enum)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*/) {
+                class_name = line
+                sub(/^.*(class|record|interface|enum)[[:space:]]+/, "", class_name)
+                sub(/[^A-Za-z0-9_$].*$/, "", class_name)
+                class_depth = brace_depth + 1
+                qualified_class = (package_name == "" ? class_name : package_name "." class_name)
+              }
+              if (qualified_class != "" && brace_depth == class_depth &&
+                  line ~ /[[:space:]]get[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([[:space:]]*\)/) {
+                register_numeric_getters(line)
+              }
+              opens = line
+              closes = line
+              gsub(/[^\{]/, "", opens)
+              gsub(/[^\}]/, "", closes)
+              brace_depth += length(opens) - length(closes)
+            }
+          ' "$java_file"
+      done <<<"$java_files"
+    ) >"$numeric_index" || {
+      rm -f "$numeric_index"
+      return 124
+    }
+
+    safe_xml_index="$(mktemp "${TMPDIR:-/tmp}/local-review-mybatis-safe.XXXXXX")"
+    (
+      cd "$source_root"
+      xml_files="$(rg --files -g '*.xml' -g '!target/**' -g '!build/**' -g '!src/test/**' -g '!test/**' 2>/dev/null || true)"
+      while IFS= read -r xml_file; do
+          [[ -n "$xml_file" ]] || continue
+          if declare -F ensure_review_deadline >/dev/null 2>&1; then
+            ensure_review_deadline "MyBatis XML 类型预检" || exit $?
+          fi
+          awk -v xml_path="$xml_file" -v numeric_index="$numeric_index" '
+            BEGIN {
+              while ((getline index_line < numeric_index) > 0) {
+                split(index_line, index_fields, "\t")
+                if (index_fields[1] == "" || index_fields[2] == "") continue
+                numeric_property[index_fields[1] SUBSEP index_fields[2]] = 1
+              }
+              close(numeric_index)
+            }
+            function numeric_parameter(parameter_type, expression, property) {
+              if (parameter_type == "" || expression == "") return 0
+              if (expression ~ /\./) return 0
+              property = expression
+              return ((parameter_type SUBSEP property) in numeric_property &&
+                      !(property in bound_property) && !(property in foreach_property))
+            }
+            {
+              line = $0
+              if (line ~ /<(select|insert|update|delete)([[:space:]>]|$)/) {
+                delete bound_property
+                parameter_type = line
+                if (parameter_type !~ /parameterType[[:space:]]*=/) parameter_type = ""
+                else {
+                  sub(/^.*parameterType[[:space:]]*=[[:space:]]*[\"\047]/, "", parameter_type)
+                  sub(/[\"\047].*$/, "", parameter_type)
+                }
+              }
+              if (line ~ /<bind[[:space:]][^>]*name[[:space:]]*=[[:space:]]*[\"\047]/) {
+                bound_name = line
+                sub(/^.*<bind[[:space:]][^>]*name[[:space:]]*=[[:space:]]*[\"\047]/, "", bound_name)
+                sub(/[\"\047].*$/, "", bound_name)
+                if (bound_name != "") bound_property[bound_name] = 1
+              }
+              if (line ~ /<foreach([[:space:]>]|$)/) {
+                foreach_item = line
+                sub(/^.*<foreach[^>]*[[:space:]]item[[:space:]]*=[[:space:]]*[\"\047]/, "", foreach_item)
+                sub(/[\"\047].*$/, "", foreach_item)
+                foreach_index = line
+                sub(/^.*<foreach[^>]*[[:space:]]index[[:space:]]*=[[:space:]]*[\"\047]/, "", foreach_index)
+                sub(/[\"\047].*$/, "", foreach_index)
+                foreach_depth++
+                foreach_item_name[foreach_depth] = foreach_item
+                foreach_index_name[foreach_depth] = foreach_index
+                if (foreach_item != "" && foreach_item != line) foreach_property[foreach_item] = 1
+                if (foreach_index != "" && foreach_index != line) foreach_property[foreach_index] = 1
+              }
+              if (parameter_type != "") {
+                remaining = line
+                while (match(remaining, /\$\{[A-Za-z_][A-Za-z0-9_.]*\}/)) {
+                  expression = substr(remaining, RSTART + 2, RLENGTH - 3)
+                  if (numeric_parameter(parameter_type, expression) && !(expression in bound_property)) print xml_path "\t" NR "\t" expression
+                  remaining = substr(remaining, RSTART + RLENGTH)
+                }
+              }
+              if (line ~ /<\/foreach[[:space:]]*>/) {
+                if (foreach_depth > 0) {
+                  if (foreach_item_name[foreach_depth] != "") delete foreach_property[foreach_item_name[foreach_depth]]
+                  if (foreach_index_name[foreach_depth] != "") delete foreach_property[foreach_index_name[foreach_depth]]
+                  delete foreach_item_name[foreach_depth]
+                  delete foreach_index_name[foreach_depth]
+                  foreach_depth--
+                }
+              }
+              if (line ~ /<\/(select|insert|update|delete)[[:space:]]*>/) parameter_type = ""
+            }
+          ' "$xml_file"
+          if declare -F ensure_review_deadline >/dev/null 2>&1; then
+            ensure_review_deadline "MyBatis XML 类型预检" || exit $?
+          fi
+      done <<<"$xml_files"
+    ) >"$safe_xml_index" || {
+      rm -f "$numeric_index" "$safe_xml_index"
+      return 124
+    }
+  fi
 
   # MyBatis `${...}` is textual SQL substitution.  Keep this deterministic
-  # check narrow: only newly added scalar assignments in mapper XML are
-  # reported.  Dynamic identifiers such as a deliberately whitelisted table
-  # name remain model-only; an added `column = ${value}` assignment is the
-  # high-confidence injection shape this guard is meant to catch.
-  awk '
+  # check narrow: only newly added scalar assignments in mapper XML with
+  # unknown or text-like parameter types are reported. Dynamic identifiers
+  # such as a deliberately whitelisted table name remain model-only. An
+  # added `column = ${value}` assignment with no safe type evidence remains
+  # fail-closed; a proven numeric property is not an injection finding.
+  awk -v numeric_index="$numeric_index" -v safe_xml_index="$safe_xml_index" '
+    BEGIN {
+      if (numeric_index != "") {
+        while ((getline index_line < numeric_index) > 0) {
+          split(index_line, index_fields, "\t")
+          if (index_fields[1] == "" || index_fields[2] == "") continue
+          numeric_property[index_fields[1] SUBSEP index_fields[2]] = 1
+        }
+        close(numeric_index)
+      }
+      if (safe_xml_index != "") {
+        while ((getline safe_line < safe_xml_index) > 0) {
+          split(safe_line, safe_fields, "\t")
+          if (safe_fields[1] == "" || safe_fields[2] == "" || safe_fields[3] == "") continue
+          safe_expression[safe_fields[1] SUBSEP safe_fields[2] SUBSEP safe_fields[3]] = 1
+        }
+        close(safe_xml_index)
+      }
+    }
+    function numeric_parameter(parameter_type, expression, property) {
+      if (parameter_type == "" || expression == "") return 0
+      if (expression ~ /\./) return 0
+      property = expression
+      return ((parameter_type SUBSEP property) in numeric_property)
+    }
     function reset_hunk() {
       raw_count = 0
       delete raw_lines
       delete raw_expressions
+      delete raw_parameter_types
       mapper_context = 0
+      parameter_type = ""
     }
     function emit_hunk(    i) {
       if (path == "" || path !~ /\.xml$/ || raw_count == 0) return
       if (!mapper_context && path !~ /(^|\/)(mybatis[-_]?mapper|mappers?)(\/|$)/ && path !~ /[Mm]apper\.xml$/) return
       for (i = 1; i <= raw_count; i++) {
+        if ((path SUBSEP raw_lines[i] SUBSEP raw_expressions[i]) in safe_expression) continue
         printf "P1 %s:%d - MyBatis Mapper 将表达式 ${%s} 直接文本拼接到 SQL 赋值，存在 SQL 注入风险。\n影响：请求可控或未严格白名单的参数可能改变 UPDATE/INSERT 等 SQL 结构，导致越权修改、数据篡改或数据库信息泄露。\n修复建议：改用 MyBatis `#{...}` 参数绑定；只有经过固定白名单映射的 SQL 标识符才允许使用 `${...}`，并在服务层拒绝未枚举值。\n验证方式：使用包含引号、逗号和 SQL 片段的输入执行 Mapper 集成测试，确认参数只作为值绑定且 SQL 结构不可改变；同时覆盖合法超时值的更新路径。\n\n", path, raw_lines[i], raw_expressions[i]
       }
     }
@@ -6611,6 +6837,11 @@ collect_mybatis_raw_substitution_preflight() {
       text = (prefix == "+" || prefix == "-" ? substr($0, 2) : $0)
       if (prefix == "+" || prefix == " ") {
         if (text ~ /<mapper([[:space:]>]|$)|<(select|insert|update|delete)([[:space:]>]|$)/) mapper_context = 1
+        if (text ~ /parameterType[[:space:]]*=[[:space:]]*"/) {
+          parameter_type = text
+          sub(/^.*parameterType[[:space:]]*=[[:space:]]*"/, "", parameter_type)
+          sub(/".*$/, "", parameter_type)
+        }
         if (prefix == "+") {
           remaining = text
           while (match(remaining, /[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=[[:space:]]*\$\{[A-Za-z_][A-Za-z0-9_.]*\}/)) {
@@ -6619,14 +6850,22 @@ collect_mybatis_raw_substitution_preflight() {
             raw_expressions[raw_count] = substr(remaining, RSTART, RLENGTH)
             sub(/^.*=[[:space:]]*\$\{/, "", raw_expressions[raw_count])
             sub(/\}.*/, "", raw_expressions[raw_count])
+            raw_parameter_types[raw_count] = parameter_type
             remaining = substr(remaining, RSTART + RLENGTH)
           }
         }
+        if (text ~ /<\/(select|insert|update|delete)[[:space:]]*>/) parameter_type = ""
       }
       if (prefix == "+" || prefix == " ") line_no++
     }
     END { emit_hunk() }
   ' "$diff_file" >>"$output_file"
+  if [[ -n "$mybatis_safe_index_file" && -s "$safe_xml_index" ]]; then
+    cat "$safe_xml_index" >>"$mybatis_safe_index_file"
+    LC_ALL=C sort -u -o "$mybatis_safe_index_file" "$mybatis_safe_index_file"
+  fi
+  [[ -z "$numeric_index" ]] || rm -f "$numeric_index"
+  [[ -z "$safe_xml_index" ]] || rm -f "$safe_xml_index"
   dedup_preflight_blocks "$output_file"
 }
 
@@ -7142,12 +7381,13 @@ cross_file_evidence_reserve_tokens=0
 changed_imports_file="$(mktemp "${TMPDIR:-/tmp}/local-review-imports.XXXXXX")"
 deleted_types_file="$(mktemp "${TMPDIR:-/tmp}/local-review-deleted-types.XXXXXX")"
 build_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-build-preflight.XXXXXX")"
+mybatis_safe_index_file="$(mktemp "${TMPDIR:-/tmp}/local-review-mybatis-safe-index.XXXXXX")"
 deterministic_lock_order_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order-findings.XXXXXX")"
 java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -7330,7 +7570,7 @@ collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
-collect_mybatis_raw_substitution_preflight "$chunk_input_file" "$build_preflight_file"
+collect_mybatis_raw_substitution_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file" "$exact_rename_context_file"
 if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then
   echo "本地代码审查失败：跨事务/行锁文本索引扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2
@@ -7418,7 +7658,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$active_request_error_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$active_request_error_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"

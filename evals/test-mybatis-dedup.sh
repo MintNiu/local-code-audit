@@ -74,4 +74,10 @@ model_without_matching_raw='P1 src/main/resources/OtherMapper.xml:3 - MyBatis �
 验证方式：执行注入测试。'
 run_case no-global-cross-file-drop "$raw_other_file" "$model_without_matching_raw" "$model_without_matching_raw"
 
-printf 'MyBatis dedup regression: 5 cases passed (no model calls)\n'
+model_with_independent_expression='P1 src/main/resources/JobMapper.xml:3 - MyBatis `${executorTimeout}` 和 `${sort}` 均直接拼入 SQL，存在 SQL 注入风险。
+影响：两个表达式都可能改变 SQL 结构。
+修复建议：两个值都使用参数绑定。
+验证方式：分别执行 timeout 和 sort 的注入边界测试。'
+run_case independent-expression-visible "$preflight" "$model_with_independent_expression" "$model_with_independent_expression"
+
+printf 'MyBatis dedup regression: 6 cases passed (no model calls)\n'

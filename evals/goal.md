@@ -278,7 +278,7 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 
 同轮探测的 `platform-job:730c1066`（完整补齐 `/jobgroup` 管理端点管理员注解）和 `c6a4df2`（完整转义调度日志 XSS 输出）均返回 clean；它们是正确修复，不计入漏报。当前仍未达到阶段 1 的至少 20 个独立 holdout P0/P1 根因、90% 召回/定位和误报率门槛；本轮只新增一个已人工确认的 ERP endpoint 授权根因。
 
-2026-09-28 补充：历史评测 manifest 现在在运行与标签生成前拒绝控制字符、未转义 TAB/列数漂移、非法 commit/parent 和可形成路径穿越的值，并有 fail-closed 回归。真实 ERP 幂等候选 `0e6006b` 完整返回但人工核对为未命中/误报对照；`platform-job:cb1bd548` 因与另一运行并行造成分片超时，明确不计入指标，待串行重跑。
+2026-09-28 补充：历史评测 manifest 现在在运行与标签生成前拒绝控制字符、未转义 TAB/列数漂移、非法 commit/parent 和可形成路径穿越的值，并有 fail-closed 回归。ERP 幂等候选 `0e6006b` 的旧金标已纠偏：并发缺陷属于父版本，目标提交已加入 `FOR UPDATE`、`request_no` 唯一键和重复键处理；当前两轮运行均 clean 且稳定，不计入召回分母。存量数据库缺少迁移脚本是独立升级风险；`platform-job:cb1bd548` 因与另一运行并行造成分片超时，明确不计入指标，待串行重跑。
 
 同日补充预签名长尾：当单文件差异唯一确定性根因为取消后重放预签名票据时，即使 Ollama 传输失败或输出长度截断，也只返回该确定性 P1；若出现第二个预检根因或独立模型安全证据，仍拒绝恢复。该窄恢复有传输/截断/正常响应回归，证据过滤回归为 11 个用例，正式模型 SYSTEM SHA 保持 `b2763a461e0d2a9f46175a11a3aa35a3163da321860a594887378ab63cd0fa65`。
 
@@ -294,11 +294,15 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 
 最新脚本复跑该提交得到 5/5 分片完整结果（154 秒）：模型首片重复预检触发 length，但过滤后安全恢复，最终输出单条确定性 P1，`gold=1/found=1/predicted=1/false_positive=0/location_accurate=1`；第二轮 186 秒结果文本与运行签名一致，`repeat_stable=true`，一般截断仍失败闭门。
 
-2026-09-28：真实 `platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 暴露稳定的 MyBatis SQL 注入漏报：`XxlJobInfoMapper.xml` 新增 `executor_timeout = ${executorTimeout}`，后续 `b41d8064` 改回 `#{executorTimeout}`，人工金标为 1 个 P1。当前 tuned 模型 20/20 分片完整返回 clean，首轮 136 秒；重复两轮 124/130 秒，结果哈希和运行签名一致，`output_complete=true`、`repeat_stable=true`，`gold=1`、`p0_p1_found=0`。该结果证明漏报来自模型能力而不是 Ollama 传输/截断故障。
+2026-09-28：真实 `platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 曾被初步标成 MyBatis SQL 注入漏报，但后续静态源码复核纠正了该标签：`executorTimeout` 是请求绑定后的 primitive `int`，父提交已有同类 `${executeTimeout}`，当前提交没有新增可证实的 P1。旧的两轮 clean 结果保留为正确基线；原始模型启发式误报不再作为金标。
 
 运行器新增窄范围 MyBatis 原始替换预检：仅当 mapper XML 的新增 SQL 标量赋值使用 `${...}` 时确定性报告 P1，并在最终合并过滤相同行范围的模型重复；动态标识符、白名单和其它独立安全根因仍由模型结合上下文判断。无模型预检夹具、证据过滤、运行态 SYSTEM 哈希和完整语法回归均通过。该修复只覆盖可证明的原始赋值形状，不把一个样本外推为全部 SQL 注入召回；阶段 1 仍未达到 20 个独立 holdout P0/P1 根因与 90% 召回/定位门槛。
 
-2026-09-30：将 `platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 固定到目标提交及其直接父提交后，用当前 tuned 运行器重新做了两轮真实复测，避免把后续 HEAD 的差异混入结果。两轮均完整结束（exit=0，分别 142 秒和 106 秒），均只输出 `xxl-job-admin/src/main/resources/mybatis-mapper/XxlJobInfoMapper.xml:155` 的单条 P1，结果 SHA-256 同为 `f25db00bb653d095df2a97f6cebc93e914b18f30f2eb4daa6b24db1e09ec097d`。人工金标为 1 个 MyBatis 原始替换 SQL 注入根因，当前结果为 `gold=1`、`p0_p1_found=1`、`predicted_candidates=1`、`false_positive=0`、`location_accurate=1`、`repeat_stable=true`。旧的 clean 结果只作为漏报基线保留，不与新结果合并计数；该修复仍只证明这一种可静态确定的赋值形状，阶段 1 总体门槛未改变。
+2026-09-30：将 `platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 固定到目标提交及其直接父提交后，用当前 tuned 运行器重新做了两轮 typed 复测，避免把后续 HEAD 的差异混入结果。静态源码证据确认 `executorTimeout` 为 primitive `int`，因此 `${executorTimeout}` 不是可由请求携带任意 SQL 的 P1；模型重复输出的旧启发式不能作为金标。运行器现只把“完整 Mapper 声明 + Java 数值 getter”作为模型提示线索，未知参数类型仍保持 fail-closed，模型输出的问题不会被该线索静默删除。两轮均完整结束且稳定；该纠偏降低确定性预检误报，不扩大阶段 1 召回分母，阶段 1 总体门槛未改变。
+
+2026-09-30 阶段 1 验收审计：已有真实样本中，多数正例正是此前调优预检的来源，不能再作为最终未见 holdout 计算召回。下一步必须冻结当前运行器和 Modelfile，排除已用于规则设计的提交及同功能簇，重新选取至少 20 个跨仓库真实提交，双轮运行并完成人工 P0/P1、定位和误报标签；在新清单完成前，生产召回率保持“未验收”，不以合成门禁或调优样本替代。
+
+同日继续收窄 MyBatis 类型边界：精确 FQN、实际 Java 数值 getter、完整源码扫描三项证据缺一不可；简单类名、字段声明、注释 getter、嵌套表达式、`<bind>` 和 `<foreach item/index>` 都保持 fail-closed。类型扫描在文件边界检查总超时，避免大仓库无限占用审查预算。模型重复过滤仅在同一确定性表达式全部覆盖时生效，模型段落中出现未覆盖的另一个 `${...}` 表达式会完整保留。类型边界回归 10/10、MyBatis 去重回归 6/6；阶段一独立真实 holdout 仍未完成。
 
 同轮五轮合成门禁曾发现 clean 样例的非问题信息漂移：安全负例被解释成“安全边界规则”、未跟踪文件被要求 `git add`、合法生成列被解释为“需要确认”。这些段落现仅在明确“无需修复/影响无/合法”且不含独立安全或兼容性证据时过滤；凭据、SQL、租户、权限、构建和迁移问题继续保留。修复后最终门禁为 7 类正例各 5/5、6 类 clean 共 30/30、预签名 5/5，哈希稳定，显式截断失败；`evals/test-filter-evidence.sh` 为 16 个用例通过。
 2026-09-28：完成 `platform-file:f6ce8f6efe6f76d388ed2eb475faa50639ab5e96` 硬编码配置凭据留出。当前脚本按 3000 字节有效预算路由为 6/6 分片，两轮均完整结束（193/243 秒），结果 SHA-256 一致；8 个独立 P1 金标全部命中且定位准确。12 个候选中 3 条是配置注释/导入/README 信息误报，数据库 `CREATE/USE` 名称不一致保留为待确认契约候选，不混入凭据召回。该样本 scorecard 为 `gold=8`、`p0_p1_found=8`、`predicted_candidates=12`、`false_positive=3`、`repeat_stable=true`，证明当前压缩分片没有牺牲这组配置凭据的发现，但不代表其他代码类型的通用召回率。
