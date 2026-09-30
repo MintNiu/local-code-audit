@@ -20,6 +20,9 @@ review_output="$fixture_root/review-output.txt"
 resolved_model_capture="$fixture_root/resolved-model.txt"
 show_log="$fixture_root/ollama-show.log"
 tmp_dir="$fixture_root/tmp"
+# Keep all fixture invocations isolated from a real review running in another
+# terminal; the production runner still defaults to its normal global lock.
+export OLLAMA_REVIEW_LOCK_DIR="$tmp_dir/ollama.lock"
 trap 'rm -rf "$fixture_root"' EXIT
 
 mkdir -p "$fake_bin" "$tmp_dir" "$repo/src/main/java/com/example/api/client" "$repo/src/main/java/com/example/api/dto" "$repo/src/test/java/com/example/api/dto" "$(dirname "$context")"
@@ -3843,6 +3846,151 @@ if printf '%s\n' "$fail_open_boundary_output" | grep -F '授权异常路径默�
   printf '%s\n' "$fail_open_boundary_output" >&2
   exit 1
 fi
+
+xxl_repo="$fixture_root/xxl-reliability-repo"
+mkdir -p "$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/context" \
+  "$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/biz/model" \
+  "$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/handler/impl" \
+  "$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/thread"
+git -C "$xxl_repo" init -q
+git -C "$xxl_repo" config user.email test@example.invalid
+git -C "$xxl_repo" config user.name preflight-xxl-reliability-test
+cat >"$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/context/XxlJobHelper.java" <<'EOF'
+package com.xxl.job.core.context;
+
+final class XxlJobHelper {
+    public static String getJobParam() {
+        XxlJobContext context = XxlJobContext.current();
+        if (context == null) {
+            return null;
+        }
+        return context.getJobParam();
+    }
+}
+EOF
+cat >"$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/context/XxlJobContext.java" <<'EOF'
+package com.xxl.job.core.context;
+
+final class XxlJobContext {
+    static XxlJobContext current() { return null; }
+    String getJobParam() { return null; }
+}
+EOF
+cat >"$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/biz/model/ReturnT.java" <<'EOF'
+package com.xxl.job.core.biz.model;
+
+public class ReturnT<T> {
+    private String msg;
+    public String getMsg() { return msg; }
+    public void setMsg(String msg) { this.msg = msg; }
+}
+EOF
+cat >"$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/handler/impl/ScriptJobHandler.java" <<'EOF'
+package com.xxl.job.core.handler.impl;
+
+final class ScriptJobHandler {
+    void execute() {
+        String[] scriptParams = new String[1];
+        scriptParams[0] = "";
+    }
+}
+EOF
+cat >"$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/thread/JobThread.java" <<'EOF'
+package com.xxl.job.core.thread;
+
+import com.xxl.job.core.biz.model.ReturnT;
+
+final class JobThread {
+    void run(ReturnT<String> executeResult) {
+        if (executeResult == null) {
+            return;
+        }
+    }
+}
+EOF
+git -C "$xxl_repo" add .
+git -C "$xxl_repo" commit -qm base
+python3 - "$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/handler/impl/ScriptJobHandler.java" "$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/thread/JobThread.java" <<'PY'
+from pathlib import Path
+import sys
+script, job_thread = map(Path, sys.argv[1:])
+script.write_text(script.read_text().replace('scriptParams[0] = "";',
+    'scriptParams[0] = XxlJobHelper.getJobParam();'))
+job_thread.write_text(job_thread.read_text().replace('''        if (executeResult == null) {
+            return;
+        }''', '''        executeResult.setMsg((executeResult!=null&&executeResult.getMsg().length()>50000)
+                ? executeResult.getMsg().substring(0, 50000).concat("...") : executeResult.getMsg());'''))
+PY
+xxl_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$xxl_repo")"
+printf '%s\n' "$xxl_output" | grep -F 'XxlJobHelper.getJobParam()' >/dev/null || {
+  echo 'missing XXL-JOB nullable job parameter preflight' >&2
+  printf '%s\n' "$xxl_output" >&2
+  exit 1
+}
+printf '%s\n' "$xxl_output" | grep -F 'ReturnT.msg' >/dev/null || {
+  echo 'missing XXL-JOB nullable result message preflight' >&2
+  printf '%s\n' "$xxl_output" >&2
+  exit 1
+}
+
+role_scope_repo="$fixture_root/role-api-scope-repo"
+mkdir -p "$role_scope_repo/src/main/java/com/example/system"
+git -C "$role_scope_repo" init -q
+git -C "$role_scope_repo" config user.email test@example.invalid
+git -C "$role_scope_repo" config user.name preflight-role-api-scope-test
+cat >"$role_scope_repo/src/main/java/com/example/system/ApiResourceApplication.java" <<'EOF'
+package com.example.system;
+
+final class ApiResourceApplication {
+    private final RoleApiMapper roleApiMapper = new RoleApiMapper();
+
+    void assignRoleApis(Long roleId, java.util.List<Long> apiIds) {
+        resolveRoleTenantId(roleId);
+        validateAssignableApis(apiIds);
+        for (Long apiId : apiIds) {
+            roleApiMapper.insert(roleId, apiId);
+        }
+    }
+
+    private Long resolveRoleTenantId(Long roleId) {
+        TenantOperationGuard.assertCurrentTenant(roleId);
+        return roleId;
+    }
+
+    private void validateAssignableApis(java.util.List<Long> apiIds) {
+        java.util.List<Long> activeApplicationIds = activeApplicationIds(null);
+        if (activeApplicationIds.isEmpty()) {
+            throw new IllegalStateException();
+        }
+        roleApiMapper.select(apiIds, activeApplicationIds);
+    }
+
+    private java.util.List<Long> activeApplicationIds(Long applicationId) {
+        return java.util.List.of(1L);
+    }
+
+    static final class RoleApiMapper {
+        void insert(Long roleId, Long apiId) {}
+        void select(java.util.List<Long> apiIds, java.util.List<Long> applicationIds) {}
+    }
+    static final class TenantOperationGuard {
+        static void assertCurrentTenant(Long tenantId) {}
+    }
+}
+EOF
+git -C "$role_scope_repo" add .
+git -C "$role_scope_repo" commit -qm base
+sed -i.bak 's/java.util.List<Long> activeApplicationIds = activeApplicationIds(null);/java.util.List<Long> activeApplicationIds = activeApplicationIds(null); \/\/ changed/' \
+  "$role_scope_repo/src/main/java/com/example/system/ApiResourceApplication.java"
+rm -f "$role_scope_repo/src/main/java/com/example/system/ApiResourceApplication.java.bak"
+role_scope_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$role_scope_repo")"
+printf '%s\n' "$role_scope_output" | grep -F '角色 API 授权校验只验证 API 所属应用是否全局有效' >/dev/null || {
+  echo 'missing role/API tenant scope preflight' >&2
+  printf '%s\n' "$role_scope_output" >&2
+  exit 1
+}
 
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed

@@ -6,6 +6,12 @@
 
 ### 当前进展（2026-09-27）
 
+### 2026-10-01：真实冻结留出补强可空值与租户/仓库边界
+
+阶段一冻结留出新增并完成双跑：`platform-auth:9dbcc0c` 模型命中查询参数令牌 P1、漏掉在线会话对象中的原始 token；`platform-job:5dfc6a1` 与 `c071a63` 分别漏掉可空 `XxlJobHelper.getJobParam()` 和可空 `ReturnT.msg.length()`；`platform-system:ecc8d75` 漏掉角色 API 绑定未按租户应用范围校验；`platform-erp-service:5592758` 漏掉寻货入库绕过仓库/供方归属检查。五个样本的重复 finding signature 均稳定，job/system/ERP 原模型均返回 clean，不能把合成 100% 结果外推为真实召回率。
+
+针对三组可由当前源码直接证明的漏报，运行器增加窄范围确定性预检：仅识别同仓库 `XxlJobHelper.getJobParam()` 的 null 返回、`ReturnT.msg` 字段的直接 `length()` 解引用，以及完整角色/API/租户 scope 证据链；不把任意 getter、应用查询或仓库选择泛化为问题。预检正负边界已加入 `evals/test-preflight.sh`，并保持 fail-closed、完整输出和原始模型结果可见。下一步是冻结这版运行器后重跑阶段 0 五轮门禁，并继续扩大至少 20 个未用于调优的人工 holdout；在该分母完成前，生产级召回率仍为未验收。
+
 运行器新增受限的跨事务/行锁文本证据：变更 Java 文件命中 `@Transactional`、`find*ForUpdate` 或 `FOR UPDATE` 时，把变更文件及相同锁接收者的关联 Java 文件摘要放入 prompt。现在摘要同时保留源码行号、锁调用上下文窗口和完整的锁调用顺序；它仍只是模型核验用文本，不自动证明同表、同事务或可达并发，证据有上限，预算不足时可降级跳过。
 
 在该文本证据之外，运行器新增了一个更窄的确定性反向锁序预检：仅当两个带 `@Transactional` 的 Java 源码段包含相同直接 `*ForUpdate` 接收者、且顺序相反，并且至少一侧属于变更文件时，才追加一个标为“候选”的 P1。它不会把候选伪装成已确认死锁；finding 明确要求人工确认资源映射、调用可达性和并发前提。该候选不注入模型 prompt，而是在模型结果合并后加入，避免长上下文让模型重复或截断。预检是保守的源码文本分析，不是数据库锁图或完整 Java 调用图，复杂间接调用仍需人工/集成测试确认。

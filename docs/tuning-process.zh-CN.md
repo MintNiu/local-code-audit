@@ -800,3 +800,11 @@ reserve 和 effective budget，方便后续复核。
 继续加入三组公开脱敏正/负夹具：MyBatis 标量 `${...}` 原始替换、`startsWith` URL 白名单前缀绕过，以及被注释/删除的 `@PreAuthorize` 等声明式权限注解。新增规则只在差异、文件类型和危险 sink 同时满足时触发；`#{...}`、URI 精确 scheme/host 校验和仍生效的权限注解保持 clean。URL 前缀规则增加同文件/行号重叠去重，模型复述“请求凭据”等影响描述不会被误当成第二个根因；不同文件、不同位置和独立 SQL 注入仍保留。
 
 当前 tuned 模型个人入口的单轮完整门禁为 23 类正例、22 类 clean 对照，全部返回成功；MyBatis 预期两条独立表达式 finding，URL 前缀和权限注解各保留一条，预签名回退 1/1，`num_predict=1` 仍显式失败。无模型预检、证据过滤（含 URL 去重 7 个、路径去重 3 个边界）和运行态校验通过。该结果是公开合成回归，不扩大真实阶段一的人工 P0/P1 分母；仍需至少 20 个独立 holdout 根因、90% 召回/定位和受控误报率才能宣称生产级。
+
+### 2026-10-01：真实冻结留出暴露可靠性与租户边界漏报
+
+为避免把已经参与规则设计的历史样本误当最终验收，先冻结当前 runner、Modelfile 和 tuned SYSTEM，再选取跨仓库留出。双跑结果显示：在线会话样本部分命中查询参数令牌，但漏掉响应对象中的原始 token；XXL-JOB 两个样本分别漏掉 `XxlJobHelper.getJobParam()` 的可空返回和 `ReturnT.msg.length()` 的可空解引用；system 角色/API 分配样本漏掉全局应用有效性检查与当前租户可授权范围之间的缺口；ERP 寻货入库样本漏掉 caller-selected warehouse 与 supplier ownership 之间的边界。所有样本的 finding signature 稳定，但 job/system/ERP 模型原始输出均为 clean，因此这批数据被标记为真实漏报而不是“模型已通过”。
+
+修复策略没有把模型输出过滤成“看起来正确”，而是加入三条窄范围确定性证据门：当前新增行直接调用同仓库实现中明确 `return null` 的 `XxlJobHelper.getJobParam()`；当前新增行直接对同仓库 `ReturnT.msg` 字段调用 `length()`；以及同一角色/API 源码同时展示 `assignRoleApis`、全局 `activeApplicationIds(null)`、角色租户守卫和缺失租户授权 scope。只有满足完整证据链才生成 P1，普通 getter、普通应用列表和普通仓库选择不触发。无模型 `test-preflight.sh` 已覆盖这三类正例和边界负例，防止把针对单个提交的关键词规则误扩散。
+
+这轮结果的含义是：高可用入口现在能把部分稳定的模型漏报转化为可审计的确定性 finding，但必须分别记录“模型原生命中”和“预检补齐”。下一步仍要在这版 runner 冻结后重跑阶段 0 的完整五轮门禁，并继续补足至少 20 个未参与调优的真实 holdout 根因；在此之前不能宣称达到生产级 90% 召回率。

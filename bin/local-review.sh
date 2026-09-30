@@ -5674,6 +5674,155 @@ collect_xxl_job_permission_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_xxl_job_reliability_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file helper_file return_t_file
+
+  # Keep this guard evidence-driven and narrow.  It only covers two direct
+  # XXL-JOB contracts that are visible in the checked-out source: the helper
+  # explicitly returns null when no job context exists, and ReturnT.msg is a
+  # nullable String field.  It must not become a generic "every getter may be
+  # null" heuristic.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-xxl-reliability-candidates.XXXXXX")"
+  awk '
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && path ~ /\.java$/) {
+        if (text ~ /XxlJobHelper\.getJobParam[[:space:]]*\(\)/) {
+          printf "job-param\t%s\t%d\n", path, line_no
+        }
+        if (text ~ /getMsg[[:space:]]*\(\)[[:space:]]*\.[[:space:]]*length[[:space:]]*\(\)/ &&
+            text !~ /getMsg[[:space:]]*\(\)[[:space:]]*!=[[:space:]]*null/) {
+          printf "result-msg\t%s\t%d\n", path, line_no
+        }
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  helper_file=""
+  return_t_file=""
+  if [[ -n "$source_root" ]]; then
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] || continue
+      if [[ "$candidate" == */XxlJobHelper.java ]]; then
+        helper_file="$source_root/$candidate"
+        break
+      fi
+    done < <(cd "$source_root" 2>/dev/null && find . -type f -name XxlJobHelper.java -print 2>/dev/null | sed 's#^./##')
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] || continue
+      if [[ "$candidate" == */ReturnT.java && "$candidate" == */biz/model/ReturnT.java ]]; then
+        return_t_file="$source_root/$candidate"
+        break
+      fi
+    done < <(cd "$source_root" 2>/dev/null && find . -type f -path '*/biz/model/ReturnT.java' -print 2>/dev/null | sed 's#^./##')
+  fi
+
+  while IFS=$'\t' read -r kind candidate_path candidate_line; do
+    [[ -n "$kind" && -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    path_has_symlink_component "$candidate_path" && continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    case "$kind" in
+      job-param)
+        [[ -n "$helper_file" && -f "$helper_file" ]] || continue
+        if ! awk '
+          /public[[:space:]]+static[[:space:]]+String[[:space:]]+getJobParam[[:space:]]*\(/ { in_method = 1 }
+          in_method && /return[[:space:]]+null[[:space:]]*;/ { found = 1 }
+          in_method && found && /^}[[:space:]]*$/ { exit 0 }
+          END { exit(found ? 0 : 1) }
+        ' "$helper_file"; then
+          continue
+        fi
+        printf '%s\n\n' \
+          "P1 $candidate_path:$candidate_line - XxlJobHelper.getJobParam() 的可见实现允许在缺少作业上下文时返回 null，但新增代码直接把结果作为脚本参数使用，存在空值运行时失败。" \
+          "影响：没有作业参数或上下文初始化异常时，脚本任务在执行脚本前可能因 null 参数处理失败，任务被标记失败并造成调度可用性下降。" \
+          "修复建议：读取后将 null 规范化为空字符串或按明确契约拒绝执行，并保持脚本参数数组和命令行参数构造的一致性。" \
+          "验证方式：在无作业参数、空字符串和正常参数三种场景执行脚本任务，确认不会出现 NullPointerException 且脚本收到预期参数。" >>"$output_file"
+        ;;
+      result-msg)
+        [[ -n "$return_t_file" && -f "$return_t_file" ]] || continue
+        grep -Eq 'private[[:space:]]+String[[:space:]]+msg[[:space:]]*;' "$return_t_file" || continue
+        grep -Eq 'String[[:space:]]+getMsg[[:space:]]*\(' "$return_t_file" || continue
+        printf '%s\n\n' \
+          "P1 $candidate_path:$candidate_line - 可空的 ReturnT.msg 在截断前直接调用 length()，返回消息为 null 时会抛出 NullPointerException。" \
+          "影响：成功处理器返回空消息时，任务线程在回调前异常退出，调度结果可能被错误标记失败或丢失。" \
+          "修复建议：先判空再读取长度，或使用空字符串规范化消息后再执行截断和回调。" \
+          "验证方式：让处理器分别返回 null、短消息和超过上限的消息，确认三种结果都能完成回调且长消息只被截断。" >>"$output_file"
+        ;;
+    esac
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_role_api_tenant_scope_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local changed_paths candidate_path source_file line_number
+  [[ -n "$source_root" ]] || return 0
+
+  # This is intentionally a project-pattern guard, not a generic claim that
+  # every application lookup needs a tenant predicate.  Require the visible
+  # role/API assignment workflow, a role tenant guard, and a validator that
+  # feeds globally active application ids into the assignment check while no
+  # tenant authorization scope is present in the same source snapshot.
+  changed_paths="$(mktemp "${TMPDIR:-/tmp}/local-review-role-api-scope-paths.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { next }
+    { prefix = substr($0, 1, 1); text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && path ~ /\.java$/ && text ~ /assignRoleApis|validateAssignableApis|activeApplicationIds\(null\)/) print path }
+  ' "$diff_file" | LC_ALL=C sort -u >"$changed_paths"
+
+  while IFS= read -r candidate_path; do
+    [[ -n "$candidate_path" ]] || continue
+    path_has_symlink_component "$candidate_path" && continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    grep -Eq 'assignRoleApis[[:space:]]*\(' "$source_file" || continue
+    grep -Eq 'validateAssignableApis[[:space:]]*\(' "$source_file" || continue
+    grep -Eq 'roleApiMapper[[:space:]]*\.(insert|delete|select)' "$source_file" || continue
+    grep -Eq 'TenantOperationGuard|resolveRoleTenantId' "$source_file" || continue
+    grep -Eq 'activeApplicationIds[[:space:]]*\([[:space:]]*null[[:space:]]*\)' "$source_file" || continue
+    if grep -Eq 'TenantAuthorizationScope|authorizationScope\.' "$source_file"; then
+      continue
+    fi
+    line_number="$(grep -n -m1 -E 'activeApplicationIds[[:space:]]*\([[:space:]]*null[[:space:]]*\)' "$source_file" | cut -d: -f1)"
+    [[ "$line_number" =~ ^[0-9]+$ ]] || continue
+    printf '%s\n\n' \
+      "P1 $candidate_path:$line_number - 角色 API 授权校验只验证 API 所属应用是否全局有效，未验证该应用是否属于当前租户的可授权范围，存在跨租户权限写入风险。" \
+      "影响：租户管理员可提交另一租户已启用应用中的 API ID，服务仍会把它写入当前租户角色，导致跨租户菜单/接口权限暴露。" \
+      "修复建议：按目标角色租户加载可授权应用范围，并在删除旧绑定和插入新绑定前对 API ID 做同一租户范围校验；拒绝范围外或已下线资源。" \
+      "验证方式：创建两个租户及各自应用 API，使用租户 A 的角色提交租户 B 的 API ID，确认事务拒绝且角色绑定和权限缓存均未改变。" >>"$output_file"
+  done <"$changed_paths"
+  rm -f "$changed_paths"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_java_division_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -7565,6 +7714,8 @@ collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_fil
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"
 collect_xxl_job_permission_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_xxl_job_reliability_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
