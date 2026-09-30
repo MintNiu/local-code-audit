@@ -209,3 +209,5 @@ scorecard 汇总器也有独立的输入校验回归：
 2026-09-29 再补充三组业务可靠性正/负夹具：授权异常 fail-open、Spring 单例共享布尔状态 check-then-act 竞态、事务内支付 gateway 先于本地订单保存的部分成功。模型对三类均有漏报或不稳定识别，加入窄范围确定性预检；异常拒绝、AtomicBoolean、pending + outbox 安全对照保持 clean。单轮全量门禁为 20 类正例、19 类 clean 对照，预签名和截断门通过；仍不把合成结果外推为生产召回率。
 
 2026-09-30 扩展三组不同根因：MyBatis 标量 `${...}` 原始替换、URL `startsWith` 白名单前缀绕过、声明式权限注解删除/注释。个人 tuned profile 单轮全量门禁为 23 类正例、22 类 clean 对照；MyBatis 两个表达式分别保留，URL 前缀同文件/行号重复仅保留一条，独立根因不被去重；预签名回退和显式截断失败门均通过。新增 URL 去重回归 7/7、路径去重回归 3/3，无模型预检和其余 deterministic suites 均通过。该结果仍不替代至少 20 个独立真实 holdout 的人工标注与阶段一门禁。
+
+2026-09-30 真实 MyBatis 复测：`platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 在固定提交快照和直接父提交上用当前 tuned 运行器重复两轮，均完整返回单条 P1（`XxlJobInfoMapper.xml:155` 的 `${executorTimeout}` 原始 SQL 替换），两轮结果 SHA-256 一致，`gold=1`、`found=1`、`predicted=1`、`false_positive=0`、定位准确且 `repeat_stable=true`。旧的 clean 结果只作漏报基线，不覆盖新 scorecard；这个证据仍不能替代阶段一的整体真实 holdout 门禁。

@@ -298,6 +298,8 @@ ERP 留出曾因私有 manifest 使用错误 parent 而无效，已修正且未�
 
 运行器新增窄范围 MyBatis 原始替换预检：仅当 mapper XML 的新增 SQL 标量赋值使用 `${...}` 时确定性报告 P1，并在最终合并过滤相同行范围的模型重复；动态标识符、白名单和其它独立安全根因仍由模型结合上下文判断。无模型预检夹具、证据过滤、运行态 SYSTEM 哈希和完整语法回归均通过。该修复只覆盖可证明的原始赋值形状，不把一个样本外推为全部 SQL 注入召回；阶段 1 仍未达到 20 个独立 holdout P0/P1 根因与 90% 召回/定位门槛。
 
+2026-09-30：将 `platform-job:7687f3fc23715a59dd5c77c4c6c3c68bcce71528` 固定到目标提交及其直接父提交后，用当前 tuned 运行器重新做了两轮真实复测，避免把后续 HEAD 的差异混入结果。两轮均完整结束（exit=0，分别 142 秒和 106 秒），均只输出 `xxl-job-admin/src/main/resources/mybatis-mapper/XxlJobInfoMapper.xml:155` 的单条 P1，结果 SHA-256 同为 `f25db00bb653d095df2a97f6cebc93e914b18f30f2eb4daa6b24db1e09ec097d`。人工金标为 1 个 MyBatis 原始替换 SQL 注入根因，当前结果为 `gold=1`、`p0_p1_found=1`、`predicted_candidates=1`、`false_positive=0`、`location_accurate=1`、`repeat_stable=true`。旧的 clean 结果只作为漏报基线保留，不与新结果合并计数；该修复仍只证明这一种可静态确定的赋值形状，阶段 1 总体门槛未改变。
+
 同轮五轮合成门禁曾发现 clean 样例的非问题信息漂移：安全负例被解释成“安全边界规则”、未跟踪文件被要求 `git add`、合法生成列被解释为“需要确认”。这些段落现仅在明确“无需修复/影响无/合法”且不含独立安全或兼容性证据时过滤；凭据、SQL、租户、权限、构建和迁移问题继续保留。修复后最终门禁为 7 类正例各 5/5、6 类 clean 共 30/30、预签名 5/5，哈希稳定，显式截断失败；`evals/test-filter-evidence.sh` 为 16 个用例通过。
 2026-09-28：完成 `platform-file:f6ce8f6efe6f76d388ed2eb475faa50639ab5e96` 硬编码配置凭据留出。当前脚本按 3000 字节有效预算路由为 6/6 分片，两轮均完整结束（193/243 秒），结果 SHA-256 一致；8 个独立 P1 金标全部命中且定位准确。12 个候选中 3 条是配置注释/导入/README 信息误报，数据库 `CREATE/USE` 名称不一致保留为待确认契约候选，不混入凭据召回。该样本 scorecard 为 `gold=8`、`p0_p1_found=8`、`predicted_candidates=12`、`false_positive=3`、`repeat_stable=true`，证明当前压缩分片没有牺牲这组配置凭据的发现，但不代表其他代码类型的通用召回率。
 
