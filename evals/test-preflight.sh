@@ -3847,6 +3847,78 @@ if printf '%s\n' "$fail_open_boundary_output" | grep -F '授权异常路径默�
   exit 1
 fi
 
+reactive_fail_open_repo="$fixture_root/reactive-fail-open-repo"
+mkdir -p "$reactive_fail_open_repo/src"
+git -C "$reactive_fail_open_repo" init -q
+git -C "$reactive_fail_open_repo" config user.email test@example.invalid
+git -C "$reactive_fail_open_repo" config user.name preflight-reactive-fail-open-test
+cat >"$reactive_fail_open_repo/src/SecurityGateway.java" <<'EOF'
+import reactor.core.publisher.Mono;
+
+final class SecurityGateway {
+    Mono<Boolean> isSecurityContextCurrent() {
+        return Mono.just(false).onErrorResume(error -> Mono.just(false));
+    }
+
+    Mono<Boolean> isApiPermissionAllowed() {
+        return Mono.empty().defaultIfEmpty(false);
+    }
+
+    Mono<Boolean> isAnonymousApi() {
+        return Mono.just(false).onErrorResume(error -> Mono.just(false));
+    }
+
+    Mono<Boolean> isFeatureEnabled() {
+        return Mono.empty().defaultIfEmpty(false);
+    }
+}
+EOF
+git -C "$reactive_fail_open_repo" add .
+git -C "$reactive_fail_open_repo" commit -qm base
+python3 - "$reactive_fail_open_repo/src/SecurityGateway.java" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    "return Mono.just(false).onErrorResume(error -> Mono.just(false));",
+    "return Mono.just(false).onErrorResume(error -> Mono.just(true));",
+    1,
+)
+text = text.replace(
+    "return Mono.empty().defaultIfEmpty(false);",
+    "return Mono.empty().defaultIfEmpty(true);",
+    1,
+)
+path.write_text(text)
+PY
+reactive_fail_open_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$reactive_fail_open_repo")"
+reactive_fail_open_count="$(printf '%s\n' "$reactive_fail_open_output" | grep -c 'Reactor 鉴权异常路径默认放行' || true)"
+if [[ "$reactive_fail_open_count" -ne 2 ]]; then
+  echo "expected two reactive fail-open findings, got $reactive_fail_open_count" >&2
+  printf '%s\n' "$reactive_fail_open_output" >&2
+  exit 1
+fi
+for reactive_field in '影响：' '修复建议：' '验证方式：' '来源：确定性预检（代码证据，非模型原文）'; do
+  reactive_field_count="$(printf '%s\n' "$reactive_fail_open_output" | grep -c "$reactive_field" || true)"
+  if [[ "$reactive_field_count" -ne 2 ]]; then
+    echo "expected two complete reactive fail-open fields for $reactive_field, got $reactive_field_count" >&2
+    printf '%s\n' "$reactive_fail_open_output" >&2
+    exit 1
+  fi
+done
+if printf '%s\n' "$reactive_fail_open_output" | grep -F 'isAnonymousApi' >/dev/null; then
+  echo 'reactive fail-open preflight reported safe anonymous fallback' >&2
+  printf '%s\n' "$reactive_fail_open_output" >&2
+  exit 1
+fi
+if printf '%s\n' "$reactive_fail_open_output" | grep -F 'isFeatureEnabled' >/dev/null; then
+  echo 'reactive fail-open preflight reported non-security fallback' >&2
+  printf '%s\n' "$reactive_fail_open_output" >&2
+  exit 1
+fi
+
 xxl_repo="$fixture_root/xxl-reliability-repo"
 mkdir -p "$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/context" \
   "$xxl_repo/xxl-job-core/src/main/java/com/xxl/job/core/biz/model" \

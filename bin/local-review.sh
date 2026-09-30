@@ -1265,6 +1265,10 @@ validate_finding_line_ranges() {
         if (fields[1] != "") line_count[fields[1]] = fields[2] + 0
       }
       close(counts_file)
+      # All input is loaded from the two explicit files above.  Do not leave
+      # awk waiting on caller stdin when the review response has
+      # findings and range validation is running in a terminal.
+      exit
     }
     END {
       for (basename in basename_count) {
@@ -5444,6 +5448,105 @@ collect_fail_open_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_reactive_fail_open_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line candidate_kind source_file
+
+  # Reactor authorization fallbacks must fail closed too.  The existing
+  # catch/return-true preflight intentionally does not treat every reactive
+  # recovery as an authorization bug; this narrower rule requires a changed
+  # `Mono.just(true)` or `defaultIfEmpty(true)` inside a current-source
+  # `Mono<Boolean>` method whose own name/body carries security evidence.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-reactive-fail-open-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && path ~ /\.java$/) {
+        if (text ~ /Mono[[:space:]]*[.]?[[:space:]]*just[[:space:]]*\([[:space:]]*(true|Boolean[.]TRUE)[[:space:]]*\)/)
+          printf "%s\t%d\tmono\n", path, line_no
+        if (text ~ /defaultIfEmpty[[:space:]]*\([[:space:]]*(true|Boolean[.]TRUE)[[:space:]]*\)/)
+          printf "%s\t%d\tdefault\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line candidate_kind; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$candidate_kind" && -n "$source_root" ]] || continue
+    path_has_symlink_component "$candidate_path" && continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target_line="$candidate_line" -v candidate_kind="$candidate_kind" '
+      function brace_count(text,    count) {
+        count = 0
+        while (match(text, /\{/)) { count++; text = substr(text, RSTART + RLENGTH) }
+        return count
+      }
+      function close_count(text,    count) {
+        count = 0
+        while (match(text, /\}/)) { count++; text = substr(text, RSTART + RLENGTH) }
+        return count
+      }
+      function is_method_decl(text) {
+        if (text ~ /^[[:space:]}]*(if|for|while|switch|catch|try|else|do|synchronized)[[:space:](]/) return 0
+        return text ~ /[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*(throws[^{]+)?\{/
+      }
+      {
+        text = $0
+        opens = brace_count(text)
+        closes = close_count(text)
+        if (method_id != 0 && brace_depth < method_end_depth) method_id = 0
+        if (method_id == 0 && is_method_decl(text) && opens > 0) {
+          method_seq++
+          method_id = method_seq
+          method_end_depth = brace_depth + opens - closes
+        }
+        if (NR == target_line) target_method = method_id
+        if (method_id != 0) {
+          lowered = tolower(text)
+          if (lowered ~ /auth|authoriz|permission|security|access|role|privilege|protected|session|policy|guard|token/) method_security[method_id] = 1
+          if (text ~ /Mono[[:space:]]*<+[[:space:]]*Boolean[[:space:]]*>/ || text ~ /onErrorResume|defaultIfEmpty/) method_reactive[method_id] = 1
+          if (text ~ /Mono[[:space:]]*[.]?[[:space:]]*just[[:space:]]*\([[:space:]]*(true|Boolean[.]TRUE)[[:space:]]*\)/) method_mono_true[method_id] = 1
+          if (text ~ /defaultIfEmpty[[:space:]]*\([[:space:]]*(true|Boolean[.]TRUE)[[:space:]]*\)/) method_default_true[method_id] = 1
+        }
+        brace_depth += opens - closes
+        if (method_id != 0 && brace_depth < method_end_depth) method_id = 0
+      }
+      END {
+        security_evidence = method_security[target_method]
+        reactive_evidence = method_reactive[target_method]
+        mono_true = method_mono_true[target_method]
+        default_true = method_default_true[target_method]
+        if (target_method > 0 && security_evidence && reactive_evidence &&
+            ((candidate_kind == "mono" && mono_true) ||
+             (candidate_kind == "default" && default_true && !mono_true))) exit 0
+        exit 1
+      }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n%s\n%s\n%s\n\n' \
+      "P1 $candidate_path:$candidate_line - Reactor 鉴权异常路径默认放行，权限/安全上下文恢复时将异常或空值转换为 true，形成 fail-open 安全边界。" \
+      "影响：鉴权规则读取失败、Redis 异常或安全上下文失效时，受保护请求可能被当作已授权继续执行。" \
+      "修复建议：异常和缺失规则默认拒绝或传播可观测错误；仅在明确的离线降级契约下允许有限操作，并设置短时缓存、审计和默认拒绝。" \
+      "验证方式：注入 Redis 超时、空规则、无效上下文和鉴权异常，确认受保护端点均返回拒绝且不会调用后续写操作；恢复依赖后验证正常授权路径。" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_url_prefix_whitelist_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -7733,6 +7836,7 @@ collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file"
 collect_check_then_act_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_partial_side_effect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_reactive_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"
