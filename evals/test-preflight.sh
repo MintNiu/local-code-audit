@@ -1097,6 +1097,11 @@ grep -F '在线会话 token 返回预检边界' "$capture" >/dev/null || {
   cat "$capture" >&2
   exit 1
 }
+grep -F '销售寻货目标仓预检边界' "$capture" >/dev/null || {
+  echo 'missing sales-stock warehouse ownership boundary in review prompt' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F 'MissingAlpha（第 3 行）' "$capture" >/dev/null || {
   echo 'aggregated build finding omitted the first missing type' >&2
   cat "$capture" >&2
@@ -4039,6 +4044,50 @@ for xxl_field in '影响：' '修复建议：' '验证方式：' '来源：确�
     exit 1
   }
 done
+
+sales_stock_repo="$fixture_root/sales-stock-owner-repo"
+mkdir -p "$sales_stock_repo/src/main/java/example/erp"
+git -C "$sales_stock_repo" init -q
+git -C "$sales_stock_repo" config user.email test@example.invalid
+git -C "$sales_stock_repo" config user.name preflight-sales-stock-owner
+cat >"$sales_stock_repo/src/main/java/example/erp/SalesStockSearchApplication.java" <<'EOF'
+package example.erp;
+
+final class SalesStockSearchApplication {
+    private final LogicalWarehouseRepository logicalWarehouseRepository = new LogicalWarehouseRepository();
+
+    void confirm(Long id, SearchEntity entity) {
+        resolveTargetWarehouse(entity, id);
+    }
+
+    private Warehouse resolveTargetWarehouse(SearchEntity entity, Long targetLogicalWarehouseId) {
+        Long actualId = targetLogicalWarehouseId == null ? entity.getDefaultLogicalWarehouseId() : targetLogicalWarehouseId;
+        Warehouse warehouse = logicalWarehouseRepository.findById(actualId);
+        if (warehouse == null || warehouse.status != 1) throw new IllegalStateException();
+        return warehouse;
+    }
+
+    static final class SearchEntity {
+        Long getSupplierId() { return 1L; }
+        Long getDefaultLogicalWarehouseId() { return 2L; }
+    }
+    static final class Warehouse { int status; }
+    static final class LogicalWarehouseRepository {
+        Warehouse findById(Long id) { return new Warehouse(); }
+    }
+}
+EOF
+git -C "$sales_stock_repo" add .
+git -C "$sales_stock_repo" commit -qm sales-stock-owner-base
+sed -i '' 's/Warehouse warehouse = logicalWarehouseRepository.findById(actualId);/Warehouse warehouse = logicalWarehouseRepository.findById(actualId); \/\/ changed/' \
+  "$sales_stock_repo/src/main/java/example/erp/SalesStockSearchApplication.java"
+sales_stock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" \
+  "$repo_root/bin/local-review.sh" --repo "$sales_stock_repo")"
+printf '%s\n' "$sales_stock_output" | grep -F '销售寻货确认入库只按目标逻辑仓 ID 查询并校验存在/启用状态' >/dev/null || {
+  echo 'sales-stock warehouse ownership preflight missed the fixture' >&2
+  printf '%s\n' "$sales_stock_output" >&2
+  exit 1
+}
 
 role_scope_repo="$fixture_root/role-api-scope-repo"
 mkdir -p "$role_scope_repo/src/main/java/com/example/system"

@@ -361,3 +361,5 @@ XXL-JOB 确定性预检原先用多个带空行的 `printf` 参数写入同一 f
 同日重跑 `platform-auth:9dbcc0c5af1b11b514ff92a08d8bfb63d3ff6c95` 两轮均完整稳定，原有 URL 查询令牌 P1 命中；人工已确认 `OnlineUserVO.token` 经仓储直接回填并由在线用户接口返回的第二个 P1。新增窄范围预检要求 DTO token 字段、`setToken(token)`、OnlineUserVO API 返回型三段证据同时可见，避免把普通 header 传递或脱敏标识误报为凭据暴露。该规则先通过无模型夹具回归，待当前 runner 提交后重跑真实样本再更新正式 scorecard。
 
 同轮 `platform-job:5dfc6a1092ae8131db160d23323dca33f7501ad8` 的 66 分片复测在第 16 片因 Ollama 超时而 fail-closed；确定性预检已保留 7 个可空 `getJobParam()` 位置，但这次不完整运行不计入召回或稳定性，记录为大提交长尾容量边界。
+
+随后为 `platform-erp-service:559275841648667c5fce19b0048e721df73ebdae` 增加窄范围供方归属预检：只有 `SalesStockSearchApplication.resolveTargetWarehouse` 新增逻辑仓 `findById`、同一源码存在寻货实体供方字段、且 resolver 内没有供方一致性校验时才生成 P1。该预检已通过无模型边界夹具，普通逻辑仓查询不触发；真实大提交需在可完整结束的分片预算下重跑，未完成运行仍不计入阶段一指标。
