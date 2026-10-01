@@ -667,6 +667,17 @@ filter_unsupported_shard_findings() {
       if (text ~ /仍.*(泄漏|越权|风险|问题)|同时.*(泄漏|越权|风险|问题)|但是|然而/) return 0
       return 1
     }
+    function non_finding_doc_summary(text) {
+      # A model may turn a documentation-only synchronization note into a
+      # fully formatted information block.  It is not an actionable finding:
+      # drop only an explicit positive/no-fix summary and keep any concrete
+      # mismatch, compatibility, build, or security claim visible.
+      if (text !~ /^[[:space:]]*信息[[:space:]:：]/) return 0
+      if (text !~ /文档|README|Javadoc/) return 0
+      if (text !~ /一致|实现正确|无需.*修复|符合.*契约/) return 0
+      if (text ~ /不一致|冲突|缺少|矛盾|兼容|构建|风险|问题|错误|不匹配|过时|漏洞/) return 0
+      return 1
+    }
     function username_only_credential_default(text, evidence, path,    header, line_number, source_path, source_line, cursor, target_line) {
       # A username such as `nacos` is an identifier, not a secret by itself.
       # Models sometimes report a generic hardcoded-credential finding for a
@@ -1004,6 +1015,7 @@ filter_unsupported_shard_findings() {
       if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
       if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
       if (generic_standard_library_info(block)) invalid = 1
+      if (non_finding_doc_summary(block)) invalid = 1
       # Lombok annotations generate the accessors/constructors referenced by
       # the class.  Do not let an information-level shard guess that Lombok is
       # missing merely because the dependency declaration is outside the

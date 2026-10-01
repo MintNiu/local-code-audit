@@ -549,6 +549,17 @@ if ! grep -Fx '未发现阻塞问题' "$generic_clean_info_output" >/dev/null ||
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
+doc_sync_info_output="$(run_review doc-sync-info "$untracked_info_repo" '信息 doc/README.md:1-5 - DOC_SYNC_INFO_MARKER：文档更新与代码实现一致，无需额外修复。
+影响：无。
+修复建议：无。
+验证方式：无。')"
+if ! grep -Fx '未发现阻塞问题' "$doc_sync_info_output" >/dev/null ||
+   grep -F 'DOC_SYNC_INFO_MARKER' "$doc_sync_info_output" >/dev/null; then
+  printf 'FAIL doc-sync-info: documentation synchronization summary was not filtered\n' >&2
+  cat "$doc_sync_info_output" >&2
+  filter_evidence_failures=$((filter_evidence_failures + 1))
+fi
+
 path_safe_repo="$(new_repo path-safe)"
 mkdir -p "$path_safe_repo/src/main/java/example"
 cat >"$path_safe_repo/src/main/java/example/PathReader.java" <<'EOF'
@@ -700,4 +711,4 @@ if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 21 cases\n'
+printf 'filter evidence regression passed: 22 cases\n'
