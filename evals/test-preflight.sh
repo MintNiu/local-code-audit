@@ -1087,6 +1087,11 @@ grep -F '只要输出了任意一个 P0、P1、P2、P3 或信息问题，就禁�
   cat "$capture" >&2
   exit 1
 }
+grep -F '不得把“文档/README 与代码一致”“实现正确”“无需额外修复”“符合契约”' "$capture" >/dev/null || {
+  echo 'missing non-finding documentation summary boundary in review prompt' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F 'MissingAlpha（第 3 行）' "$capture" >/dev/null || {
   echo 'aggregated build finding omitted the first missing type' >&2
   cat "$capture" >&2
