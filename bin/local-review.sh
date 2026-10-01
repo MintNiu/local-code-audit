@@ -6097,11 +6097,13 @@ collect_role_api_tenant_scope_preflight() {
     fi
     line_number="$(grep -n -m1 -E 'activeApplicationIds[[:space:]]*\([[:space:]]*null[[:space:]]*\)' "$source_file" | cut -d: -f1)"
     [[ "$line_number" =~ ^[0-9]+$ ]] || continue
-    printf '%s\n\n' \
-      "P1 $candidate_path:$line_number - 角色 API 授权校验只验证 API 所属应用是否全局有效，未验证该应用是否属于当前租户的可授权范围，存在跨租户权限写入风险。" \
-      "影响：租户管理员可提交另一租户已启用应用中的 API ID，服务仍会把它写入当前租户角色，导致跨租户菜单/接口权限暴露。" \
-      "修复建议：按目标角色租户加载可授权应用范围，并在删除旧绑定和插入新绑定前对 API ID 做同一租户范围校验；拒绝范围外或已下线资源。" \
-      "验证方式：创建两个租户及各自应用 API，使用租户 A 的角色提交租户 B 的 API ID，确认事务拒绝且角色绑定和权限缓存均未改变。" >>"$output_file"
+    {
+      printf '%s\n' "P1 $candidate_path:$line_number - 角色 API 授权校验只验证 API 所属应用是否全局有效，未验证该应用是否属于当前租户的可授权范围，存在跨租户权限写入风险。"
+      printf '%s\n' '影响：租户管理员可提交另一租户已启用应用中的 API ID，服务仍会把它写入当前租户角色，导致跨租户菜单/接口权限暴露。'
+      printf '%s\n' '修复建议：按目标角色租户加载可授权应用范围，并在删除旧绑定和插入新绑定前对 API ID 做同一租户范围校验；拒绝范围外或已下线资源。'
+      printf '%s\n' '验证方式：创建两个租户及各自应用 API，使用租户 A 的角色提交租户 B 的 API ID，确认事务拒绝且角色绑定和权限缓存均未改变。'
+      printf '\n'
+    } >>"$output_file"
   done <"$changed_paths"
   rm -f "$changed_paths"
   dedup_preflight_blocks "$output_file"

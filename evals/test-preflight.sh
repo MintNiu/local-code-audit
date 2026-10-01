@@ -4146,6 +4146,14 @@ printf '%s\n' "$role_scope_output" | grep -F '角色 API 授权校验只验证 A
   printf '%s\n' "$role_scope_output" >&2
   exit 1
 }
+for role_scope_field in '影响：' '修复建议：' '验证方式：'; do
+  role_scope_field_count="$(printf '%s\n' "$role_scope_output" | grep -c "$role_scope_field" || true)"
+  [[ "$role_scope_field_count" -eq 1 ]] || {
+    echo "role/API preflight field count mismatch for $role_scope_field: $role_scope_field_count" >&2
+    printf '%s\n' "$role_scope_output" >&2
+    exit 1
+  }
+done
 
 # Returning raw online-session tokens in an OnlineUserVO is a credential
 # disclosure even when the endpoint itself checks permissions. The narrow
