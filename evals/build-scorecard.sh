@@ -85,9 +85,9 @@ fi
 label_count=0
 while IFS= read -r label_file; do
   [[ -f "$label_file" ]] || continue
-  review_status="$(awk -F '\t' '$1 == "# review_status" { print $2; exit }' "$label_file")"
+  review_status="$(awk -F '\t' '$1 == "# review_status" && $2 ~ /^(pending|complete)$/ { print $2; exit }' "$label_file")"
   [[ "$review_status" == "complete" ]] || continue
-  verdict="$(awk -F '\t' '$1 == "# verdict" { print $2; exit }' "$label_file")"
+  verdict="$(awk -F '\t' '$1 == "# verdict" && $2 ~ /^(clean|findings)$/ { print $2; exit }' "$label_file")"
   case "$verdict" in
     clean|findings) ;;
     *)
@@ -160,17 +160,20 @@ while IFS= read -r label_file; do
   }
 
   if [[ "$stage1_mode" == true ]]; then
-    for stage1_field in split feature_cluster location_accurate repeat_stable; do
-      stage1_field_count="$(awk -F '\t' -v key="# $stage1_field" '$1 == key { n++ } END { print n + 0 }' "$label_file")"
+    split_count="$(awk -F '\t' '$1 == "# split" && $2 ~ /^(train|dev|holdout)$/ { n++ } END { print n + 0 }' "$label_file")"
+    feature_cluster_count="$(awk -F '\t' '$1 == "# feature_cluster" && $2 ~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/ { n++ } END { print n + 0 }' "$label_file")"
+    location_accurate_count="$(awk -F '\t' '$1 == "# location_accurate" && $2 ~ /^[0-9]+$/ { n++ } END { print n + 0 }' "$label_file")"
+    repeat_stable_count="$(awk -F '\t' '$1 == "# repeat_stable" && $2 ~ /^(true|false)$/ { n++ } END { print n + 0 }' "$label_file")"
+    for stage1_field_count in "$split_count" "$feature_cluster_count" "$location_accurate_count" "$repeat_stable_count"; do
       [[ "$stage1_field_count" == 1 ]] || {
-        echo "阶段一标签必须恰好包含一个 # $stage1_field 元数据行: $commit" >&2
+        echo "阶段一标签必须恰好包含一个有效的 split/feature_cluster/location_accurate/repeat_stable 元数据值: $commit" >&2
         exit 1
       }
     done
-    split_name="$(awk -F '\t' '$1 == "# split" { print $2; exit }' "$label_file")"
-    feature_cluster="$(awk -F '\t' '$1 == "# feature_cluster" { print $2; exit }' "$label_file")"
-    location_accurate="$(awk -F '\t' '$1 == "# location_accurate" { print $2; exit }' "$label_file")"
-    repeat_stable="$(awk -F '\t' '$1 == "# repeat_stable" { print $2; exit }' "$label_file")"
+    split_name="$(awk -F '\t' '$1 == "# split" && $2 ~ /^(train|dev|holdout)$/ { print $2; exit }' "$label_file")"
+    feature_cluster="$(awk -F '\t' '$1 == "# feature_cluster" && $2 ~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/ { print $2; exit }' "$label_file")"
+    location_accurate="$(awk -F '\t' '$1 == "# location_accurate" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$label_file")"
+    repeat_stable="$(awk -F '\t' '$1 == "# repeat_stable" && $2 ~ /^(true|false)$/ { print $2; exit }' "$label_file")"
     [[ "$split_name" =~ ^(train|dev|holdout)$ ]] || {
       echo "阶段一标签缺少有效 split（train、dev 或 holdout）: $commit" >&2
       exit 1

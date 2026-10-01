@@ -55,7 +55,7 @@ grep -F "$commit" "$output" | grep -F $'\t1\t1\t2\t1\ttrue\t12' >/dev/null
 stage1_labels="$tmp_dir/stage1-labels"
 mkdir -p "$stage1_labels"
 cp "$labels_dir/$commit.labels.tsv" "$stage1_labels/$commit.labels.tsv"
-perl -0pi -e 's/^# finding_id/# split\ttrain\n# feature_cluster\tcode-contract\n# location_accurate\t1\n# repeat_stable\ttrue\n# finding_id/m' "$stage1_labels/$commit.labels.tsv"
+perl -0pi -e 's/^# finding_id/# split\t阶段一人工填写 train、dev 或 holdout\n# feature_cluster\t阶段一人工填写功能簇\n# location_accurate\t阶段一人工填写非负整数\n# repeat_stable\t阶段一人工填写 true 或 false\n# split\ttrain\n# feature_cluster\tcode-contract\n# location_accurate\t1\n# repeat_stable\ttrue\n# finding_id/m' "$stage1_labels/$commit.labels.tsv"
 stage1_output="$tmp_dir/stage1-scorecard.tsv"
 "$repo_root/evals/build-scorecard.sh" --stage1 --labels-dir "$stage1_labels" --results-dir "$results_dir" --out "$stage1_output" >/dev/null
 stage1_header=$'commit\tmodel\ttemperature\tseed\tnum_ctx\tgold_p0_p1\tp0_p1_found\tpredicted_candidates\tfalse_positive_count\toutput_complete\telapsed_seconds\tsplit\tfeature_cluster\tlocation_accurate\trepeat_stable'
