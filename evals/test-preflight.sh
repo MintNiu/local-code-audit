@@ -1077,6 +1077,11 @@ grep -F 'P1 src/main/java/com/example/api/client/MultipleMissing.java:3,4' "$cap
   cat "$capture" >&2
   exit 1
 }
+grep -F '删除一个类、过滤器、配置或适配器本身不是缺陷证据' "$capture" >/dev/null || {
+  echo 'missing deleted-file evidence boundary in review prompt' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F 'MissingAlpha（第 3 行）' "$capture" >/dev/null || {
   echo 'aggregated build finding omitted the first missing type' >&2
   cat "$capture" >&2
