@@ -365,3 +365,5 @@ XXL-JOB 确定性预检原先用多个带空行的 `printf` 参数写入同一 f
 随后为 `platform-erp-service:559275841648667c5fce19b0048e721df73ebdae` 增加窄范围供方归属预检：只有 `SalesStockSearchApplication.resolveTargetWarehouse` 新增逻辑仓 `findById`、同一源码存在寻货实体供方字段、且 resolver 内没有供方一致性校验时才生成 P1。该预检已通过无模型边界夹具，普通逻辑仓查询不触发；真实大提交需在可完整结束的分片预算下重跑，未完成运行仍不计入阶段一指标。
 
 同轮修正该预检只从方法声明建立 resolver 范围，避免把调用点后续的 `entity.getSupplierId()` 错当作目标仓归属校验；完整 `test-preflight.sh` 重新通过。
+
+修正后对真实 `platform-erp-service:559275841648667c5fce19b0048e721df73ebdae` 使用 6000 字节有效分片预算完成两轮复测：20/20 分片均完成，确定性供方归属 P1 稳定出现，结果签名一致；两轮耗时约 283/326 秒。该样本的原始 3000 字节配置曾出现长尾失败，因此 6000 字节只作为该大提交的受控留出配置，不改变个人入口默认预算。
