@@ -1082,6 +1082,11 @@ grep -F '删除一个类、过滤器、配置或适配器本身不是缺陷证�
   cat "$capture" >&2
   exit 1
 }
+grep -F '只要输出了任意一个 P0、P1、P2、P3 或信息问题，就禁止再附带' "$capture" >/dev/null || {
+  echo 'missing mixed-clean output protocol in review prompt' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F 'MissingAlpha（第 3 行）' "$capture" >/dev/null || {
   echo 'aggregated build finding omitted the first missing type' >&2
   cat "$capture" >&2
@@ -4010,6 +4015,20 @@ printf '%s\n' "$xxl_output" | grep -F 'ReturnT.msg' >/dev/null || {
   printf '%s\n' "$xxl_output" >&2
   exit 1
 }
+xxl_p1_count="$(printf '%s\n' "$xxl_output" | grep -c '^P1 ' || true)"
+[[ "$xxl_p1_count" -eq 2 ]] || {
+  echo "XXL-JOB nullable preflight emitted duplicate or malformed blocks: $xxl_p1_count" >&2
+  printf '%s\n' "$xxl_output" >&2
+  exit 1
+}
+for xxl_field in '影响：' '修复建议：' '验证方式：' '来源：确定性预检（代码证据，非模型原文）'; do
+  xxl_field_count="$(printf '%s\n' "$xxl_output" | grep -c "$xxl_field" || true)"
+  [[ "$xxl_field_count" -eq 2 ]] || {
+    echo "XXL-JOB nullable preflight field count mismatch for $xxl_field: $xxl_field_count" >&2
+    printf '%s\n' "$xxl_output" >&2
+    exit 1
+  }
+done
 
 role_scope_repo="$fixture_root/role-api-scope-repo"
 mkdir -p "$role_scope_repo/src/main/java/com/example/system"
