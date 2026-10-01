@@ -6041,7 +6041,7 @@ collect_sales_stock_warehouse_owner_preflight() {
     grep -Eq 'resolveTargetWarehouse|logicalWarehouseRepository\.findById' "$source_file" || continue
     grep -Eq 'getSupplierId\(\)|supplierId' "$source_file" || continue
     resolver_block="$(awk '
-      /resolveTargetWarehouse[[:space:]]*\(/ { in_method = 1 }
+      /(^|[[:space:]])(private|protected|public)[[:space:]]+[A-Za-z0-9_.<>?, \[\]]+[[:space:]]+resolveTargetWarehouse[[:space:]]*\(/ { in_method = 1 }
       in_method { print }
       in_method && /^    }[[:space:]]*$/ { exit }
     ' "$source_file")"

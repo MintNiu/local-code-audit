@@ -363,3 +363,5 @@ XXL-JOB 确定性预检原先用多个带空行的 `printf` 参数写入同一 f
 同轮 `platform-job:5dfc6a1092ae8131db160d23323dca33f7501ad8` 的 66 分片复测在第 16 片因 Ollama 超时而 fail-closed；确定性预检已保留 7 个可空 `getJobParam()` 位置，但这次不完整运行不计入召回或稳定性，记录为大提交长尾容量边界。
 
 随后为 `platform-erp-service:559275841648667c5fce19b0048e721df73ebdae` 增加窄范围供方归属预检：只有 `SalesStockSearchApplication.resolveTargetWarehouse` 新增逻辑仓 `findById`、同一源码存在寻货实体供方字段、且 resolver 内没有供方一致性校验时才生成 P1。该预检已通过无模型边界夹具，普通逻辑仓查询不触发；真实大提交需在可完整结束的分片预算下重跑，未完成运行仍不计入阶段一指标。
+
+同轮修正该预检只从方法声明建立 resolver 范围，避免把调用点后续的 `entity.getSupplierId()` 错当作目标仓归属校验；完整 `test-preflight.sh` 重新通过。

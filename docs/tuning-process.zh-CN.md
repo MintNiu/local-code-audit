@@ -838,3 +838,5 @@ reserve 和 effective budget，方便后续复核。
 随后重跑 `platform-auth:9dbcc0c5af1b11b514ff92a08d8bfb63d3ff6c95` 两轮，均完整稳定并命中查询参数令牌 P1。源码复核确认第二个独立根因是 `OnlineUserVO.token` 由仓储回填后进入在线用户查询响应；新增预检只在 DTO 字段、仓储赋值和 API 返回型同时存在时触发，已通过无模型夹具，避免误报普通 header 传递或脱敏 ID。`platform-job:5dfc6a1092ae8131db160d23323dca33f7501ad8` 的 66 分片长提交复测在第 16 片超时，确定性预检虽保留 7 个位置，因输出不完整不计入正式指标。
 
 针对 ERP 寻货样本新增供方归属预检：`SalesStockSearchApplication.resolveTargetWarehouse` 只有在新增目标仓查询、寻货实体供方字段和缺少供方一致性校验三项证据同时出现时才报告 P1；无模型夹具已覆盖普通仓库查询的 clean 边界。该规则改善真实漏报可见性，但大差异仍必须完整结束并双轮稳定后才能进入阶段一分母。
+
+实现时额外收紧了方法范围识别：只接受 `resolveTargetWarehouse` 的方法声明，不把调用点之后的供方字段读取误当作 resolver 内校验；修正后的完整预检回归通过。
