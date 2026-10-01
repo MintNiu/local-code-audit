@@ -1092,6 +1092,11 @@ grep -F '不得把“文档/README 与代码一致”“实现正确”“无需
   cat "$capture" >&2
   exit 1
 }
+grep -F '在线会话 token 返回预检边界' "$capture" >/dev/null || {
+  echo 'missing raw session token response boundary in review prompt' >&2
+  cat "$capture" >&2
+  exit 1
+}
 grep -F 'MissingAlpha（第 3 行）' "$capture" >/dev/null || {
   echo 'aggregated build finding omitted the first missing type' >&2
   cat "$capture" >&2
@@ -4090,6 +4095,57 @@ role_scope_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTU
 printf '%s\n' "$role_scope_output" | grep -F '角色 API 授权校验只验证 API 所属应用是否全局有效' >/dev/null || {
   echo 'missing role/API tenant scope preflight' >&2
   printf '%s\n' "$role_scope_output" >&2
+  exit 1
+}
+
+# Returning raw online-session tokens in an OnlineUserVO is a credential
+# disclosure even when the endpoint itself checks permissions. The narrow
+# preflight requires the DTO, repository assignment, and API return shape;
+# ordinary header transport and masked identifiers are out of scope.
+session_token_repo="$fixture_root/session-token-repo"
+mkdir -p "$session_token_repo/src/main/java/example/auth"
+git -C "$session_token_repo" init -q
+git -C "$session_token_repo" config user.email test@example.invalid
+git -C "$session_token_repo" config user.name preflight-session-token
+cat >"$session_token_repo/src/main/java/example/auth/OnlineUserVO.java" <<'EOF'
+package example.auth;
+
+public class OnlineUserVO {
+    private String userId;
+}
+EOF
+cat >"$session_token_repo/src/main/java/example/auth/OnlineSessionRepository.java" <<'EOF'
+package example.auth;
+
+public class OnlineSessionRepository {
+    public OnlineUserVO build(String token) {
+        OnlineUserVO vo = new OnlineUserVO();
+        return vo;
+    }
+}
+EOF
+cat >"$session_token_repo/src/main/java/example/auth/OnlineController.java" <<'EOF'
+package example.auth;
+
+import java.util.List;
+
+public class OnlineController {
+    public Result<List<OnlineUserVO>> users() {
+        return null;
+    }
+}
+EOF
+git -C "$session_token_repo" add .
+git -C "$session_token_repo" commit -qm session-token-base
+sed -i '' 's/private String userId;/private String userId; private String token;/' \
+  "$session_token_repo/src/main/java/example/auth/OnlineUserVO.java"
+sed -i '' 's/OnlineUserVO vo = new OnlineUserVO();/OnlineUserVO vo = new OnlineUserVO(); vo.setToken(token);/' \
+  "$session_token_repo/src/main/java/example/auth/OnlineSessionRepository.java"
+session_token_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" \
+  "$repo_root/bin/local-review.sh" --repo "$session_token_repo")"
+printf '%s\n' "$session_token_output" | grep -F '在线会话查询返回对象直接携带原始 session token' >/dev/null || {
+  echo 'raw session token response preflight missed the DTO/repository/API fixture' >&2
+  printf '%s\n' "$session_token_output" >&2
   exit 1
 }
 
