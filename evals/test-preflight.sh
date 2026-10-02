@@ -3151,6 +3151,11 @@ printf '%s\n' "$schema_snapshot_output" | grep -F 'sql/platform_erp.sql:' >/dev/
   printf '%s\n' "$schema_snapshot_output" >&2
   exit 1
 }
+if [[ "$(printf '%s\n' "$schema_snapshot_output" | grep -c '已有表 schema 快照新增字段或索引')" -ne 1 ]]; then
+  echo 'schema snapshot migration preflight duplicated the same root' >&2
+  printf '%s\n' "$schema_snapshot_output" >&2
+  exit 1
+fi
 
 mkdir -p "$schema_snapshot_repo/sql/migration"
 cat >"$schema_snapshot_repo/sql/migration/V20261002__inspection_request_no.sql" <<'EOF'

@@ -1125,7 +1125,9 @@ dedup_exact_findings() {
       # Classify common non-credential roots so shard aggregation can merge
       # different prose for the same location without collapsing independent
       # findings that happen to share a line.
-      if (body_text ~ /NullPointerException|非空保护|自动拆箱/) {
+      if (body_text ~ /已有表 schema 快照新增字段或索引/) {
+        finding_family[count] = "schema-snapshot-migration"
+      } else if (body_text ~ /NullPointerException|非空保护|自动拆箱/) {
         finding_family[count] = "java-null"
       } else if (body_text ~ /ArithmeticException|除零|除数|分母|非零保护/) {
         finding_family[count] = "java-zero"
@@ -1149,6 +1151,23 @@ dedup_exact_findings() {
         finding_family[count] = "idor"
       } else {
         finding_family[count] = ""
+      }
+      schema_path[count] = ""
+      schema_start[count] = 0
+      schema_end[count] = 0
+      if (finding_family[count] == "schema-snapshot-migration") {
+        schema_location = block_lines[1]
+        sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", schema_location)
+        sub(/[[:space:]]+-.*$/, "", schema_location)
+        if (match(schema_location, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?$/)) {
+          schema_suffix = substr(schema_location, RSTART, RLENGTH)
+          schema_path[count] = substr(schema_location, 1, RSTART - 1)
+          sub(/^:/, "", schema_suffix)
+          gsub(/[[:space:]]+/, "", schema_suffix)
+          split(schema_suffix, schema_parts, "-")
+          schema_start[count] = schema_parts[1] + 0
+          schema_end[count] = (schema_parts[2] == "" ? schema_start[count] : schema_parts[2] + 0)
+        }
       }
       severity[count] = severity_rank(block_lines[1])
       block = ""
@@ -1194,8 +1213,23 @@ dedup_exact_findings() {
       for (i = 1; i <= count; i++) {
         if (skipped[i] || finding_family[i] == "") continue
         for (j = 1; j <= count; j++) {
-          if (i == j || skipped[j] || source_block[j] != source_block[i] || keys[j] != keys[i] || finding_family[j] != finding_family[i]) continue
-          if (severity[j] < severity[i] || (severity[j] == severity[i] && j < i)) {
+          if (i == j || skipped[j] || finding_family[j] != finding_family[i]) continue
+          same_scope = (source_block[j] == source_block[i] && keys[j] == keys[i])
+          if (finding_family[i] == "schema-snapshot-migration" &&
+              schema_path[i] != "" && schema_path[i] == schema_path[j] &&
+              schema_start[i] > 0 && schema_start[j] > 0 &&
+              schema_start[i] <= schema_end[j] && schema_start[j] <= schema_end[i]) {
+            # The model may report the whole hunk while the deterministic
+            # preflight points at the first changed line. Treat overlapping
+            # locations as one migration root and prefer the code-proven
+            # deterministic block.
+            same_scope = 1
+          }
+          if (!same_scope) continue
+          if (severity[j] < severity[i] ||
+              (severity[j] == severity[i] &&
+               ((finding_family[i] == "schema-snapshot-migration" && source_block[j] && !source_block[i]) ||
+                (finding_family[i] != "schema-snapshot-migration" && j < i)))) {
             skipped[i] = 1
             break
           }
@@ -7796,6 +7830,18 @@ collect_schema_snapshot_migration_preflight() {
       sub(/ .*/, "", hunk)
       line_no = hunk + 0
       reset_hunk()
+      # Git may place the unchanged table declaration after the second @@
+      # marker instead of emitting it as a context line. Preserve that
+      # evidence so a changed column in the first hunk is still attributable
+      # to the existing table.
+      context = $0
+      sub(/^@@[^@]*@@[[:space:]]*/, "", context)
+      if (context ~ /CREATE[[:space:]]+TABLE[[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS/) {
+        table = context
+        sub(/^.*CREATE[[:space:]]+TABLE[[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+/, "", table)
+        sub(/[[:space:](].*$/, "", table)
+        gsub(/`/, "", table)
+      }
       next
     }
     {
@@ -7846,6 +7892,46 @@ collect_schema_snapshot_migration_preflight() {
     # counter-evidence only when the same table and field are both visible in
     # one versioned migration; an unrelated migration with the same generic
     # column name is not enough.
+    # Correlate the SQL candidate with the newly added Java property.  A
+    # formatting-only SQL hunk can contain many added backtick identifiers
+    # (id, tenant_id, timestamps, etc.) while the commit adds an unrelated
+    # requestNo field elsewhere.  Requiring a normalized identifier match
+    # prevents that hunk from producing a duplicate finding for the same root.
+    candidate_matches_java=false
+    while IFS= read -r candidate_token; do
+      [[ -n "$candidate_token" ]] || continue
+      case "$candidate_token" in
+        id|tenant_id|is_deleted|create_time|update_time|uk_*|idx_*) continue ;;
+      esac
+      candidate_token_normalized="$(printf '%s' "$candidate_token" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
+      [[ ${#candidate_token_normalized} -ge 4 ]] || continue
+      if awk -v wanted="$candidate_token_normalized" '
+        /^diff --git / { in_java = ($0 ~ / b\/[^[:space:]]+\.java$/); next }
+        /^\+\+\+ b\// { in_java = ($0 ~ /\.java$/); next }
+        {
+          if (in_java && substr($0, 1, 1) == "+" && $0 !~ /^\+\+\+ b\//) {
+            line = tolower($0)
+            gsub(/[^a-z0-9]/, "", line)
+            if (index(line, wanted) > 0) found = 1
+          }
+        }
+        END { exit(found ? 0 : 1) }
+      ' "$diff_file"; then
+        candidate_matches_java=true
+        break
+      fi
+    done < <(
+      printf '%s\n' "$candidate_field" | awk '{
+        text = $0
+        while (match(text, /`[^`]+`/)) {
+          token = substr(text, RSTART + 1, RLENGTH - 2)
+          print token
+          text = substr(text, RSTART + RLENGTH)
+        }
+      }'
+    )
+    [[ "$candidate_matches_java" == true ]] || continue
+
     field_name="$(printf '%s\n' "$candidate_field" | sed -n 's/.*`\([^`]*\)`.*/\1/p')"
     migration_matches=false
     if [[ -n "$field_name" ]]; then
