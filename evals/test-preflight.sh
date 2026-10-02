@@ -4971,6 +4971,168 @@ if printf '%s\n' "$payment_voucher_caller_safe_output" | grep -F '销售订单�
   exit 1
 fi
 
+# Operation-log tenant and audit identity checks are scoped to the migration
+# shape that excludes sys_log from the generic tenant interceptor.
+log_tenant_repo="$fixture_root/log-tenant-audit-repo"
+mkdir -p "$log_tenant_repo/nacos-config" "$log_tenant_repo/src/main/java/com/bit/log/controller" "$log_tenant_repo/src/main/java/com/bit/log/repository"
+git -C "$log_tenant_repo" init -q
+git -C "$log_tenant_repo" config user.email test@example.invalid
+git -C "$log_tenant_repo" config user.name preflight-log-tenant
+printf '%s\n' '# log tenant audit fixture' >"$log_tenant_repo/README.md"
+git -C "$log_tenant_repo" add .
+git -C "$log_tenant_repo" commit -qm log-tenant-audit-base
+cat >"$log_tenant_repo/nacos-config/platform-log.yml" <<'EOF'
+tenant:
+  ignore-tables:
+    - sys_log
+EOF
+cat >"$log_tenant_repo/src/main/java/com/bit/log/controller/LogController.java" <<'EOF'
+package com.bit.log.controller;
+
+final class LogController {
+    Object create(LogCreateDTO dto) { return service.create(dto); }
+    Object page(LogQueryDTO query) { return service.page(query); }
+    Object clean(LogQueryDTO query) { return service.clean(query); }
+    void export(LogQueryDTO query) { service.export(query); }
+    private final LogApplicationService service = null;
+    interface LogApplicationService {
+        Object create(LogCreateDTO dto);
+        Object page(LogQueryDTO query);
+        Object clean(LogQueryDTO query);
+        void export(LogQueryDTO query);
+    }
+    static final class LogCreateDTO {}
+    static final class LogQueryDTO {}
+}
+EOF
+cat >"$log_tenant_repo/src/main/java/com/bit/log/repository/LogRepository.java" <<'EOF'
+package com.bit.log.repository;
+
+final class LogRepository {
+    void create(LogCreateDTO dto) {
+        SysLog log = BeanUtil.copyProperties(dto, SysLog.class);
+        sysLogMapper.insert(log);
+    }
+    void page(LogQueryDTO query) {
+        sysLogMapper.selectPage(new LambdaQueryWrapper<SysLog>()
+            .eq(query.getTenantId() != null, SysLog::getTenantId, query.getTenantId()));
+    }
+    void list(LogQueryDTO query) {
+        sysLogMapper.selectList(new LambdaQueryWrapper<SysLog>()
+            .eq(query.getTenantId() != null, SysLog::getTenantId, query.getTenantId()));
+    }
+    void clean(LogQueryDTO query) {
+        sysLogMapper.delete(new LambdaQueryWrapper<SysLog>()
+            .eq(query.getTenantId() != null, SysLog::getTenantId, query.getTenantId()));
+    }
+    interface Mapper {
+        void insert(SysLog log);
+        void selectPage(Object wrapper);
+        void selectList(Object wrapper);
+        void delete(Object wrapper);
+    }
+    private final Mapper sysLogMapper = null;
+    static final class SysLog { static Long getTenantId(SysLog value) { return null; } }
+    static final class LogCreateDTO {}
+    static final class LogQueryDTO { Long getTenantId() { return null; } }
+    static final class BeanUtil { static SysLog copyProperties(Object dto, Class<SysLog> type) { return null; } }
+    static final class LambdaQueryWrapper<T> { LambdaQueryWrapper<T> eq(boolean c, Object k, Object v) { return this; } }
+}
+EOF
+log_tenant_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$log_tenant_repo")"
+printf '%s\n' "$log_tenant_output" | grep -F '操作日志表被显式排除通用租户拦截' >/dev/null || {
+  echo 'log tenant audit preflight missed the positive tenant-scope fixture' >&2
+  printf '%s\n' "$log_tenant_output" >&2
+  exit 1
+}
+printf '%s\n' "$log_tenant_output" | grep -F '操作日志创建直接将客户端 DTO 复制到实体' >/dev/null || {
+  echo 'log tenant audit preflight missed the positive audit-identity fixture' >&2
+  printf '%s\n' "$log_tenant_output" >&2
+  exit 1
+}
+log_tenant_p1_count="$(printf '%s\n' "$log_tenant_output" | grep -c '^P1 .*操作日志' || true)"
+[[ "$log_tenant_p1_count" -eq 2 ]] || {
+  echo "log tenant audit preflight emitted duplicate or malformed blocks: $log_tenant_p1_count" >&2
+  printf '%s\n' "$log_tenant_output" >&2
+  exit 1
+}
+
+# Removing the explicit sys_log exclusion must keep the log-specific rule off.
+log_tenant_safe_repo="$fixture_root/log-tenant-audit-safe-repo"
+cp -R "$log_tenant_repo" "$log_tenant_safe_repo"
+sed -i.bak 's/ignore-tables:/enabled: true #/' "$log_tenant_safe_repo/nacos-config/platform-log.yml"
+sed -i.bak '/    - sys_log/d' "$log_tenant_safe_repo/nacos-config/platform-log.yml"
+rm -f "$log_tenant_safe_repo/nacos-config/platform-log.yml.bak"
+log_tenant_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$log_tenant_safe_repo")"
+if printf '%s\n' "$log_tenant_safe_output" | grep -F '操作日志表被显式排除通用租户拦截' >/dev/null || \
+   printf '%s\n' "$log_tenant_safe_output" | grep -F '操作日志创建直接将客户端 DTO 复制到实体' >/dev/null; then
+  echo 'log tenant audit preflight reported the safe configuration fixture' >&2
+  printf '%s\n' "$log_tenant_safe_output" >&2
+  exit 1
+fi
+
+# XXL-JOB admin logs must not serialize complete glue or job configuration
+# objects.  ID-only operation logs remain valid and form the negative case.
+job_log_repo="$fixture_root/job-sensitive-log-repo"
+mkdir -p "$job_log_repo/xxl-job-admin/src/main/java/com/xxl/job/admin/controller/biz" "$job_log_repo/xxl-job-admin/src/main/java/com/xxl/job/admin/service/impl"
+git -C "$job_log_repo" init -q
+git -C "$job_log_repo" config user.email test@example.invalid
+git -C "$job_log_repo" config user.name preflight-job-sensitive-log
+printf '%s\n' '# job sensitive log fixture' >"$job_log_repo/README.md"
+git -C "$job_log_repo" add .
+git -C "$job_log_repo" commit -qm job-sensitive-log-base
+cat >"$job_log_repo/xxl-job-admin/src/main/java/com/xxl/job/admin/controller/biz/JobCodeController.java" <<'EOF'
+package com.xxl.job.admin.controller.biz;
+final class JobCodeController {
+    void update(XxlJobLogGlue xxlJobLogGlue) {
+        logger.info(">>>>>>>>>>> xxl-job operation log: type = {}, content = {}", "jobcode-update", GsonTool.toJson(xxlJobLogGlue));
+    }
+    Object logger = null;
+}
+EOF
+cat >"$job_log_repo/xxl-job-admin/src/main/java/com/xxl/job/admin/service/impl/XxlJobServiceImpl.java" <<'EOF'
+package com.xxl.job.admin.service.impl;
+final class XxlJobServiceImpl {
+    void add(XxlJobInfo jobInfo) {
+        logger.info(">>>>>>>>>>> xxl-job operation log: type = {}, content = {}", "jobinfo-save", GsonTool.toJson(jobInfo));
+    }
+    Object logger = null;
+}
+EOF
+job_log_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$job_log_repo")"
+printf '%s\n' "$job_log_output" | grep -F '直接序列化 XxlJobLogGlue' >/dev/null || {
+  echo 'job sensitive log preflight missed the glue fixture' >&2
+  printf '%s\n' "$job_log_output" >&2
+  exit 1
+}
+printf '%s\n' "$job_log_output" | grep -F '直接序列化完整任务配置对象' >/dev/null || {
+  echo 'job sensitive log preflight missed the job config fixture' >&2
+  printf '%s\n' "$job_log_output" >&2
+  exit 1
+}
+job_log_p1_count="$(printf '%s\n' "$job_log_output" | grep -c '^P1 .*XXL-JOB 操作日志' || true)"
+[[ "$job_log_p1_count" -eq 2 ]] || {
+  echo "job sensitive log preflight emitted duplicate or malformed blocks: $job_log_p1_count" >&2
+  printf '%s\n' "$job_log_output" >&2
+  exit 1
+}
+
+job_log_safe_repo="$fixture_root/job-sensitive-log-safe-repo"
+cp -R "$job_log_repo" "$job_log_safe_repo"
+sed -i.bak 's/GsonTool.toJson(xxlJobLogGlue)/xxlJobLogGlue.getId()/' "$job_log_safe_repo/xxl-job-admin/src/main/java/com/xxl/job/admin/controller/biz/JobCodeController.java"
+sed -i.bak 's/GsonTool.toJson(jobInfo)/jobInfo.getId()/' "$job_log_safe_repo/xxl-job-admin/src/main/java/com/xxl/job/admin/service/impl/XxlJobServiceImpl.java"
+rm -f "$job_log_safe_repo/xxl-job-admin/src/main/java/com/xxl/job/admin/controller/biz/JobCodeController.java.bak" "$job_log_safe_repo/xxl-job-admin/src/main/java/com/xxl/job/admin/service/impl/XxlJobServiceImpl.java.bak"
+job_log_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$job_log_safe_repo")"
+if printf '%s\n' "$job_log_safe_output" | grep -F 'XXL-JOB 操作日志直接序列化' >/dev/null; then
+  echo 'job sensitive log preflight reported the id-only safe fixture' >&2
+  printf '%s\n' "$job_log_safe_output" >&2
+  exit 1
+fi
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.

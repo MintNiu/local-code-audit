@@ -897,6 +897,10 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 
 首轮差异归因显示，27 个候选中只有约 3 个能按当前证据直接作为新增 P1 初筛；其余包含父提交已有风险、修复性改动、同一配置凭据族或业务功能本身没有可证实高危缺陷。候选行数不能替代独立 gold 根因数量，必须继续从未调优历史扩展并逐项人工确认。
 
-候选池随后扩展到 29 行，新增两个待标注功能簇：`platform-log:124aff6` 的日志租户/审计身份边界，以及 `platform-job:08696b57` 将完整 GLUE 源码、任务参数和任务对象序列化写入 INFO 日志的敏感数据暴露。两条均已记录父提交、文件和证据，但仍保持 `pending-human-label`，不能直接计入 gold。
+候选池随后扩展到 29 行，新增两个待标注功能簇：`platform-log:124aff6` 的日志租户/审计身份边界，以及 `platform-job:08696b57` 将完整 GLUE 源码、任务参数和任务对象序列化写入 INFO 日志的敏感数据暴露。两条先以 `pending-human-label` 进入人工核查，后经真实双跑和规则闭环转为 `tuning-source`，不能直接计入 gold。
 
 为重新确认当前实际模型状态，执行了 `SYNTHETIC_REVIEW_RUNS=1 ./evals/run-synthetic.sh`：23 类正例全部命中、22 类 clean 对照全部通过，预签名票据回退通过，截断仍显式失败。运行结果保存在私有 `~/.local/share/local-review/evals/stage1-freeze-20261003/synthetic-run-20261003-v1/`。这只证明当前工程链路和合成根因覆盖，不替代真实独立 holdout 的生产门禁。
+
+### 2026-10-03：日志租户边界与敏感审计日志漏报闭环
+
+真实 `platform-log:124aff6` 两轮均被模型判为 clean；新增窄范围预检后稳定报告 `sys_log` 被排除通用租户拦截时的查询/导出/清理跨租户风险，以及客户端 DTO 伪造审计身份的风险。真实 `platform-job:08696b57` 的两轮基线也均为 clean；新增 XXL-JOB 预检后，两轮均完整稳定捕获 `XxlJobLogGlue`、`jobInfo` 和 `exists_jobInfo` 直接序列化进 INFO 日志的敏感数据暴露，模型原文重复段仍完整保留。两条提交从候选清单移为 `tuning-source`，不得作为独立 holdout 统计，必须用新的未参与规则设计样本替补。该轮证明了两类已知漏报已形成可回归规则，但阶段一独立 P0/P1 分母仍未增加。

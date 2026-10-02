@@ -6004,6 +6004,77 @@ collect_xxl_job_permission_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_job_sensitive_log_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file method_text
+  [[ -n "$source_root" ]] || return 0
+
+  # Keep this rule specific to the XXL-JOB operation-log change.  A direct
+  # JSON serialization of glue/job objects can contain source code, executor
+  # parameters, alert addresses, child-job IDs and other admin configuration;
+  # ordinary id-only operation logs and explicitly redacted values do not
+  # satisfy the trigger.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-job-sensitive-log-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && path ~ /(^|\/)xxl-job-admin\/src\/main\/java\/com\/xxl\/job\/admin\// &&
+          path ~ /(JobCodeController|XxlJobServiceImpl)\.java$/ &&
+          text ~ /GsonTool[[:space:]]*\.[[:space:]]*toJson[[:space:]]*\(/ &&
+          text ~ /(xxlJobLogGlue|jobInfo|exists_jobInfo|executorParam|glueSource)/) {
+        printf "%s\t%d\n", path, new_line
+      }
+      if (prefix == "+" || prefix == " ") new_line++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" 2>/dev/null || true)"
+    printf '%s\n' "$method_text" | grep -Eq 'logger[[:space:]]*\.[[:space:]]*info[[:space:]]*\(|log[[:space:]]*\.[[:space:]]*info[[:space:]]*\(' || continue
+    printf '%s\n' "$method_text" | grep -F 'xxl-job operation log' >/dev/null || continue
+    if printf '%s\n' "$method_text" | grep -Eqi 'redact|redacted|mask|sanitize|脱敏|安全日志'; then
+      continue
+    fi
+    if [[ "$candidate_path" == *JobCodeController.java ]]; then
+      {
+        printf '%s\n' "P1 $candidate_path:$candidate_line - XXL-JOB 操作日志直接序列化 XxlJobLogGlue，可能把 glueSource 代码和备注等高敏内容写入普通应用日志。"
+        printf '%s\n' '影响：具备应用日志读取权限的人员或日志汇聚系统可获得任务脚本/源码、参数和内部说明，扩大凭据泄露与横向利用面；日志保留和转发还会扩散敏感内容。'
+        printf '%s\n' '修复建议：操作日志只记录不可逆摘要、资源 ID 和必要元数据；禁止直接序列化 glueSource/完整 DTO，必要字段使用白名单和脱敏后的专用审计对象。'
+        printf '%s\n' '验证方式：提交包含敏感 glueSource 的更新请求，检查应用日志、日志采集端和错误日志均不出现源码、参数或备注原文。'
+        printf '\n'
+      } >>"$output_file"
+    else
+      {
+        printf '%s\n' "P1 $candidate_path:$candidate_line - XXL-JOB 操作日志直接序列化完整任务配置对象，可能泄露 executorParam、glueSource、告警地址和子任务配置。"
+        printf '%s\n' '影响：普通应用日志读者可取得任务执行参数、脚本内容或告警目标，导致敏感业务信息泄露、任务篡改辅助信息暴露和后续攻击面扩大。'
+        printf '%s\n' '修复建议：为审计日志建立字段白名单，只保留任务 ID、操作类型和结果；对参数、脚本、邮箱、子任务列表等字段默认丢弃或脱敏。'
+        printf '%s\n' '验证方式：分别执行新增、更新任务并填充敏感参数/脚本/告警地址，确认所有应用日志只包含白名单字段且不会输出完整对象 JSON。'
+        printf '\n'
+      } >>"$output_file"
+    fi
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_xxl_job_reliability_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -7342,6 +7413,136 @@ collect_storage_delete_preflight() {
       }
     }
   ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_log_tenant_audit_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local config_evidence changed_java_paths candidate_path controller_path repository_path
+  local controller_file repository_file tenant_line audit_line
+  local query_method_text write_method_text query_guarded=false write_guarded=false
+  local diff_java_evidence controller_diff_evidence repository_diff_evidence
+  [[ -n "$source_root" ]] || return 0
+
+  # The log service intentionally excludes sys_log from the generic tenant
+  # interceptor in its config.  Only pair that explicit config evidence with
+  # the concrete controller/repository shape below; do not generalize from a
+  # bare tenantId DTO or from an ordinary logging repository.
+  config_evidence="$(awk '
+    /^diff --git / {
+      if (ignore_tables && sys_log) found = 1
+      path = $4
+      sub(/^b\//, "", path)
+      ignore_tables = 0
+      sys_log = 0
+      next
+    }
+    /^\+\+\+ b\// {
+      if (ignore_tables && sys_log) found = 1
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      ignore_tables = 0
+      sys_log = 0
+      next
+    }
+    {
+      if (path !~ /(^|\/)platform-log[^\/]*\.ya?ml$/ || substr($0, 1, 1) != "+") next
+      text = substr($0, 2)
+      if (text ~ /ignore-tables/) ignore_tables = 1
+      if (text ~ /(^|[-[:space:]])sys_log([[:space:]]|$)/) sys_log = 1
+    }
+    END {
+      if (ignore_tables && sys_log) found = 1
+      print found ? "1" : "0"
+    }
+  ' "$diff_file")"
+  [[ "$config_evidence" == "1" ]] || return 0
+
+  changed_java_paths="$(mktemp "${TMPDIR:-/tmp}/local-review-log-tenant-audit-paths.XXXXXX")"
+  awk '
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    {
+      if (substr($0, 1, 1) == "+" && path ~ /\.java$/) print path
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$changed_java_paths"
+
+  while IFS= read -r candidate_path; do
+    [[ -n "$candidate_path" ]] || continue
+    case "$candidate_path" in
+      src/main/java/com/bit/log/controller/LogController.java|*/src/main/java/com/bit/log/controller/LogController.java) [[ -z "$controller_path" ]] && controller_path="$candidate_path" ;;
+      src/main/java/com/bit/log/repository/LogRepository.java|*/src/main/java/com/bit/log/repository/LogRepository.java) [[ -z "$repository_path" ]] && repository_path="$candidate_path" ;;
+    esac
+  done <"$changed_java_paths"
+  rm -f "$changed_java_paths"
+
+  [[ -n "$controller_path" && -n "$repository_path" ]] || return 0
+  diff_java_evidence="$(awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    {
+      if (substr($0, 1, 1) != "+") next
+      text = substr($0, 2)
+      if (path ~ /(^|\/)src\/main\/java\/com\/bit\/log\/controller\/LogController\.java$/ &&
+          text ~ /(^|[[:space:]])(page|clean|export|create)[[:space:]]*\(/) controller = 1
+      if (path ~ /(^|\/)src\/main\/java\/com\/bit\/log\/repository\/LogRepository\.java$/ &&
+          (text ~ /getTenantId[[:space:]]*\(/ || text ~ /BeanUtil[[:space:]]*\.[[:space:]]*copyProperties[[:space:]]*\([^,]+,[[:space:]]*SysLog\.class/)) repository = 1
+    }
+    END { print controller "\t" repository }
+  ' "$diff_file")"
+  IFS=$'\t' read -r controller_diff_evidence repository_diff_evidence <<<"$diff_java_evidence"
+  [[ "$controller_diff_evidence" == "1" && "$repository_diff_evidence" == "1" ]] || return 0
+  path_has_symlink_component "$controller_path" && return 0
+  path_has_symlink_component "$repository_path" && return 0
+  controller_file="$source_root/$controller_path"
+  repository_file="$source_root/$repository_path"
+  [[ -f "$controller_file" && -f "$repository_file" ]] || return 0
+
+  grep -Eq '/log/v1/logs|LogApplicationService' "$controller_file" || return 0
+  grep -Eq '(^|[[:space:]])(page|clean|export|create)[[:space:]]*\(' "$controller_file" || return 0
+  grep -Eq 'sysLogMapper[[:space:]]*\.[[:space:]]*(selectPage|selectList|delete)[[:space:]]*\(' "$repository_file" || return 0
+  grep -Eq 'query[[:space:]]*\.[[:space:]]*getTenantId[[:space:]]*\(' "$repository_file" || return 0
+  grep -Eq 'SysLog::getTenantId' "$repository_file" || return 0
+  grep -Eq 'BeanUtil[[:space:]]*\.[[:space:]]*copyProperties[[:space:]]*\([^,]+,[[:space:]]*SysLog\.class' "$repository_file" || return 0
+  tenant_line="$(grep -n -m1 -E 'SysLog::getTenantId' "$repository_file" | cut -d: -f1)"
+  audit_line="$(grep -n -m1 -E 'BeanUtil[[:space:]]*\.[[:space:]]*copyProperties[[:space:]]*\([^,]+,[[:space:]]*SysLog\.class' "$repository_file" | cut -d: -f1)"
+  [[ "$tenant_line" =~ ^[0-9]+$ && "$audit_line" =~ ^[0-9]+$ ]] || return 0
+  query_method_text="$(python3 "$java_method_window_script" "$repository_file" "$tenant_line" 2>/dev/null || true)"
+  write_method_text="$(python3 "$java_method_window_script" "$repository_file" "$audit_line" 2>/dev/null || true)"
+  if printf '%s\n' "$query_method_text" | grep -Eqi 'TenantContext|currentTenantId|TenantOperationGuard|resolveTenant|UserUtil|setTenantId|canQueryAcrossTenants'; then
+    query_guarded=true
+  fi
+  if printf '%s\n' "$write_method_text" | grep -Eqi 'TenantContext|currentTenantId|TenantOperationGuard|resolveTenant|UserUtil|setTenantId|canQueryAcrossTenants'; then
+    write_guarded=true
+  fi
+  if [[ "$query_guarded" != true ]]; then
+    {
+      printf '%s\n' "P1 $repository_path:$tenant_line - 操作日志表被显式排除通用租户拦截，但分页、导出和清理直接使用调用方传入的 tenantId，未建立当前租户范围约束。"
+      printf '%s\n' '影响：普通租户请求可读取、导出或删除其他租户的操作日志，审计数据会跨租户泄露或被破坏。'
+      printf '%s\n' '修复建议：不要把 sys_log 排除在租户隔离之外；由服务端从认证上下文确定租户，并在查询、导出和清理前拒绝请求体/查询参数中的跨租户 tenantId。'
+      printf '%s\n' '验证方式：用租户 A 请求租户 B 的日志分页、导出和清理接口，确认均被拒绝且数据库查询始终带当前租户条件。'
+      printf '\n'
+    } >>"$output_file"
+  fi
+  if [[ "$write_guarded" != true ]]; then
+    {
+      printf '%s\n' "P1 $repository_path:$audit_line - 操作日志创建直接将客户端 DTO 复制到实体，tenantId、operatorId 和 operatorName 等审计身份字段可由调用方伪造。"
+      printf '%s\n' '影响：攻击者可伪造其他租户或其他操作人的审计记录，破坏追责可信度并污染安全调查。'
+      printf '%s\n' '修复建议：由服务端认证上下文生成租户、操作人和请求标识，忽略或拒绝客户端提交的审计身份字段；内部写入接口也应使用专用可信 DTO。'
+      printf '%s\n' '验证方式：提交包含其他 tenantId/operatorId/operatorName 的日志请求，确认服务端覆盖为当前身份或返回校验失败，并检查落库值。'
+      printf '\n'
+    } >>"$output_file"
+  fi
   dedup_preflight_blocks "$output_file"
 }
 
@@ -8785,6 +8986,7 @@ collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_fil
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"
 collect_xxl_job_permission_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_job_sensitive_log_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxl_job_reliability_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_stock_warehouse_owner_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_shopping_cart_price_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
@@ -8796,6 +8998,7 @@ collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_fi
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
+collect_log_tenant_audit_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_credential_preflight "$chunk_input_file" "$build_preflight_file"
