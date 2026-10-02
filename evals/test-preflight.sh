@@ -3074,6 +3074,115 @@ if [[ "$(printf '%s\n' "$migration_output" | grep -c 'sql/migration/V20260927__e
   exit 1
 fi
 
+# The migration-deletion case intentionally exercises malformed model output;
+# restore the hermetic clean response before the following schema-snapshot
+# assertions so that their result is attributable only to the new preflight.
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "-d" ]]; then
+    printf '%s' "$argument" >"$LOCAL_REVIEW_CAPTURE"
+  elif [[ "$previous" == "--data-binary" && "$argument" == @* ]]; then
+    cp "${argument#@}" "$LOCAL_REVIEW_CAPTURE"
+  fi
+  previous="$argument"
+done
+printf '%s\n' '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+
+# An existing CREATE TABLE IF NOT EXISTS snapshot does not upgrade deployed
+# databases.  When the same commit adds a mapped Java property but no
+# versioned migration, the deterministic preflight must surface one P1; a
+# commit that includes a migration is the safe counterexample.
+schema_snapshot_repo="$fixture_root/schema-snapshot-repo"
+mkdir -p "$schema_snapshot_repo/sql" "$schema_snapshot_repo/src/main/java/example/inspection"
+git -C "$schema_snapshot_repo" init -q
+git -C "$schema_snapshot_repo" config user.email test@example.invalid
+git -C "$schema_snapshot_repo" config user.name preflight-schema-snapshot
+cat >"$schema_snapshot_repo/README.md" <<'EOF'
+Existing databases must be upgraded with idempotent sql/migration scripts.
+CREATE TABLE IF NOT EXISTS is only for empty-database initialization and does
+not add columns to an existing table.
+EOF
+cat >"$schema_snapshot_repo/sql/platform_erp.sql" <<'EOF'
+CREATE TABLE IF NOT EXISTS `erp_sales_return_inspection` (
+    `id` BIGINT NOT NULL,
+    PRIMARY KEY (`id`)
+);
+EOF
+cat >"$schema_snapshot_repo/src/main/java/example/inspection/Inspection.java" <<'EOF'
+package example.inspection;
+
+final class Inspection {
+    private Long id;
+}
+EOF
+git -C "$schema_snapshot_repo" add .
+git -C "$schema_snapshot_repo" commit -qm schema-snapshot-base
+python3 - "$schema_snapshot_repo/sql/platform_erp.sql" "$schema_snapshot_repo/src/main/java/example/inspection/Inspection.java" <<'PY'
+from pathlib import Path
+import sys
+
+schema = Path(sys.argv[1])
+schema.write_text(schema.read_text().replace(
+    '    `id` BIGINT NOT NULL,',
+    '    `id` BIGINT NOT NULL,\n    `request_no` VARCHAR(64) DEFAULT NULL,',
+    1,
+))
+java = Path(sys.argv[2])
+java.write_text(java.read_text().replace(
+    '    private Long id;',
+    '    private Long id;\n    private String requestNo;',
+    1,
+))
+PY
+schema_snapshot_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$schema_snapshot_repo")"
+printf '%s\n' "$schema_snapshot_output" | grep -F '已有表 schema 快照新增字段或索引' >/dev/null || {
+  echo 'missing existing-schema snapshot migration preflight' >&2
+  printf '%s\n' "$schema_snapshot_output" >&2
+  exit 1
+}
+printf '%s\n' "$schema_snapshot_output" | grep -F 'sql/platform_erp.sql:' >/dev/null || {
+  echo 'missing schema snapshot migration location' >&2
+  printf '%s\n' "$schema_snapshot_output" >&2
+  exit 1
+}
+
+mkdir -p "$schema_snapshot_repo/sql/migration"
+cat >"$schema_snapshot_repo/sql/migration/V20261002__inspection_request_no.sql" <<'EOF'
+ALTER TABLE erp_sales_return_inspection ADD COLUMN request_no VARCHAR(64);
+EOF
+git -C "$schema_snapshot_repo" add sql/migration/V20261002__inspection_request_no.sql
+git -C "$schema_snapshot_repo" commit -qm schema-snapshot-migration
+python3 - "$schema_snapshot_repo/sql/platform_erp.sql" "$schema_snapshot_repo/src/main/java/example/inspection/Inspection.java" <<'PY'
+from pathlib import Path
+import sys
+
+schema = Path(sys.argv[1])
+schema.write_text(schema.read_text().replace(
+    '`request_no` VARCHAR(64) DEFAULT NULL,',
+    '`request_no` VARCHAR(64) DEFAULT NULL,\n    `attempt_no` INT DEFAULT NULL,',
+    1,
+))
+java = Path(sys.argv[2])
+java.write_text(java.read_text().replace(
+    'private String requestNo;',
+    'private String requestNo;\n    private Integer attemptNo;',
+    1,
+))
+PY
+schema_snapshot_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$schema_snapshot_repo")"
+if printf '%s\n' "$schema_snapshot_safe_output" | grep -F '已有表 schema 快照新增字段或索引' >/dev/null; then
+  echo 'schema snapshot migration preflight reported a diff with an explicit migration' >&2
+  printf '%s\n' "$schema_snapshot_safe_output" >&2
+  exit 1
+fi
+
 cat >"$repo/src/main/java/com/example/api/client/GuardedClientProperties.java" <<'EOF'
 package com.example.api.client;
 

@@ -2635,6 +2635,8 @@ MyBatis 原始替换预检边界：保留“MyBatis Mapper 将表达式”预检
 
 数据库迁移边界：删除版本化的 `sql/migration`/`db/migration` 升级脚本，且差异没有提供等价替代迁移或自动迁移框架证据时，必须检查已有数据库升级路径；若 README/部署说明同时移除已有库迁移步骤，这是可由差异证明的 P1 兼容性/部署阻断。不要把空库初始化脚本当作已有库升级替代。
 
+已有表 schema 快照边界：如果差异在非版本化 schema 快照中修改一个已有的 `CREATE TABLE IF NOT EXISTS` 表，新增字段/唯一索引，同时新增实体或映射属性，且仓库 README 明确要求通过 `sql/migration`/`db/migration` 升级已有数据库，但当前差异没有任何版本化 migration 文件，必须报告一个 P1 数据库升级阻断。只有当前 hunk 同时展示已有表的上下文、Java/映射属性和迁移约束时才触发；新建表、已有 migration、纯注释/重排或没有明确升级契约时不要报告。
+
 Git 精确重命名边界：如果输入包含“Git 精确重命名证据”段，并且某条记录明确标为 R100（旧路径与新路径内容 100% 相同），必须把它视为同一文件的路径迁移。不得仅因为 `--no-renames` 差异同时显示旧路径删除和新路径新增，就报告旧文件被删除、版本化迁移脚本缺失或同一内容被重复迁移；仍可检查新路径的引用、构建和兼容性问题，但这些必须有新路径或其他当前差异中的独立证据。
 
 凭据配置边界：如果差异把 AccessKey、Secret、Token、密码或会话秘密从环境变量/占位符改成字面量并提交到配置文件，尤其配置仍指向真实 endpoint、bucket 或其他外部资源，这是可由差异直接证明的 P1（凭据仍有效时可按组织威胁模型升级 P0）泄漏；应报告配置文件行号、暴露方式及轮换/移除建议。不要因为文件名含 localhost 或 profile 就自动豁免。只有差异确实展示了字面量秘密或其进入日志、持久化、URL/外部边界时才报告；普通内部 HTTP header 传递 token 仍按前述安全负例处理。
@@ -7733,6 +7735,145 @@ collect_migration_delete_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_schema_snapshot_migration_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line candidate_table candidate_field
+  local field_name migration_file migration_matches=false
+  local migration_changed=false
+
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # A versioned migration in the same diff is the explicit counter-evidence;
+  # this rule is only for schema snapshots that changed an already-existing
+  # table without providing an upgrade path.
+  if awk '
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      if (path ~ /(^|\/)(sql|db)\/migration\//) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file"; then
+    migration_changed=true
+  fi
+  [[ "$migration_changed" == false ]] || return 0
+
+  [[ -f "$source_root/README.md" ]] || return 0
+  grep -Eq 'sql/migration|db/migration|数据库升级|已有数据库' "$source_root/README.md" || return 0
+
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-schema-migration-candidates.XXXXXX")"
+  awk '
+    function flush_hunk(    key) {
+      if (path == "" || path !~ /\.sql$/ || path ~ /(^|\/)(sql|db)\/migration\// ||
+          table == "" || candidate_line == 0) return
+      key = path SUBSEP table
+      if (!seen[key]++) printf "%s\t%d\t%s\t%s\n", path, candidate_line, table, candidate_field
+    }
+    function reset_hunk() {
+      table = ""
+      candidate_line = 0
+      candidate_field = ""
+    }
+    /^diff --git / {
+      flush_hunk()
+      path = ""
+      reset_hunk()
+      next
+    }
+    /^\+\+\+ b\// {
+      flush_hunk()
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      reset_hunk()
+      next
+    }
+    /^@@ / {
+      flush_hunk()
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      reset_hunk()
+      next
+    }
+    {
+      if (path == "" || path !~ /\.sql$/ || path ~ /(^|\/)(sql|db)\/migration\//) next
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" || prefix == "-" ? substr($0, 2) : $0)
+      # A context CREATE TABLE proves the table existed before this commit;
+      # an added CREATE TABLE line is a new-table initialization, not this bug.
+      if (prefix == " " && text ~ /CREATE[[:space:]]+TABLE[[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS/) {
+        table = text
+        sub(/^.*CREATE[[:space:]]+TABLE[[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+/, "", table)
+        sub(/[[:space:](].*$/, "", table)
+        gsub(/`/, "", table)
+      }
+      if (prefix == "+" && table != "" && candidate_line == 0 &&
+          (text ~ /^[[:space:]]*`[A-Za-z0-9_]+`[[:space:]]+/ ||
+           text ~ /^[[:space:]]*UNIQUE[[:space:]]+KEY[[:space:]]+/ ||
+           text ~ /^[[:space:]]*KEY[[:space:]]+/)) {
+        candidate_line = line_no
+        candidate_field = text
+        sub(/^[[:space:]]*/, "", candidate_field)
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { flush_hunk() }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line candidate_table candidate_field; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$candidate_table" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    path_has_symlink_component "$candidate_path" && continue
+
+    # Require a changed Java/mapping property as a second, independent signal;
+    # schema-only formatting or documentation changes stay clean.
+    if ! awk '
+      /^diff --git / { in_java = ($0 ~ / b\/[^[:space:]]+\.java$/); next }
+      /^\+\+\+ b\// { in_java = ($0 ~ /\.java$/); next }
+      {
+        if (in_java && substr($0, 1, 1) == "+" && $0 !~ /^\+\+\+ b\// &&
+            $0 ~ /(requestNo|request_no|[A-Za-z][A-Za-z0-9]*No|[A-Za-z][A-Za-z0-9]*Id)/) found = 1
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$diff_file"; then
+      continue
+    fi
+
+    # A matching migration may have landed in an earlier commit. Treat it as
+    # counter-evidence only when the same table and field are both visible in
+    # one versioned migration; an unrelated migration with the same generic
+    # column name is not enough.
+    field_name="$(printf '%s\n' "$candidate_field" | sed -n 's/.*`\([^`]*\)`.*/\1/p')"
+    migration_matches=false
+    if [[ -n "$field_name" ]]; then
+      while IFS= read -r migration_file; do
+        [[ -n "$migration_file" ]] || continue
+        if grep -Fq "$candidate_table" "$migration_file" && grep -Fq "$field_name" "$migration_file"; then
+          migration_matches=true
+          break
+        fi
+      done < <(
+        find "$source_root" -type f \( -path '*/sql/migration/*.sql' -o -path '*/db/migration/*.sql' \) \
+          -print 2>/dev/null
+      )
+    fi
+    [[ "$migration_matches" == false ]] || continue
+
+    {
+      printf '%s\n' "P1 $candidate_path:$candidate_line - 已有表 schema 快照新增字段或索引，但当前提交没有提供版本化数据库迁移，已有环境升级后结构可能仍停留在旧版本。"
+      printf '%s\n' '影响：已有数据库不会因为 CREATE TABLE IF NOT EXISTS 自动补齐新增列或唯一索引，应用随后读取/写入新属性时可能出现缺列、约束缺失或部署后运行失败。'
+      printf '%s\n' '修复建议：为已有表新增字段/索引提供同一发布链路中的幂等 sql/migration 或 db/migration 脚本，并在旧库上验证升级顺序、重复执行和回滚行为；不要只修改空库初始化 schema。'
+      printf '%s\n' '验证方式：从上一版本数据库快照升级到当前版本，确认新增字段和索引真实存在，再执行新增实体的查询、保存和并发约束测试；同时验证全新数据库初始化路径。'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_transaction_lock_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -8377,6 +8518,7 @@ collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_credential_preflight "$chunk_input_file" "$build_preflight_file"
 collect_mybatis_raw_substitution_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file" "$exact_rename_context_file"
+collect_schema_snapshot_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then
   echo "本地代码审查失败：跨事务/行锁文本索引扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2
   exit 1
