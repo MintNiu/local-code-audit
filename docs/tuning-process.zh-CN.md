@@ -882,3 +882,13 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 公开提交 `4717170` 接入预检与 fixture，随后在 `b627e56` 收窄到新增行后的 12 行消费窗口，避免同一文件的授权码发放 key 行重复触发。`bash evals/test-preflight.sh`、分片、输出可见性、证据过滤、配置、历史、scorecard 和 stage1 回归均通过。冻结脚本双跑两轮均完整结束（1/1 分片，313/260 秒，exit=0），每轮只保留一条 P1，准确定位到 `SsoController.java:238`，结果稳定。该样本仍标记为调优来源，不计入正式 holdout 分母；当前正式阶段一仍是 8 个 gold P0/P1、7 个命中，至少还需 12 个未参与规则设计的独立根因完成双跑和人工标签。
 
 2026-10-02：补充已有表 schema 快照迁移缺口调优。`platform-erp-service:8a2c1e1a28c88751b4503ac53fc5eefd2fdbda0a` 在 `sql/platform_erp.sql` 为已有 `erp_sales_return_inspection` 表增加 `request_no` 字段和唯一索引，Java 实体同步增加 `requestNo`，但没有提供 README 要求的版本化数据库迁移。该提交是 dev 调优源，不进入正式 holdout 分母。预检先修正 Git hunk 标题中 `CREATE TABLE IF NOT EXISTS` 上下文的识别，再要求 SQL 新字段与新增 Java 属性逐字段对应，避免把纯注释/格式重写误报为同根因。最终合并阶段按路径和行号范围重叠，将模型重复段与确定性证据段合并为一条带来源的 P1。修复后真实 tuned 双跑均完整（1/1 分片，253/194 秒），两轮均稳定定位 `sql/platform_erp.sql:2407`；预检、输出、分片、证据过滤和历史回归全部通过。
+
+### 2026-10-03：并发预检的跨方法证据与盲测完整性
+
+支付凭证预检不再只看同一方法或整个文件的关键词：它先定位新增 `countPendingByOrderId` 所在方法，再关联 `buildPendingVoucher` 的真实保存调用和提交方法；只有看到与订单仓库明确关联的行锁、PESSIMISTIC_WRITE 或重复键恢复才抑制报告。库存预检改为直接使用 Java 方法窗口提取器，只分析 `InventoryAdjustmentApplication`/`NonPhysicalTransferApplication` 四个确认方法；无关的 `InventoryTransactionService` 类名、字符串或注释不再足以压制真实问题，混合“普通读写 + 原子服务调用”的方法仍报告，只有没有直接库存读写候选的纯原子路径才不会进入该规则。方法窗口提取器会遮蔽 Java 字符串、字符、行/块注释和文本块后再计算大括号范围，并支持带嵌套括号的参数注解。
+
+本轮无模型预检夹具覆盖：支付正例、schema 唯一键负例、提交方法跨层行锁负例、库存正例中的字符串大括号与无关类名、显式事务服务负例。完整 shell 语法、差异格式、预检、输出可见性、分片、证据过滤、历史、配置、scorecard 和 stage1 回归均通过。真实库存候选曾完成两轮但 finding signature 漂移，作为长提交/模型容量边界保留；支付候选上一版双跑稳定，但因本轮修改了预检代码，必须在代码冻结后重新双跑才能计入运行证据。
+
+阶段一数据完整性审计发现，`combined-scorecard-20261002` 的 8 个 gold P0/P1 都是规则设计来源或其调优复跑，7/8 命中不能作为独立 holdout 召回率。该 scorecard 保留为历史调优回归，不覆盖、不改写为最终验收；当前独立未见正例分母按审计为 0。正式完成至少还包括：冻结 runner/模型/提示词；建立不少于 20 个独立真实 P0/P1 根因的盲测集；双轮运行并完成人工真值、定位、误报和功能簇拆分；失败样本若用于改规则则退出盲测并由新样本替补。因而不能再用“账面还差 12 个”描述剩余工作。
+
+支付预检最终冻结后重新双跑 `platform-erp-service:2ff8080d`：两轮均 34/34 分片完整，514/538 秒，`status=completed`、`output_complete=true`，finding signature 一致并保留 `SalesOrderApplication.java:516` 的确定性 P1。首次重跑在临时审查器快照中发现新增 `java-method-window.py` 未被复制，导致 fail-closed；现已让 `run-history.sh` 同时冻结 `bin/*.sh` 与 `bin/*.py`，本轮 `review_scripts_snapshot=true`，避免本地工作树与历史评测临时目录使用不同实现。该样本是调优来源，仅证明当前代码链路稳定，不进入独立 holdout 分母。

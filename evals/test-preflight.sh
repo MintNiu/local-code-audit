@@ -27,6 +27,36 @@ trap 'rm -rf "$fixture_root"' EXIT
 
 mkdir -p "$fake_bin" "$tmp_dir" "$repo/src/main/java/com/example/api/client" "$repo/src/main/java/com/example/api/dto" "$repo/src/test/java/com/example/api/dto" "$(dirname "$context")"
 
+# The Java method window helper must survive nested parameter annotations,
+# checked exceptions, and braces inside strings. This is intentionally tested
+# outside the project-shaped preflights because a parser regression would
+# otherwise become a silent payment/inventory false negative.
+java_window_fixture="$fixture_root/AnnotatedMethod.java"
+cat >"$java_window_fixture" <<'EOF'
+final class AnnotatedMethod {
+    @RequestParam(name = "{")
+    private void target(@RequestParam(name = "}") Long id)
+            throws IllegalStateException {
+        String brace = "}";
+        if (id != null) {
+            throw new IllegalStateException(brace);
+        }
+    }
+
+    private void next() {
+        String brace = "{";
+    }
+}
+EOF
+java_window_target_line="$(grep -n 'throw new IllegalStateException' "$java_window_fixture" | cut -d: -f1)"
+java_window_output="$(python3 "$repo_root/bin/java-method-window.py" "$java_window_fixture" "$java_window_target_line")"
+printf '%s\n' "$java_window_output" | grep -F 'private void target(' >/dev/null
+printf '%s\n' "$java_window_output" | grep -F 'String brace = "}";' >/dev/null
+if printf '%s\n' "$java_window_output" | grep -F 'private void next()' >/dev/null; then
+  echo 'Java method window helper crossed into the next method' >&2
+  exit 1
+fi
+
 cat >"$fake_bin/ollama" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${OLLAMA_SHOW_LOG:-/dev/null}"
@@ -4630,6 +4660,314 @@ sso_auth_code_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVI
 if printf '%s\n' "$sso_auth_code_safe_output" | grep -F '一次性授权码先读取后删除，消费过程非原子，存在并发重放风险' >/dev/null; then
   echo 'SSO authorization-code preflight reported the safe atomic fixture' >&2
   printf '%s\n' "$sso_auth_code_safe_output" >&2
+  exit 1
+fi
+
+# A pending payment-voucher count followed by save is a database
+# check-then-insert race when the table has no uniqueness guard. The positive
+# fixture keeps the changed count call in the diff and uses a complete schema
+# snapshot so the preflight must correlate Java and SQL evidence.
+payment_voucher_repo="$fixture_root/payment-voucher-race-repo"
+mkdir -p "$payment_voucher_repo/src/main/java/example/order" "$payment_voucher_repo/sql"
+git -C "$payment_voucher_repo" init -q
+git -C "$payment_voucher_repo" config user.email test@example.invalid
+git -C "$payment_voucher_repo" config user.name preflight-payment-voucher
+cat >"$payment_voucher_repo/src/main/java/example/order/SalesOrderApplication.java" <<'EOF'
+package example.order;
+
+final class SalesOrderApplication {
+    void submit(Long orderId) {
+        return;
+    }
+}
+EOF
+cat >"$payment_voucher_repo/sql/platform_erp.sql" <<'EOF'
+CREATE TABLE IF NOT EXISTS `erp_sales_payment_voucher` (
+  `id` bigint NOT NULL,
+  `order_id` bigint NOT NULL,
+  `status` varchar(32) NOT NULL
+) ENGINE=InnoDB;
+EOF
+git -C "$payment_voucher_repo" add .
+git -C "$payment_voucher_repo" commit -qm payment-voucher-base
+cat >"$payment_voucher_repo/src/main/java/example/order/SalesOrderApplication.java" <<'EOF'
+package example.order;
+
+final class SalesOrderApplication {
+    void submit(Long orderId) {
+        PaymentVoucher pending = buildPendingVoucher(orderId);
+        salesPaymentVoucherRepository.save(pending);
+    }
+
+    PaymentVoucher buildPendingVoucher(Long orderId) {
+        if (salesPaymentVoucherRepository.countPendingByOrderId(orderId) > 0) return null;
+        return new PaymentVoucher(orderId);
+    }
+    interface PaymentVoucherRepository {
+        long countPendingByOrderId(Long orderId);
+        void save(PaymentVoucher voucher);
+    }
+    private final PaymentVoucherRepository salesPaymentVoucherRepository = null;
+    static final class PaymentVoucher {
+        PaymentVoucher(Long orderId) {}
+    }
+}
+EOF
+payment_voucher_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$payment_voucher_repo")"
+printf '%s\n' "$payment_voucher_output" | grep -F '销售订单提交先 countPendingByOrderId 再插入待确认支付凭证' >/dev/null || {
+  echo 'payment-voucher race preflight missed the positive fixture' >&2
+  printf '%s\n' "$payment_voucher_output" >&2
+  exit 1
+}
+payment_voucher_p1_count="$(printf '%s\n' "$payment_voucher_output" | grep -c '^P1 .*销售订单提交先 countPendingByOrderId' || true)"
+[[ "$payment_voucher_p1_count" -eq 1 ]] || {
+  echo "payment-voucher preflight emitted duplicate or malformed blocks: $payment_voucher_p1_count" >&2
+  printf '%s\n' "$payment_voucher_output" >&2
+  exit 1
+}
+for payment_voucher_field in '影响：' '修复建议：' '验证方式：' '来源：确定性预检（代码证据，非模型原文）'; do
+  payment_voucher_field_count="$(printf '%s\n' "$payment_voucher_output" | grep -c "$payment_voucher_field" || true)"
+  [[ "$payment_voucher_field_count" -eq 1 ]] || {
+    echo "payment-voucher preflight field count mismatch for $payment_voucher_field: $payment_voucher_field_count" >&2
+    printf '%s\n' "$payment_voucher_output" >&2
+    exit 1
+  }
+done
+
+# A database uniqueness guard and an explicit row-lock path make the same
+# shape safe; a changed comment ensures the negative assertion still uses the
+# resulting source and schema rather than a repository-wide keyword search.
+payment_voucher_safe_repo="$fixture_root/payment-voucher-safe-repo"
+mkdir -p "$payment_voucher_safe_repo/src/main/java/example/order" "$payment_voucher_safe_repo/sql"
+git -C "$payment_voucher_safe_repo" init -q
+git -C "$payment_voucher_safe_repo" config user.email test@example.invalid
+git -C "$payment_voucher_safe_repo" config user.name preflight-payment-voucher-safe
+cat >"$payment_voucher_safe_repo/src/main/java/example/order/SalesOrderApplication.java" <<'EOF'
+package example.order;
+
+final class SalesOrderApplication {
+    void submit(Long orderId) {
+        return;
+    }
+}
+EOF
+cat >"$payment_voucher_safe_repo/sql/platform_erp.sql" <<'EOF'
+CREATE TABLE IF NOT EXISTS `erp_sales_payment_voucher` (
+  `id` bigint NOT NULL,
+  `order_id` bigint NOT NULL,
+  `status` varchar(32) NOT NULL,
+  UNIQUE KEY `uk_voucher_order` (`order_id`)
+) ENGINE=InnoDB;
+EOF
+git -C "$payment_voucher_safe_repo" add .
+git -C "$payment_voucher_safe_repo" commit -qm payment-voucher-safe-base
+cat >"$payment_voucher_safe_repo/src/main/java/example/order/SalesOrderApplication.java" <<'EOF'
+package example.order;
+
+final class SalesOrderApplication {
+    void submit(Long orderId) {
+        PaymentVoucher pending = buildPendingVoucher(orderId);
+        salesPaymentVoucherRepository.save(pending);
+    }
+
+    PaymentVoucher buildPendingVoucher(Long orderId) {
+        orderRepository.findByIdForUpdate(orderId);
+        if (salesPaymentVoucherRepository.countPendingByOrderId(orderId) > 0) return null;
+        return new PaymentVoucher(orderId);
+    }
+    interface PaymentVoucherRepository {
+        long countPendingByOrderId(Long orderId);
+        void save(PaymentVoucher voucher);
+    }
+    interface OrderRepository {
+        Object findByIdForUpdate(Long orderId);
+    }
+    private final PaymentVoucherRepository salesPaymentVoucherRepository = null;
+    private final OrderRepository orderRepository = null;
+    static final class PaymentVoucher {
+        PaymentVoucher(Long orderId) {}
+    }
+}
+EOF
+payment_voucher_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$payment_voucher_safe_repo")"
+if printf '%s\n' "$payment_voucher_safe_output" | grep -F '销售订单提交先 countPendingByOrderId 再插入待确认支付凭证' >/dev/null; then
+  echo 'payment-voucher race preflight reported the safe fixture' >&2
+  printf '%s\n' "$payment_voucher_safe_output" >&2
+  exit 1
+fi
+
+# Inventory confirmation must not read a stock snapshot and then write it
+# back through an ordinary update. The fixture is intentionally limited to a
+# confirmation method so page/detail reads do not satisfy the rule.
+inventory_stock_repo="$fixture_root/inventory-stock-race-repo"
+mkdir -p "$inventory_stock_repo/src/main/java/example/warehouse"
+git -C "$inventory_stock_repo" init -q
+git -C "$inventory_stock_repo" config user.email test@example.invalid
+git -C "$inventory_stock_repo" config user.name preflight-inventory-stock
+cat >"$inventory_stock_repo/src/main/java/example/warehouse/InventoryAdjustmentApplication.java" <<'EOF'
+package example.warehouse;
+
+final class InventoryAdjustmentApplication {
+    void confirm() {
+        return;
+    }
+}
+EOF
+git -C "$inventory_stock_repo" add .
+git -C "$inventory_stock_repo" commit -qm inventory-stock-base
+cat >"$inventory_stock_repo/src/main/java/example/warehouse/InventoryAdjustmentApplication.java" <<'EOF'
+package example.warehouse;
+
+final class InventoryAdjustmentApplication {
+    void confirm() {
+        applyNoSerialAdjustment();
+    }
+
+    private void applyNoSerialAdjustment() {
+        String note = "}";
+        String unrelated = "InventoryTransactionService";
+        var stocks = logicalWarehouseSkuRepository.listByLogicalWarehouseIdAndSkuId(1L, 2L);
+        inventoryTransactionService.transferNoSerialStock(1L, 2L, 1);
+        var stock = logicalWarehouseSkuRepository.findNoSerialByLogicalWarehouseIdAndSkuId(1L, 2L);
+        logicalWarehouseSkuRepository.update(stock);
+    }
+
+    private final StockRepository logicalWarehouseSkuRepository = null;
+    interface StockRepository {
+        Object listByLogicalWarehouseIdAndSkuId(Long warehouseId, Long skuId);
+        Object findNoSerialByLogicalWarehouseIdAndSkuId(Long warehouseId, Long skuId);
+        void update(Object stock);
+    }
+    interface InventoryTransactionService {
+        void transferNoSerialStock(Long warehouseId, Long skuId, int quantity);
+    }
+    private final InventoryTransactionService inventoryTransactionService = null;
+}
+EOF
+inventory_stock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$inventory_stock_repo")"
+printf '%s\n' "$inventory_stock_output" | grep -F '库存调整或非实物调拨确认先读后写库存' >/dev/null || {
+  echo 'inventory stock race preflight missed the positive fixture' >&2
+  printf '%s\n' "$inventory_stock_output" >&2
+  exit 1
+}
+inventory_stock_p1_count="$(printf '%s\n' "$inventory_stock_output" | grep -c '^P1 .*库存调整或非实物调拨确认先读后写库存' || true)"
+[[ "$inventory_stock_p1_count" -eq 1 ]] || {
+  echo "inventory stock preflight emitted duplicate or malformed blocks: $inventory_stock_p1_count" >&2
+  printf '%s\n' "$inventory_stock_output" >&2
+  exit 1
+}
+
+# An atomic-only confirmation path has no direct repository read/write
+# candidate. A generic class name, string, or mixed atomic-plus-ordinary
+# method must not suppress a real finding (the positive fixture above keeps
+# the mixed shape and must still report).
+inventory_stock_safe_repo="$fixture_root/inventory-stock-safe-repo"
+mkdir -p "$inventory_stock_safe_repo/src/main/java/example/warehouse"
+git -C "$inventory_stock_safe_repo" init -q
+git -C "$inventory_stock_safe_repo" config user.email test@example.invalid
+git -C "$inventory_stock_safe_repo" config user.name preflight-inventory-stock-safe
+cat >"$inventory_stock_safe_repo/src/main/java/example/warehouse/InventoryAdjustmentApplication.java" <<'EOF'
+package example.warehouse;
+
+final class InventoryAdjustmentApplication {
+    void confirm() {
+        return;
+    }
+}
+EOF
+git -C "$inventory_stock_safe_repo" add .
+git -C "$inventory_stock_safe_repo" commit -qm inventory-stock-safe-base
+cat >"$inventory_stock_safe_repo/src/main/java/example/warehouse/InventoryAdjustmentApplication.java" <<'EOF'
+package example.warehouse;
+
+final class InventoryAdjustmentApplication {
+    void confirm() {
+        applyNoSerialAdjustment();
+    }
+
+    private void applyNoSerialAdjustment() {
+        inventoryTransactionService.transferNoSerialStock(1L, 2L, 1);
+    }
+    interface InventoryTransactionService {
+        void transferNoSerialStock(Long warehouseId, Long skuId, int quantity);
+    }
+    private final InventoryTransactionService inventoryTransactionService = null;
+}
+EOF
+inventory_stock_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$inventory_stock_safe_repo")"
+if printf '%s\n' "$inventory_stock_safe_output" | grep -F '库存调整或非实物调拨确认先读后写库存' >/dev/null; then
+  echo 'inventory stock race preflight reported the safe fixture' >&2
+  printf '%s\n' "$inventory_stock_safe_output" >&2
+  exit 1
+fi
+
+# A lock in the submitting caller is valid even when buildPendingVoucher only
+# performs the count. This guards the cross-method evidence path and keeps the
+# uniqueness schema check independent from application locking.
+payment_voucher_caller_safe_repo="$fixture_root/payment-voucher-caller-safe-repo"
+mkdir -p "$payment_voucher_caller_safe_repo/src/main/java/example/order" "$payment_voucher_caller_safe_repo/sql"
+git -C "$payment_voucher_caller_safe_repo" init -q
+git -C "$payment_voucher_caller_safe_repo" config user.email test@example.invalid
+git -C "$payment_voucher_caller_safe_repo" config user.name preflight-payment-voucher-caller-safe
+cat >"$payment_voucher_caller_safe_repo/src/main/java/example/order/SalesOrderApplication.java" <<'EOF'
+package example.order;
+
+final class SalesOrderApplication {
+    void submit(Long orderId) {
+        return;
+    }
+}
+EOF
+cat >"$payment_voucher_caller_safe_repo/sql/platform_erp.sql" <<'EOF'
+CREATE TABLE IF NOT EXISTS `erp_sales_payment_voucher` (
+  `id` bigint NOT NULL,
+  `order_id` bigint NOT NULL,
+  `status` varchar(32) NOT NULL
+) ENGINE=InnoDB;
+EOF
+git -C "$payment_voucher_caller_safe_repo" add .
+git -C "$payment_voucher_caller_safe_repo" commit -qm payment-voucher-caller-safe-base
+cat >"$payment_voucher_caller_safe_repo/src/main/java/example/order/SalesOrderApplication.java" <<'EOF'
+package example.order;
+
+final class SalesOrderApplication {
+    void submit(Long orderId) {
+        orderRepository.findByIdForUpdate(orderId);
+        PaymentVoucher pending = this.preparePendingVoucher(orderId);
+        salesPaymentVoucherRepository.save(pending);
+    }
+
+    PaymentVoucher preparePendingVoucher(Long orderId) {
+        return this.buildPendingVoucher(orderId);
+    }
+
+    PaymentVoucher buildPendingVoucher(Long orderId) {
+        if (salesPaymentVoucherRepository.countPendingByOrderId(orderId) > 0) return null;
+        return new PaymentVoucher(orderId);
+    }
+    interface PaymentVoucherRepository {
+        long countPendingByOrderId(Long orderId);
+        void save(PaymentVoucher voucher);
+    }
+    interface OrderRepository {
+        Object findByIdForUpdate(Long orderId);
+    }
+    private final PaymentVoucherRepository salesPaymentVoucherRepository = null;
+    private final OrderRepository orderRepository = null;
+    static final class PaymentVoucher {
+        PaymentVoucher(Long orderId) {}
+    }
+}
+EOF
+payment_voucher_caller_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$payment_voucher_caller_safe_repo")"
+if printf '%s\n' "$payment_voucher_caller_safe_output" | grep -F '销售订单提交先 countPendingByOrderId 再插入待确认支付凭证' >/dev/null; then
+  echo 'payment-voucher race preflight reported the safe caller-lock fixture' >&2
+  printf '%s\n' "$payment_voucher_caller_safe_output" >&2
   exit 1
 fi
 

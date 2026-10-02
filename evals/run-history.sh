@@ -247,13 +247,13 @@ review_snapshot="$temp_root/reviewer"
 mkdir -p "$review_snapshot/bin"
 reviewer_script_manifest() {
   local script_path
-  for script_path in "$1"/*.sh; do
+  for script_path in "$1"/*.sh "$1"/*.py; do
     [[ -f "$script_path" ]] || continue
     printf '%s\t%s\n' "${script_path##*/}" "$(shasum -a 256 "$script_path" | awk '{print $1}')"
   done | LC_ALL=C sort
 }
 reviewer_script_manifest "$workflow_root/bin" >"$temp_root/reviewer-before.tsv"
-for script_path in "$workflow_root/bin"/*.sh; do
+for script_path in "$workflow_root/bin"/*.sh "$workflow_root/bin"/*.py; do
   [[ -f "$script_path" ]] || continue
   cp -p "$script_path" "$review_snapshot/bin/"
 done

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+java_method_window_script="$script_dir/java-method-window.py"
+
 ollama_probe_timeout_seconds="${OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS:-10}"
 
 ollama_api_url="${OLLAMA_HOST:-http://127.0.0.1:11434}"
@@ -6388,6 +6391,198 @@ collect_sales_return_idempotency_race_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sales_payment_voucher_race_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file schema_file method_text
+  local build_call_lines prepare_call_lines save_call_lines call_line call_method guarded save_seen
+  [[ -n "$source_root" ]] || return 0
+
+  # A pending-voucher count followed by an insert is a check-then-insert
+  # race. Keep this project-shaped: require the changed submit flow, the
+  # current voucher table without a uniqueness guard, and no row lock or
+  # duplicate-key recovery visible in the changed application snapshot.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-sales-payment-voucher-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = ""; next }
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ b\//) {
+        code = substr($0, 2)
+        if (path ~ /(^|\/)SalesOrderApplication\.java$/ &&
+            code ~ /[.]countPendingByOrderId[[:space:]]*\(/) {
+          printf "%s\t%d\n", path, new_line
+        }
+        new_line++
+      } else if (prefix != "-") {
+        new_line++
+      }
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line")"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -Eq 'buildPendingVoucher[[:space:]]*\(' || continue
+    printf '%s\n' "$method_text" | grep -Eq 'countPendingByOrderId[[:space:]]*\(' || continue
+    if printf '%s\n' "$method_text" | grep -Eqi '(salesOrder|order)[A-Za-z0-9_]*Repository[[:space:]]*\.[A-Za-z0-9_]*ForUpdate|countPendingByOrderIdForUpdate|DuplicateKeyException|DataIntegrityViolationException|duplicate[[:space:]_-]*key'; then
+      continue
+    fi
+
+    # The count is usually hidden in buildPendingVoucher while the save is in
+    # preparePendingVoucher or its submitting caller. Inspect every concrete
+    # save method in this application class, then inspect the known helper
+    # callers, so a short wrapper does not silently lose the race evidence.
+    build_call_lines="$(grep -n -E '(^|[^A-Za-z0-9_])([A-Za-z0-9_$]+\.)*buildPendingVoucher[[:space:]]*\(' "$source_file" || true)"
+    guarded=false
+    save_seen=false
+    save_call_lines="$(grep -n -E 'salesPaymentVoucherRepository\.save[[:space:]]*\(' "$source_file" || true)"
+    while IFS=: read -r call_line _; do
+      [[ "$call_line" =~ ^[0-9]+$ ]] || continue
+      call_method="$(python3 "$java_method_window_script" "$source_file" "$call_line")"
+      printf '%s\n' "$call_method" | grep -Eq 'salesPaymentVoucherRepository\.save[[:space:]]*\(' || continue
+      save_seen=true
+      if printf '%s\n' "$call_method" | grep -Eqi '(salesOrder|order)[A-Za-z0-9_]*Repository[[:space:]]*\.[A-Za-z0-9_]*ForUpdate|@Lock[[:space:]]*\([^)]*PESSIMISTIC_WRITE|DuplicateKeyException|DataIntegrityViolationException|duplicate[[:space:]_-]*key'; then
+        guarded=true
+        break
+      fi
+    done <<<"$save_call_lines"
+    [[ "$guarded" == true ]] && continue
+    while IFS=: read -r call_line _; do
+      [[ "$call_line" =~ ^[0-9]+$ ]] || continue
+      call_method="$(python3 "$java_method_window_script" "$source_file" "$call_line")"
+      printf '%s\n' "$call_method" | grep -Eq 'salesPaymentVoucherRepository\.save[[:space:]]*\(' || continue
+      save_seen=true
+      if printf '%s\n' "$call_method" | grep -Eqi '(salesOrder|order)[A-Za-z0-9_]*Repository[[:space:]]*\.[A-Za-z0-9_]*ForUpdate|@Lock[[:space:]]*\([^)]*PESSIMISTIC_WRITE|DuplicateKeyException|DataIntegrityViolationException|duplicate[[:space:]_-]*key'; then
+        guarded=true
+        break
+      fi
+    done <<<"$build_call_lines"
+    [[ "$guarded" == true ]] && continue
+
+    prepare_call_lines="$(grep -n -E '(^|[^A-Za-z0-9_])preparePendingVoucher[[:space:]]*\(' "$source_file" || true)"
+    while IFS=: read -r call_line _; do
+      [[ "$call_line" =~ ^[0-9]+$ ]] || continue
+      call_method="$(python3 "$java_method_window_script" "$source_file" "$call_line")"
+      printf '%s\n' "$call_method" | grep -Eq 'preparePendingVoucher[[:space:]]*\(' || continue
+      printf '%s\n' "$call_method" | grep -Eq 'salesPaymentVoucherRepository\.save[[:space:]]*\(' && save_seen=true
+      if printf '%s\n' "$call_method" | grep -Eqi '(salesOrder|order)[A-Za-z0-9_]*Repository[[:space:]]*\.[A-Za-z0-9_]*ForUpdate|@Lock[[:space:]]*\([^)]*PESSIMISTIC_WRITE|DuplicateKeyException|DataIntegrityViolationException|duplicate[[:space:]_-]*key'; then
+        guarded=true
+        break
+      fi
+    done <<<"$prepare_call_lines"
+    [[ "$guarded" == true ]] && continue
+    [[ "$save_seen" == true ]] || continue
+
+    schema_file="$source_root/sql/platform_erp.sql"
+    [[ -f "$schema_file" ]] || continue
+    # Continue only when the voucher table exists and has no UNIQUE KEY.
+    # Keep the completion flag separate because awk's END block also runs
+    # after an early exit and could otherwise invert the result.
+    awk '
+      /CREATE TABLE IF NOT EXISTS `erp_sales_payment_voucher`/ { in_table = 1; next }
+      in_table && /^[[:space:]]*\)[[:space:]]+ENGINE[[:space:]]*=/ { complete = 1; exit }
+      in_table && /UNIQUE[[:space:]]+(KEY|INDEX)|CONSTRAINT[[:space:]]+[^[:space:]]+[[:space:]]+UNIQUE/ {
+        if ($0 ~ /order_id/) found = 1
+      }
+      END { exit(in_table && complete && !found ? 0 : 1) }
+    ' "$schema_file" || continue
+
+    {
+      printf '%s\n' "P1 $candidate_path:$candidate_line - 销售订单提交先 countPendingByOrderId 再插入待确认支付凭证，缺少并发互斥或重复键恢复。"
+      printf '%s\n' '影响：两个并发提交都可能通过待确认检查并插入多条支付凭证；即使数据库后来增加唯一约束，未恢复的冲突也会向客户端暴露数据库异常并破坏稳定幂等。'
+      printf '%s\n' '修复建议：锁定订单或使用带唯一约束的幂等记录串行化检查与插入，并在唯一键冲突时重新读取并比较请求后返回稳定结果；请求内容不一致时明确拒绝。'
+      printf '%s\n' '验证方式：对同一草稿订单并发提交两次凭证，确认最终只有一条待确认记录且重复请求得到同一响应；再验证异常退出、重试和不同凭证内容的冲突处理。'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_inventory_stock_race_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file method_text processed key
+  [[ -n "$source_root" ]] || return 0
+
+  # Only inspect changed direct stock writes in the four confirmation methods;
+  # list/detail pages may legitimately perform ordinary reads and are outside
+  # the concurrent inventory mutation boundary.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-inventory-stock-candidates.XXXXXX")"
+  processed="$(mktemp "${TMPDIR:-/tmp}/local-review-inventory-stock-processed.XXXXXX")"
+  : >"$processed"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = ""; next }
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ b\//) {
+        code = substr($0, 2)
+        if (path ~ /(^|\/)(InventoryAdjustmentApplication|NonPhysicalTransferApplication)\.java$/ &&
+            code ~ /logicalWarehouseSkuRepository\.(update|save)[[:space:]]*\(/) {
+          printf "%s\t%d\n", path, new_line
+        }
+        new_line++
+      } else if (prefix != "-") {
+        new_line++
+      }
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line")"
+    [[ -n "$method_text" ]] || continue
+    key="$candidate_path:$(printf '%s\n' "$method_text" | sed -n '1p')"
+    grep -Fqx "$key" "$processed" && continue
+    printf '%s\n' "$key" >>"$processed"
+    printf '%s\n' "$method_text" | grep -Eq '^[[:space:]]*(private|protected|public)?[[:space:]]*(static[[:space:]]+)?[^;{}()]+(applySerialAdjustment|applyNoSerialAdjustment|applySerialTransfer|applyNoSerialTransfer)[[:space:]]*\(' || continue
+    printf '%s\n' "$method_text" | grep -Eq 'logicalWarehouseSkuRepository\.(findBy|findNoSerial|listBy|listNoSerial)' || continue
+    printf '%s\n' "$method_text" | grep -Eq 'logicalWarehouseSkuRepository\.(update|save)[[:space:]]*\(' || continue
+    if printf '%s\n' "$method_text" | grep -Eiq 'logicalWarehouseSkuRepository[[:space:]]*\.(find[A-Za-z0-9_]*ForUpdate|list[A-Za-z0-9_]*ForUpdate|setQuantityIfEnough|decreaseQuantityIfEnough|increaseNoSerialQuantity|setSerialQuantityIfAvailable)[[:space:]]*\('; then
+      continue
+    fi
+    {
+        printf '%s\n' "P1 $candidate_path:$candidate_line - 库存调整或非实物调拨确认先读后写库存，缺少行锁、CAS 或原子库存更新。"
+        printf '%s\n' '影响：并发确认可能读取同一库存快照后互相覆盖，造成库存扣减丢失、目标库存增量丢失、重复库存行或超额调拨；串码状态和库存记录也可能出现不一致。'
+        printf '%s\n' '修复建议：在确认事务内按稳定锁序锁定源/目标库存行，或使用带当前数量条件的 CAS/原子增减；缺行插入必须由唯一键保护并处理冲突后重读。'
+        printf '%s\n' '验证方式：对同一 SKU/串码并发调整或调拨，确认最终库存等于所有成功请求的合计、不会超额扣减或重复建行；再覆盖目标行不存在、重试和异常回滚。'
+        printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates" "$processed"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_role_api_tenant_scope_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -8595,6 +8790,8 @@ collect_sales_stock_warehouse_owner_preflight "$chunk_input_file" "$build_prefli
 collect_shopping_cart_price_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_logical_warehouse_sku_replace_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_return_idempotency_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sales_payment_voucher_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_inventory_stock_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

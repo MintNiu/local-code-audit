@@ -397,4 +397,13 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 
 2026-10-02：对真实 `platform-auth:b7fa4c0ed26c9ef711956f47daca3daa36a710a2` 做冻结双跑。源码确认 SSO 授权码兑换在 `SsoController.java:238` 先 `redisUtil.get` 后 `redisUtil.delete`，后续修复提交 `60aab92` 改为原子 `getAndDelete`；该根因作为当前规则调优来源，不重复计入正式 holdout 分母。运行器新增窄范围一次性授权码消费预检，并以发放/消费方法窗口区分同文件的两个 key 行；正负 fixture、完整 `test-preflight.sh` 和相关回归均通过。修复后的脚本版本 `b627e56` 双跑均 `status=completed`、1 个分片、exit=0，分别耗时 313/260 秒；两轮均只保留一条 P1，准确定位到 `SsoController.java:238`，结果稳定。该证据表明此前稳定漏报已转为稳定可见，但不改变正式阶段一仍有 8 个 gold P0/P1、7 个命中、至少 12 个独立未参与调优根因待补的结论。
 
-2026-10-02：复核 `platform-erp-service:8a2c1e1a28c88751b4503ac53fc5eefd2fdbda0a` 时确认已有 `erp_sales_return_inspection` 表快照新增 `request_no` 字段和唯一索引，同时实体新增 `requestNo`，但差异没有版本化 `sql/migration`，README 明确要求已有数据库走迁移；该样本属于 dev 调优来源，不计入正式 holdout。新增 schema 快照迁移预检后，修复 Git hunk 标题表上下文识别，并增加 SQL 字段与 Java 属性关联，过滤纯格式重写 hunk。最终合并逻辑对模型原文与确定性预检的同根因按路径/行号重叠去重，只保留带代码证据的 P1。修复后真实 tuned 双跑均完整（1/1 分片，253/194 秒），两轮均只保留 `sql/platform_erp.sql:2407` 的一条 P1，结果稳定；预检、输出、分片、过滤和历史回归均通过。
+ 2026-10-02：复核 `platform-erp-service:8a2c1e1a28c88751b4503ac53fc5eefd2fdbda0a` 时确认已有 `erp_sales_return_inspection` 表快照新增 `request_no` 字段和唯一索引，同时实体新增 `requestNo`，但差异没有版本化 `sql/migration`，README 明确要求已有数据库走迁移；该样本属于 dev 调优来源，不计入正式 holdout。新增 schema 快照迁移预检后，修复 Git hunk 标题表上下文识别，并增加 SQL 字段与 Java 属性关联，过滤纯格式重写 hunk。最终合并逻辑对模型原文与确定性预检的同根因按路径/行号重叠去重，只保留带代码证据的 P1。修复后真实 tuned 双跑均完整（1/1 分片，253/194 秒），两轮均只保留 `sql/platform_erp.sql:2407` 的一条 P1，结果稳定；预检、输出、分片、过滤和历史回归均通过。
+
+### 2026-10-03：支付与库存并发预检边界收紧，重新定义阶段一验收口径
+
+本轮将支付凭证和库存调整两个并发竞态预检接入个人本地入口。支付规则现在按 `countPendingByOrderId`、待确认凭证构造、实际保存调用和当前 SQL schema 做证据关联，并沿提交方法检查订单行锁/重复键恢复；库存规则只在四个确认方法的候选修改范围内检查直接库存读写，只认可库存仓库自身的 `ForUpdate`、CAS/原子更新，纯原子服务路径因没有直接读写候选而不进入该规则。新增 Python Java 方法窗口提取器，会屏蔽字符串、字符、注释和文本块中的大括号，避免相邻方法串联或提前截断。
+
+无模型回归新增跨方法锁、唯一键、字符串大括号、无关服务类名和显式原子调用负例；`test-preflight.sh`、输出可见性、分片、证据过滤、历史、配置、scorecard 和 stage1 回归全部通过。真实 ERP 支付候选在上一版 runner 上双跑稳定发现 1 条确定性 P1；库存候选两轮均完整结束但模型 finding signature 漂移，记录为容量/稳定性边界，不计入正式通过统计。预检代码变更后，支付真实双跑需要重新执行，旧结果只作为历史诊断保留。
+
+验收审计同时确认，`combined-scorecard-20261002` 中的 8 个 gold P0/P1 全部直接参与过规则设计或复跑调优；其中 7 个命中不能称为独立 holdout，当前可确认的独立未见 P0/P1 分母为 0。“还差 12 个”只适用于未审计的账面数字，不再作为完成承诺。冻结 runner、模型和提示词后，必须另建至少 20 个未参与调优的真实根因清单，双跑并完成人工 P0/P1、定位准确率、误报和功能簇 split 标签；用于修规则的样本转入回归集，并由新的未见样本替补。只有该盲测门禁通过后，才能宣称个人版达到生产级高可用。
+冻结预检代码后的真实 `platform-erp-service:2ff8080d` 支付凭证候选已重新双跑：两轮均 34/34 分片完整、exit=0、`output_complete=true`，耗时 514/538 秒；finding signature 均为 `7c29f5ec2cd65bd06e36a1de0b064779db2a610df0713c9da5ec2b8e49cb0bc6`，稳定保留 `SalesOrderApplication.java:516` 的确定性 P1。首次重跑曾暴露历史评测临时快照没有复制新增 Python 依赖，已将 `run-history.sh` 的快照清单扩展到 `.py` 并由本轮 `review_scripts_snapshot=true` 验证。该样本仍是调优来源，只计入工程稳定性证据，不计入独立盲测召回率。
