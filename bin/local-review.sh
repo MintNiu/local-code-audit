@@ -6061,6 +6061,72 @@ collect_sales_stock_warehouse_owner_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_shopping_cart_price_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file line_number
+  [[ -n "$source_root" ]] || return 0
+
+  # The shopping-cart contract explicitly calls retailer/store IDs "real-time
+  # pricing" context.  Keep this project-shaped guard narrow: require that
+  # contract text, a changed ShoppingCartApplication, and a current source
+  # path that returns the SKU's base retailPrice without any visible price
+  # tier/retailer/store pricing lookup.  Do not generalize to every method
+  # that happens to accept retailerId or storeId.
+  grep -Eq '实时取价|实时销售价' "$diff_file" || return 0
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-shopping-cart-price-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = ""; next }
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ b\//) {
+        code = substr($0, 2)
+        if (path ~ /(^|\/)ShoppingCartApplication\.java$/ &&
+            code ~ /retailerId|storeId|getRetailPrice|setSalePrice/) {
+          printf "%s\t%d\n", path, new_line
+        }
+        new_line++
+      } else if (prefix != "-") {
+        new_line++
+      }
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    grep -Eq 'getRetailPrice[[:space:]]*\(|setSalePrice[[:space:]]*\(' "$source_file" || continue
+    grep -Eq 'retailerId|storeId' "$source_file" || continue
+    if grep -Eqi 'PriceLevel|priceLevel|retailerPrice|storePrice|resolveSalePrice|priceRepository|pricingRepository' "$source_file"; then
+      continue
+    fi
+    line_number="$(grep -n -m1 -E 'setSalePrice[[:space:]]*\(' "$source_file" | cut -d: -f1)"
+    [[ "$line_number" =~ ^[0-9]+$ ]] || line_number="$candidate_line"
+    {
+      printf '%s\n' "P1 $candidate_path:$line_number - 购物车接口声明根据 retailerId/storeId 实时取价，但实现直接使用 SKU 的基础 retailPrice，未按零售商/门店价格等级解析成交价。"
+      printf '%s\n' '影响：不同零售商或门店的价格等级可能被忽略，购物车展示、行金额和后续结算会使用错误价格，造成少收、多收或价格策略绕过。'
+      printf '%s\n' '修复建议：按同一租户校验 retailerId/storeId 与供方关系，并调用价格等级/门店价格解析服务得到当前成交价；基础 retailPrice 只能作为明确约定的兜底。'
+      printf '%s\n' '验证方式：为同一 SKU 配置两个零售商或门店价格等级，分别查询、加入和修改购物车，确认 salePrice、lineAmount 与对应等级一致，并覆盖无匹配等级的拒绝或兜底策略。'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_role_api_tenant_scope_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -8073,6 +8139,7 @@ collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight
 collect_xxl_job_permission_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxl_job_reliability_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_stock_warehouse_owner_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_shopping_cart_price_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

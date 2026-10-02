@@ -197,6 +197,33 @@ cat >"$repo/sql/client-secret-placeholder.sql" <<'EOF'
 INSERT INTO sys_application (`client_id`, `client_secret`, `status`)
 VALUES ('audit-app', '${AUDIT_CLIENT_SECRET}', 1);
 EOF
+mkdir -p "$repo/src/main/java/com/example/api/shoppingcart" "$repo/doc"
+cat >"$repo/src/main/java/com/example/api/shoppingcart/ShoppingCartApplication.java" <<'EOF'
+package com.example.api.shoppingcart;
+
+final class ShoppingCartApplication {
+    void list(Long retailerId, Long storeId) {
+        // contract context is supplied by the request
+    }
+
+    void buildItem(Sku sku) {
+        setSalePrice(sku.getRetailPrice());
+    }
+
+    void setSalePrice(java.math.BigDecimal value) {
+        // fixture sink
+    }
+
+    interface Sku {
+        java.math.BigDecimal getRetailPrice();
+    }
+}
+EOF
+cat >"$repo/doc/shopping-cart.md" <<'EOF'
+# Shopping cart
+
+The retailerId and storeId fields are used for real-time pricing (实时取价).
+EOF
 cat >"$repo/application-prod-username.yml" <<'EOF'
 spring:
   cloud:
@@ -1256,6 +1283,11 @@ if grep -F 'P1 sql/client-secret-placeholder.sql:' "$capture" >/dev/null; then
   cat "$capture" >&2
   exit 1
 fi
+grep -F 'P1 src/main/java/com/example/api/shoppingcart/ShoppingCartApplication.java:' "$capture" >/dev/null || {
+  echo 'missing shopping-cart price-tier preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '{"response":"P1 application-prod-username.yml:4 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。\\n\\nP1 application-prod-username.yml:5 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。","done":true,"done_reason":"stop"}\n'

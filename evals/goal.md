@@ -379,3 +379,7 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 随后对 `platform-job:5dfc6a1092ae8131db160d23323dca33f7501ad8` 使用 6000 字节分片与 4096 输出预算完成双跑：两轮 31/31 分片、539/561 秒、`output_complete=true`，结果 SHA-256 和 finding signature 一致。`getJobParam()` 确定性 P1 与模型原文均可见；其余重复空值段和受保护分支候选暂不折算为独立根因，等待人工误报/归并标签。
 
 2026-10-02：真实复核 `platform-system:ed790b4186d24992e21011adcfdd1ae746679a0b7` 时确认新增 DAC/Workflow SQL 含固定 `client_secret`，模型原始双跑均 clean。新增窄范围 SQL 凭据预检，仅在新增 `.sql` 语句同时出现 `client_secret` 列上下文和带 `secret/password/token` 特征的引号字面量时报告 P1，`${...}` 占位符不触发；无模型回归覆盖固定字面量正例和占位符负例。修复后两轮 17/17 分片完整（169/139 秒），两个位置的确定性 P1、finding signature 和结果哈希均稳定。该样本中的两个值属于同一固定凭据暴露根因，正式分母仍需人工归并，不能按输出条数虚增召回率。
+
+2026-10-02：复核 `platform-erp-service:cd6599ca85db62659e877c2cec0ff9059e305abc` 购物车提交时确认，差异文档/DTO 将 `retailerId/storeId` 定义为实时取价上下文，但实现直接以 SKU 基础 `retailPrice` 生成成交价，未展示价格等级解析。模型双跑均 clean；新增窄范围价格预检要求契约文本、购物车应用类、基础价格赋值和缺少价格解析同时成立。无模型回归和真实双跑均通过，真实运行 17/17 分片完整（158/128 秒），确定性 P1 稳定定位到 `setSalePrice`，结果哈希一致；正式分母仍待人工标签。
+
+同日尝试评测 `platform-erp-service:31bcd68e6403860e339ce16bca0042dca6d25b02` 库存调整/非实物调拨大提交。该提交约 3,000 行、34 个分片，首轮多片进入 180 秒长尾，主动停止并保留 trace；运行不完整，严格排除出召回、稳定性和 clean 统计，后续只能以专门大提交配置完整双跑后再纳入。

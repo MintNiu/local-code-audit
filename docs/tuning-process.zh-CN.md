@@ -858,3 +858,7 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 复核 `platform-system:ed790b4186d24992e21011adcfdd1ae746679a0b7` 时发现，新增 DAC/Workflow 初始化 SQL 将固定 `client_secret` 写入版本库；现有配置凭据预检只覆盖 YAML/Properties 等配置文件，模型两轮均返回 clean，形成可重复的安全漏报。新增窄范围 SQL 预检：仅在同一 `.sql` 文件的新增语句中同时看到 `client_secret` 列上下文和带 `secret/password/token` 特征的新增引号字面量时触发，`${...}` 占位符保持 clean；同一行的 SQL 变量不会掩盖旁边的固定秘密。
 
 无模型回归新增固定字面量正例和占位符负例，配置/预检回归分别为 11 组和全量通过。修复后的 tuned 入口对该提交双跑 17/17 分片完整，耗时 169/139 秒；两个固定秘密位置均稳定输出确定性 P1，finding signature 和结果哈希一致。模型对其中一处有重复描述，原始模型段仍完整保留，正式分母和误报仍需人工归并。
+
+同日复核 `platform-erp-service:cd6599ca85db62659e877c2cec0ff9059e305abc` 购物车提交。差异文档和 DTO 明确把 `retailerId/storeId` 定义为“实时取价”上下文，但 `ShoppingCartApplication` 直接使用 SKU 基础 `retailPrice` 生成 `salePrice/lineAmount`，没有可见的价格等级或门店价格解析。模型两轮均 clean；新增窄范围预检要求契约文本、购物车应用类、基础价格赋值和缺少价格解析证据同时成立，固定输出 P1。补充回归后该提交两轮均 17/17 分片完整（158/128 秒），P1 定位到 `setSalePrice`，结果哈希一致。该根因与 SQL 凭据、租户隔离和并发样本独立，正式分母仍需人工标签。
+
+库存调整提交 `platform-erp-service:31bcd68e6403860e339ce16bca0042dca6d25b02` 约 3,000 行、34 个分片；首轮运行进入多个 180 秒模型长尾，主动中止并保留空结果/trace 作为容量边界。它不计入召回、稳定性或 clean 统计，后续若要纳入必须先采用专门的大提交配置并完整双跑。
