@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Produce a repeatability signature for a review result without comparing the
-# model's prose byte-for-byte.  The returned signature preserves finding count,
-# severity, location, risk-family evidence, and MyBatis expressions.  It never
+# model's prose byte-for-byte.  The returned signature preserves the semantic
+# finding set (severity, location, risk-family evidence, and MyBatis
+# expressions) while collapsing repeated prose for the same root. It never
 # changes the result shown to a user and is therefore not a finding filter.
 result_file="${1:-}"
 [[ -f "$result_file" ]] || {
@@ -40,7 +41,11 @@ LC_ALL=C awk '
     if (lower ~ /反序列化|objectinputstream|xxe|外部实体/) families = families ",parser"
     if (lower ~ /命令注入|命令执行|shell/) families = families ",command"
     if (lower ~ /重定向|redirect|cors|跨域/) families = families ",http"
-    if (lower ~ /迁移|数据库升级|schema/) families = families ",migration"
+    # Do not classify generic remediation wording such as “迁移到新的授权
+    # 机制” as a database/schema migration.  That prose varies between model
+    # runs for the same authorization root and would create false signature
+    # drift; keep only explicit migration/script/schema evidence.
+    if (lower ~ /迁移脚本|数据库升级|schema|migration/) families = families ",migration"
     if (lower ~ /预签名|票据|重放|presign|replay/) families = families ",replay"
     expressions = ""
     rest = block
@@ -50,6 +55,17 @@ LC_ALL=C awk '
       rest = substr(rest, RSTART + RLENGTH)
     }
     gsub(/[[:space:]]+/, " ", families)
+    # The user-visible contract keeps every model paragraph, including
+    # independently worded repeats from separate shards.  Repeatability
+    # should compare the semantic finding set rather than the model
+    # duplicate prose count: same severity/location/risk-family/expression is
+    # one root for the signature, while different locations or families stay
+    # distinct.  This affects only the private verifier, never the output.
+    signature_key = header "\t" families "\t" expressions
+    if (seen_signature[signature_key]++) {
+      block = ""
+      return
+    }
     printf "%04d\t%s\tfamilies=%s\texpressions=%s\n", block_index, header, families, expressions
     block = ""
     block_index++
