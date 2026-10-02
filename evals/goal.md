@@ -394,3 +394,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 按人工归并规则将该提交记入私有冻结 scorecard 后，当前完整样本为 27 个，已确认 P0/P1 根因 8 个，命中 7 个，召回率 87.5%；已有 1 个误报，按 `FP/(gold+FP)` 计算约 11.1%。这比上一版更接近门槛但仍未达到 20 个根因、90% 召回和 10% 误报上限，因此剩余缺口更新为至少 12 个独立未参与调优的真实根因，并继续要求双跑、定位准确率和人工误报标签。
 
 2026-10-02：`platform-dac-service:36da7ae82210d586ebcd3040930c21caaa87ec2f` HR 目录迁移提交已完成个人 tuned 双跑，24/24 分片均完整，耗时 625/628 秒，结果和 finding signature 稳定为 clean；未确认 P0/P1，因此不增加阶段一召回分母。人工复核保留一个待确认的 P2 契约线索：旧 `includeDisabled` 选项可能在新 HR ACTIVE 过滤中失效；在契约明确前不计入正式门禁。
+
+2026-10-02：对真实 `platform-auth:b7fa4c0ed26c9ef711956f47daca3daa36a710a2` 做冻结双跑。源码确认 SSO 授权码兑换在 `SsoController.java:238` 先 `redisUtil.get` 后 `redisUtil.delete`，后续修复提交 `60aab92` 改为原子 `getAndDelete`；该根因作为当前规则调优来源，不重复计入正式 holdout 分母。运行器新增窄范围一次性授权码消费预检，并以发放/消费方法窗口区分同文件的两个 key 行；正负 fixture、完整 `test-preflight.sh` 和相关回归均通过。修复后的脚本版本 `b627e56` 双跑均 `status=completed`、1 个分片、exit=0，分别耗时 313/260 秒；两轮均只保留一条 P1，准确定位到 `SsoController.java:238`，结果稳定。该证据表明此前稳定漏报已转为稳定可见，但不改变正式阶段一仍有 8 个 gold P0/P1、7 个命中、至少 12 个独立未参与调优根因待补的结论。
