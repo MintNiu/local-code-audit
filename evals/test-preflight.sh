@@ -1288,6 +1288,75 @@ grep -F 'P1 src/main/java/com/example/api/shoppingcart/ShoppingCartApplication.j
   cat "$capture" >&2
   exit 1
 }
+
+logical_warehouse_repo="$fixture_root/logical-warehouse-sku-repo"
+logical_capture="$fixture_root/logical-request.json"
+mkdir -p "$logical_warehouse_repo/src/main/java/com/bit/erp/application/warehouse" \
+  "$logical_warehouse_repo/src/main/java/com/bit/erp/repository/warehouse" \
+  "$logical_warehouse_repo/src/main/java/com/bit/erp/domain/warehouse"
+git -C "$logical_warehouse_repo" init -q
+git -C "$logical_warehouse_repo" config user.email test@example.invalid
+git -C "$logical_warehouse_repo" config user.name preflight-logical-warehouse-sku
+cat >"$logical_warehouse_repo/src/main/java/com/bit/erp/application/warehouse/LogicalWarehouseApplication.java" <<'EOF'
+package com.bit.erp.application.warehouse;
+
+final class LogicalWarehouseApplication {
+    private final LogicalWarehouseSkuRepository logicalWarehouseSkuRepository = new LogicalWarehouseSkuRepository();
+
+    void replace(Long logicalWarehouseId, java.util.List<Object> lines) {
+        logicalWarehouseSkuRepository.save(logicalWarehouseId, lines);
+    }
+}
+EOF
+cat >"$logical_warehouse_repo/src/main/java/com/bit/erp/repository/warehouse/LogicalWarehouseSkuRepository.java" <<'EOF'
+package com.bit.erp.repository.warehouse;
+
+final class LogicalWarehouseSkuRepository {
+    void save(Long logicalWarehouseId, java.util.List<Object> lines) {
+        deleteByLogicalWarehouseId(logicalWarehouseId);
+        insert(lines);
+    }
+
+    void deleteByLogicalWarehouseId(Long logicalWarehouseId) {}
+    void insert(java.util.List<Object> lines) {}
+}
+EOF
+cat >"$logical_warehouse_repo/src/main/java/com/bit/erp/domain/warehouse/ErpLogicalWarehouseSku.java" <<'EOF'
+package com.bit.erp.domain.warehouse;
+
+final class ErpLogicalWarehouseSku {
+    private Integer occupiedQuantity;
+}
+EOF
+git -C "$logical_warehouse_repo" add .
+git -C "$logical_warehouse_repo" commit -qm logical-warehouse-sku-base
+sed -i '' 's/logicalWarehouseSkuRepository.save(logicalWarehouseId, lines);/logicalWarehouseSkuRepository.replace(logicalWarehouseId, lines);/' \
+  "$logical_warehouse_repo/src/main/java/com/bit/erp/application/warehouse/LogicalWarehouseApplication.java"
+logical_warehouse_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$logical_capture" \
+  "$repo_root/bin/local-review.sh" --repo "$logical_warehouse_repo")"
+printf '%s\n' "$logical_warehouse_output" | grep -F '替换逻辑仓 SKU 明细前无条件删除旧行' >/dev/null || {
+  echo 'missing logical-warehouse occupied SKU preflight' >&2
+  printf '%s\n' "$logical_warehouse_output" >&2
+  exit 1
+}
+for logical_warehouse_field in '影响：' '修复建议：' '验证方式：'; do
+  logical_warehouse_field_count="$(printf '%s\n' "$logical_warehouse_output" | grep -c "$logical_warehouse_field" || true)"
+  [[ "$logical_warehouse_field_count" -eq 1 ]] || {
+    echo "logical-warehouse preflight field count mismatch for $logical_warehouse_field: $logical_warehouse_field_count" >&2
+    printf '%s\n' "$logical_warehouse_output" >&2
+    exit 1
+  }
+done
+sed -i '' 's/void deleteByLogicalWarehouseId(Long logicalWarehouseId) {}/void deleteByLogicalWarehouseId(Long logicalWarehouseId) { if (occupiedQuantity > 0) throw new IllegalStateException(); }/' \
+  "$logical_warehouse_repo/src/main/java/com/bit/erp/repository/warehouse/LogicalWarehouseSkuRepository.java"
+guarded_logical_warehouse_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$logical_capture" \
+  "$repo_root/bin/local-review.sh" --repo "$logical_warehouse_repo")"
+if printf '%s\n' "$guarded_logical_warehouse_output" | grep -F '替换逻辑仓 SKU 明细前无条件删除旧行' >/dev/null; then
+  echo 'logical-warehouse preflight reported a repository with an occupied-row guard' >&2
+  printf '%s\n' "$guarded_logical_warehouse_output" >&2
+  exit 1
+fi
+
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '{"response":"P1 application-prod-username.yml:4 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。\\n\\nP1 application-prod-username.yml:5 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。","done":true,"done_reason":"stop"}\n'
@@ -4134,9 +4203,18 @@ sed -i '' 's/Warehouse warehouse = logicalWarehouseRepository.findById(actualId)
   "$sales_stock_repo/src/main/java/example/erp/SalesStockSearchApplication.java"
 sales_stock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" \
   "$repo_root/bin/local-review.sh" --repo "$sales_stock_repo")"
-printf '%s\n' "$sales_stock_output" | grep -F '销售寻货确认入库只按目标逻辑仓 ID 查询并校验存在/启用状态' >/dev/null || {
+printf '%s\n' "$sales_stock_output" | grep -F '销售寻货目标逻辑仓只按请求 ID 查询并校验存在/启用状态' >/dev/null || {
   echo 'sales-stock warehouse ownership preflight missed the fixture' >&2
   printf '%s\n' "$sales_stock_output" >&2
+  exit 1
+}
+sed -i '' 's/resolveTargetWarehouse/resolveDirectTargetWarehouse/g' \
+  "$sales_stock_repo/src/main/java/example/erp/SalesStockSearchApplication.java"
+direct_sales_stock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" \
+  "$repo_root/bin/local-review.sh" --repo "$sales_stock_repo")"
+printf '%s\n' "$direct_sales_stock_output" | grep -F '销售寻货目标逻辑仓只按请求 ID 查询并校验存在/启用状态' >/dev/null || {
+  echo 'sales-stock direct target warehouse preflight missed the resolver variant' >&2
+  printf '%s\n' "$direct_sales_stock_output" >&2
   exit 1
 }
 

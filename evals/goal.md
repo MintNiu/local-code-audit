@@ -383,3 +383,7 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 2026-10-02：复核 `platform-erp-service:cd6599ca85db62659e877c2cec0ff9059e305abc` 购物车提交时确认，差异文档/DTO 将 `retailerId/storeId` 定义为实时取价上下文，但实现直接以 SKU 基础 `retailPrice` 生成成交价，未展示价格等级解析。模型双跑均 clean；新增窄范围价格预检要求契约文本、购物车应用类、基础价格赋值和缺少价格解析同时成立。无模型回归和真实双跑均通过，真实运行 17/17 分片完整（158/128 秒），确定性 P1 稳定定位到 `setSalePrice`，结果哈希一致；正式分母仍待人工标签。
 
 同日尝试评测 `platform-erp-service:31bcd68e6403860e339ce16bca0042dca6d25b02` 库存调整/非实物调拨大提交。该提交约 3,000 行、34 个分片，首轮多片进入 180 秒长尾，主动停止并保留 trace；运行不完整，严格排除出召回、稳定性和 clean 统计，后续只能以专门大提交配置完整双跑后再纳入。
+
+2026-10-02：复核 `platform-erp-service:c6df653f25bef50b480354cd6ea619c8e3f0700f` 直采寻货提交。个人 tuned 双跑均 10/10 分片完整，93/55 秒，结果 SHA-256 均为 `9043c1d8899cc7ef049a89d5479222a70d063233af3789eea83f6bf64b193bb6`；稳定报告一个供方-目标仓隔离 P1，定位到 `SalesStockSearchApplication.java:371`。新增预检覆盖 `resolveTargetWarehouse` 与 `resolveDirectTargetWarehouse` 两种方法名，并通过普通仓库查询 clean 负例。该真实根因等待人工标签归并后再进入正式 scorecard。
+
+同轮复核逻辑仓 SKU 提交 `platform-erp-service:fb8a35780b64c8aca9df569f20071869b45f0ef2` 为稳定 clean；目标提交尚未出现后续 `occupiedQuantity` 字段，故不把后续状态证据倒灌到历史金标。当前代码仍保留占用明细替换防回归预检，但该提交不计入 gold 分母。

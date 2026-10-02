@@ -862,3 +862,7 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同日复核 `platform-erp-service:cd6599ca85db62659e877c2cec0ff9059e305abc` 购物车提交。差异文档和 DTO 明确把 `retailerId/storeId` 定义为“实时取价”上下文，但 `ShoppingCartApplication` 直接使用 SKU 基础 `retailPrice` 生成 `salePrice/lineAmount`，没有可见的价格等级或门店价格解析。模型两轮均 clean；新增窄范围预检要求契约文本、购物车应用类、基础价格赋值和缺少价格解析证据同时成立，固定输出 P1。补充回归后该提交两轮均 17/17 分片完整（158/128 秒），P1 定位到 `setSalePrice`，结果哈希一致。该根因与 SQL 凭据、租户隔离和并发样本独立，正式分母仍需人工标签。
 
 库存调整提交 `platform-erp-service:31bcd68e6403860e339ce16bca0042dca6d25b02` 约 3,000 行、34 个分片；首轮运行进入多个 180 秒模型长尾，主动中止并保留空结果/trace 作为容量边界。它不计入召回、稳定性或 clean 统计，后续若要纳入必须先采用专门的大提交配置并完整双跑。
+
+2026-10-02：复核 `platform-erp-service:c6df653f25bef50b480354cd6ea619c8e3f0700f` 直采寻货提交。真实双跑均 10/10 分片完整结束，耗时 93/55 秒，结果 SHA-256 均为 `9043c1d8899cc7ef049a89d5479222a70d063233af3789eea83f6bf64b193bb6`。新增直采 resolver 按请求的逻辑仓 ID 只校验存在/启用，没有校验目标仓属于所选供方；确定性 P1 稳定定位到 `SalesStockSearchApplication.java:371`。规则同时覆盖既有 `resolveTargetWarehouse` 和直采专用 `resolveDirectTargetWarehouse`，并保留普通逻辑仓查询 clean 边界。该根因与购物车价格、SQL 固定凭据独立，正式 scorecard 仍需人工归并后再更新。
+
+同轮复核 `platform-erp-service:fb8a35780b64c8aca9df569f20071869b45f0ef2` 逻辑仓 SKU 提交时，两轮均稳定 clean；人工核对发现 `occupiedQuantity` 字段并不存在于该目标提交，而是后续状态才加入，因此没有把未来代码证据反推为历史问题。针对当前代码仍保留“替换明细前保护占用行”的防回归预检，但该提交不计为 gold 根因。

@@ -6038,10 +6038,10 @@ collect_sales_stock_warehouse_owner_preflight() {
     is_safe_repo_relative_path "$candidate_path" || continue
     source_file="$source_root/$candidate_path"
     [[ -f "$source_file" ]] || continue
-    grep -Eq 'resolveTargetWarehouse|logicalWarehouseRepository\.findById' "$source_file" || continue
+    grep -Eq 'resolve(Target|DirectTarget)Warehouse|logicalWarehouseRepository\.findById' "$source_file" || continue
     grep -Eq 'getSupplierId\(\)|supplierId' "$source_file" || continue
     resolver_block="$(awk '
-      /(^|[[:space:]])(private|protected|public)[[:space:]]+[A-Za-z0-9_.<>?, \[\]]+[[:space:]]+resolveTargetWarehouse[[:space:]]*\(/ { in_method = 1 }
+      /(^|[[:space:]])(private|protected|public)[[:space:]]+[A-Za-z0-9_.<>?, \[\]]+[[:space:]]+resolve(Target|DirectTarget)Warehouse[[:space:]]*\(/ { in_method = 1 }
       in_method { print }
       in_method && /^    }[[:space:]]*$/ { exit }
     ' "$source_file")"
@@ -6050,8 +6050,8 @@ collect_sales_stock_warehouse_owner_preflight() {
       continue
     fi
     {
-      printf '%s\n' "P1 $candidate_path:$candidate_line - 销售寻货确认入库只按目标逻辑仓 ID 查询并校验存在/启用状态，未校验目标仓属于当前寻货单的供方。"
-      printf '%s\n' '影响：调用方可选择其他供方或不属于当前业务边界的启用逻辑仓，入库记录与库存归属可能跨供方写入，造成库存和租户业务数据隔离破坏。'
+      printf '%s\n' "P1 $candidate_path:$candidate_line - 销售寻货目标逻辑仓只按请求 ID 查询并校验存在/启用状态，未校验目标仓属于当前寻货单的供方。"
+      printf '%s\n' '影响：调用方可选择其他供方或不属于当前业务边界的启用逻辑仓，寻货单和后续入库记录可能跨供方写入，造成库存归属和租户业务隔离破坏。'
       printf '%s\n' '修复建议：在锁定目标逻辑仓后校验其 supplierId 与寻货单 supplierId 一致，并对默认仓与请求指定仓使用同一归属校验。'
       printf '%s\n' '验证方式：使用当前供方、其他供方和不存在/停用逻辑仓分别确认；其他供方仓必须拒绝且不能生成入库单或库存流水。'
       printf '\n'
@@ -6120,6 +6120,77 @@ collect_shopping_cart_price_preflight() {
       printf '%s\n' '影响：不同零售商或门店的价格等级可能被忽略，购物车展示、行金额和后续结算会使用错误价格，造成少收、多收或价格策略绕过。'
       printf '%s\n' '修复建议：按同一租户校验 retailerId/storeId 与供方关系，并调用价格等级/门店价格解析服务得到当前成交价；基础 retailPrice 只能作为明确约定的兜底。'
       printf '%s\n' '验证方式：为同一 SKU 配置两个零售商或门店价格等级，分别查询、加入和修改购物车，确认 salePrice、lineAmount 与对应等级一致，并覆盖无匹配等级的拒绝或兜底策略。'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_logical_warehouse_sku_replace_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file repository_file line_number delete_block
+  [[ -n "$source_root" ]] || return 0
+
+  # Replacing logical-warehouse SKU rows is destructive when the row model
+  # carries occupiedQuantity.  Require the changed application call, the
+  # current repository's delete-before-insert implementation, and the model
+  # field, while skipping repositories that visibly guard occupied rows.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-logical-warehouse-sku-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = ""; next }
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ b\//) {
+        code = substr($0, 2)
+        if (path ~ /(^|\/)LogicalWarehouseApplication\.java$/ &&
+            code ~ /logicalWarehouseSkuRepository\.replace[[:space:]]*\(/) {
+          printf "%s\t%d\n", path, new_line
+        }
+        new_line++
+      } else if (prefix != "-") {
+        new_line++
+      }
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    repository_file="$(dirname "$source_file")/../../repository/warehouse/LogicalWarehouseSkuRepository.java"
+    [[ -f "$source_file" && -f "$repository_file" ]] || continue
+    grep -Eq 'logicalWarehouseSkuRepository\.replace[[:space:]]*\(' "$source_file" || continue
+    grep -Eq 'deleteByLogicalWarehouseId[[:space:]]*\(' "$repository_file" || continue
+    grep -Eq 'deleteByLogicalWarehouseId\(' "$repository_file" || continue
+    grep -Eq 'occupiedQuantity|occupied_quantity' "$source_root/src/main/java/com/bit/erp/domain/warehouse/ErpLogicalWarehouseSku.java" 2>/dev/null || continue
+    delete_block="$(awk '
+      /deleteByLogicalWarehouseId[[:space:]]*\([^;]*\)[[:space:]]*(throws[^{]+)?\{/ { in_delete = 1 }
+      in_delete { print }
+      in_delete && /}/ { exit }
+    ' "$repository_file")"
+    if printf '%s\n' "$delete_block" | grep -Eqi 'occupiedQuantity|occupied_quantity|getOccupiedQuantity' &&
+       printf '%s\n' "$delete_block" | grep -Eqi '>|<|==|!=|compareTo|BusinessException|throw'; then
+      continue
+    fi
+    line_number="$(grep -n -m1 -E 'logicalWarehouseSkuRepository\.replace[[:space:]]*\(' "$source_file" | cut -d: -f1)"
+    [[ "$line_number" =~ ^[0-9]+$ ]] || line_number="$candidate_line"
+    {
+      printf '%s\n' "P1 $candidate_path:$line_number - 替换逻辑仓 SKU 明细前无条件删除旧行，未检查已有 occupiedQuantity，可能删除已参与库存占用的明细记录。"
+      printf '%s\n' '影响：逻辑仓编辑或删除时，已占用库存行可能被物理/逻辑删除，库存占用、流水和后续出库无法再关联原明细，造成数量对账和追溯数据丢失。'
+      printf '%s\n' '修复建议：在删除或替换前锁定旧明细并拒绝 occupiedQuantity 大于 0 的行，或采用版本化/保留历史行的更新策略；同时保证占用记录与 SKU 明细使用同一事务边界。'
+      printf '%s\n' '验证方式：为逻辑仓建立有占用量和无占用量的两条 SKU 明细，分别编辑、清空和删除，确认有占用行被拒绝且占用/流水关联仍完整。'
       printf '\n'
     } >>"$output_file"
   done <"$candidates"
@@ -8140,6 +8211,7 @@ collect_xxl_job_permission_preflight "$chunk_input_file" "$build_preflight_file"
 collect_xxl_job_reliability_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_stock_warehouse_owner_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_shopping_cart_price_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_logical_warehouse_sku_replace_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
