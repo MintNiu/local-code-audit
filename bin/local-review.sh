@@ -7033,6 +7033,75 @@ collect_sql_trigger_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sql_credential_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # SQL migrations can introduce credentials without using YAML/Properties
+  # syntax.  Keep this narrow: require an INSERT/column context containing
+  # client_secret and then a newly added quoted value whose contents visibly
+  # identify it as a secret/password/token.  Placeholders, NULL and SQL
+  # variables are not literals and remain outside this rule.
+  awk '
+    function reset_file() {
+      client_secret_context = 0
+      statement_open = 0
+      emitted_line = 0
+    }
+    function emit_finding(line) {
+      if (emitted_line == line) return
+      emitted_line = line
+      printf "P1 %s:%d - SQL 迁移新增了固定 client_secret/密码/令牌字面量，凭据可能随脚本进入版本库或部署环境。\n影响：任何能读取迁移文件、构建产物或数据库初始化日志的人员都可能获得可复用的应用凭据，进而访问内部接口或冒充应用身份。\n修复建议：不要在 SQL 中写入固定秘密；改用部署时注入、密钥管理系统或一次性随机值，并为已有凭据轮换。\n验证方式：在干净仓库、构建产物和数据库初始化日志中搜索原始凭据，确认只存在运行时注入的占位符且旧值已失效。\n\n", path, line
+    }
+    /^diff --git / {
+      reset_file()
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      reset_file()
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      if (path == "" || path !~ /\.sql$/) next
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" || prefix == "-" ? substr($0, 2) : $0)
+      lower = tolower(text)
+      if (prefix == "+" || prefix == " ") {
+        if (lower ~ /client[_ -]?secret/ && lower ~ /(insert|update|values|\(|`)/) {
+          client_secret_context = 1
+          statement_open = 1
+        }
+        if (statement_open && lower ~ /;/) statement_open = 0
+        if (prefix == "+" && client_secret_context &&
+            lower ~ /["'"'"'][^"'"'"']*(secret|password|token)[^"'"'"']*["'"'"']/ &&
+            lower !~ /\$\{/) {
+          emit_finding(line_no)
+        }
+        # Once the INSERT statement ends, do not let a later unrelated
+        # literal inherit the client_secret context.
+        if (lower ~ /;/) {
+          client_secret_context = 0
+          statement_open = 0
+        }
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { }
+  ' "$diff_file" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_mybatis_raw_substitution_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -8010,6 +8079,7 @@ collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "
 collect_storage_delete_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
+collect_sql_credential_preflight "$chunk_input_file" "$build_preflight_file"
 collect_mybatis_raw_substitution_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file" "$exact_rename_context_file"
 if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then

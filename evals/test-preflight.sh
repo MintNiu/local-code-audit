@@ -188,6 +188,15 @@ cache:
   host: ${REDIS_HOST:192.168.30.241}
   password: ${REDIS_PASSWORD:wanzhiTestRedisPlatform}
 EOF
+mkdir -p "$repo/sql"
+cat >"$repo/sql/client-secret-migration.sql" <<'EOF'
+INSERT INTO sys_application (`client_id`, `client_secret`, `status`)
+VALUES ('audit-app', 'audit-secret-static', 1);
+EOF
+cat >"$repo/sql/client-secret-placeholder.sql" <<'EOF'
+INSERT INTO sys_application (`client_id`, `client_secret`, `status`)
+VALUES ('audit-app', '${AUDIT_CLIENT_SECRET}', 1);
+EOF
 cat >"$repo/application-prod-username.yml" <<'EOF'
 spring:
   cloud:
@@ -1237,6 +1246,16 @@ grep -F 'P1 application-credential-remote-default.yml' "$capture" >/dev/null || 
   cat "$capture" >&2
   exit 1
 }
+grep -F 'P1 sql/client-secret-migration.sql:' "$capture" >/dev/null || {
+  echo 'missing SQL client_secret literal preflight' >&2
+  cat "$capture" >&2
+  exit 1
+}
+if grep -F 'P1 sql/client-secret-placeholder.sql:' "$capture" >/dev/null; then
+  echo 'SQL client_secret placeholder was incorrectly reported as a literal credential' >&2
+  cat "$capture" >&2
+  exit 1
+fi
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '{"response":"P1 application-prod-username.yml:4 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。\\n\\nP1 application-prod-username.yml:5 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。","done":true,"done_reason":"stop"}\n'
