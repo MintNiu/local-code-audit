@@ -894,3 +894,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 支付预检最终冻结后重新双跑 `platform-erp-service:2ff8080d`：两轮均 34/34 分片完整，514/538 秒，`status=completed`、`output_complete=true`，finding signature 一致并保留 `SalesOrderApplication.java:516` 的确定性 P1。首次重跑在临时审查器快照中发现新增 `java-method-window.py` 未被复制，导致 fail-closed；现已让 `run-history.sh` 同时冻结 `bin/*.sh` 与 `bin/*.py`，本轮 `review_scripts_snapshot=true`，避免本地工作树与历史评测临时目录使用不同实现。该样本是调优来源，仅证明当前代码链路稳定，不进入独立 holdout 分母。
 
 当前私有盲测候选池位于 `~/.local/share/local-review/evals/stage1-freeze-20261003/blind-candidates.tsv`，共 27 个候选、27 个功能簇。候选池不是金标集：人工复核必须排除已参与规则设计的提交、同根因派生提交、同一配置凭据族以及纯功能/低严重度样本，并为保留项写明 P0/P1、根因归并键和准确位置。完成个人版高可用验收还剩四个阶段：冻结至少 20 个独立未见根因、双轮运行并人工标注、按召回/误报/定位/完整性/稳定性门禁验收并替换失败样本、固化最终版本和报告。在这四阶段完成前，只能说代码调试和工程稳定性已完成，不能宣称生产级高可用。
+
+首轮差异归因显示，27 个候选中只有约 3 个能按当前证据直接作为新增 P1 初筛；其余包含父提交已有风险、修复性改动、同一配置凭据族或业务功能本身没有可证实高危缺陷。候选行数不能替代独立 gold 根因数量，必须继续从未调优历史扩展并逐项人工确认。
