@@ -1357,6 +1357,75 @@ if printf '%s\n' "$guarded_logical_warehouse_output" | grep -F '替换逻辑仓 
   exit 1
 fi
 
+sales_return_repo="$fixture_root/sales-return-idempotency-repo"
+sales_return_capture="$fixture_root/sales-return-idempotency-request.json"
+mkdir -p "$sales_return_repo/src/main/java/com/bit/erp/application/salesreturn" \
+  "$sales_return_repo/sql"
+git -C "$sales_return_repo" init -q
+git -C "$sales_return_repo" config user.email test@example.invalid
+git -C "$sales_return_repo" config user.name preflight-sales-return-idempotency
+cat >"$sales_return_repo/src/main/java/com/bit/erp/application/salesreturn/SalesReturnApplication.java" <<'EOF'
+package com.bit.erp.application.salesreturn;
+
+final class SalesReturnApplication {
+    public SalesReturnApplicationVO createAndSubmit(CreateDTO dto) {
+        Long tenantId = 1L;
+        String requestNo = dto.requestNo();
+        ErpSalesReturnOrder existing = returnRepository.findByRequestNo(tenantId, requestNo);
+        ErpSalesReturnOrder order = buildOrder(dto);
+        returnRepository.save(order);
+        return toVO(order);
+    }
+
+    private final ReturnRepository returnRepository = new ReturnRepository();
+    private ErpSalesReturnOrder buildOrder(CreateDTO dto) { return new ErpSalesReturnOrder(); }
+    private SalesReturnApplicationVO toVO(ErpSalesReturnOrder order) { return new SalesReturnApplicationVO(); }
+    record CreateDTO(String requestNo) {}
+    static final class SalesReturnApplicationVO {}
+    static final class ErpSalesReturnOrder {}
+    static final class ReturnRepository {
+        ErpSalesReturnOrder findByRequestNo(Long tenantId, String requestNo) { return null; }
+        void save(ErpSalesReturnOrder order) {}
+    }
+}
+EOF
+cat >"$sales_return_repo/sql/platform_erp.sql" <<'EOF'
+CREATE TABLE erp_sales_return_order (
+  tenant_id BIGINT NOT NULL,
+  request_no VARCHAR(64) NOT NULL,
+  is_deleted TINYINT NOT NULL,
+  UNIQUE KEY uk_sales_return_order_request_tenant (tenant_id, request_no, is_deleted)
+);
+EOF
+git -C "$sales_return_repo" add .
+git -C "$sales_return_repo" commit -qm sales-return-idempotency-base
+sed -i '' 's/findByRequestNo(tenantId, requestNo);/findByRequestNo(tenantId, requestNo); \/\/ changed/' \
+  "$sales_return_repo/src/main/java/com/bit/erp/application/salesreturn/SalesReturnApplication.java"
+sales_return_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$sales_return_capture" \
+  "$repo_root/bin/local-review.sh" --repo "$sales_return_repo")"
+printf '%s\n' "$sales_return_output" | grep -F '退货创建并提交在租户级唯一 requestNo 前只做普通查询' >/dev/null || {
+  echo 'missing sales-return idempotency race preflight' >&2
+  printf '%s\n' "$sales_return_output" >&2
+  exit 1
+}
+for sales_return_field in '影响：' '修复建议：' '验证方式：'; do
+  sales_return_field_count="$(printf '%s\n' "$sales_return_output" | grep -c "$sales_return_field" || true)"
+  [[ "$sales_return_field_count" -eq 1 ]] || {
+    echo "sales-return idempotency preflight field count mismatch for $sales_return_field: $sales_return_field_count" >&2
+    printf '%s\n' "$sales_return_output" >&2
+    exit 1
+  }
+done
+sed -i '' 's/findByRequestNo(tenantId, requestNo); \/\/ changed/findByRequestNoForUpdate(tenantId, requestNo); \/\/ changed/' \
+  "$sales_return_repo/src/main/java/com/bit/erp/application/salesreturn/SalesReturnApplication.java"
+guarded_sales_return_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$sales_return_capture" \
+  "$repo_root/bin/local-review.sh" --repo "$sales_return_repo")"
+if printf '%s\n' "$guarded_sales_return_output" | grep -F '退货创建并提交在租户级唯一 requestNo 前只做普通查询' >/dev/null; then
+  echo 'sales-return idempotency preflight reported a flow with request-row locking' >&2
+  printf '%s\n' "$guarded_sales_return_output" >&2
+  exit 1
+fi
+
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '{"response":"P1 application-prod-username.yml:4 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。\\n\\nP1 application-prod-username.yml:5 - 配置文件新增了疑似硬编码凭据。\\n影响：凭据可能泄漏。\\n修复建议：改用运行时注入。\\n验证方式：检查生产配置。","done":true,"done_reason":"stop"}\n'

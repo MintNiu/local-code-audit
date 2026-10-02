@@ -387,3 +387,4 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 2026-10-02：复核 `platform-erp-service:c6df653f25bef50b480354cd6ea619c8e3f0700f` 直采寻货提交。个人 tuned 双跑均 10/10 分片完整，93/55 秒，结果 SHA-256 均为 `9043c1d8899cc7ef049a89d5479222a70d063233af3789eea83f6bf64b193bb6`；稳定报告一个供方-目标仓隔离 P1，定位到 `SalesStockSearchApplication.java:371`。新增预检覆盖 `resolveTargetWarehouse` 与 `resolveDirectTargetWarehouse` 两种方法名，并通过普通仓库查询 clean 负例。该真实根因等待人工标签归并后再进入正式 scorecard。
 
 同轮复核逻辑仓 SKU 提交 `platform-erp-service:fb8a35780b64c8aca9df569f20071869b45f0ef2` 为稳定 clean；目标提交尚未出现后续 `occupiedQuantity` 字段，故不把后续状态证据倒灌到历史金标。当前代码仍保留占用明细替换防回归预检，但该提交不计入 gold 分母。
+2026-10-02：复核 `platform-erp-service:dbeb99f` 退货创建并提交接口时发现幂等竞态：租户级 `request_no` 唯一键存在，但 `createAndSubmit` 在普通 `findByRequestNo` 后直接插入，没有 requestNo 锁或唯一键冲突恢复；不同订单并发复用同一 requestNo 时后一请求可能返回未处理数据库异常。新增窄范围确定性 P1 预检和带锁/重复键恢复负例，`test-preflight.sh`、历史回归、证据过滤回归均通过。该提交作为调优来源候选记录，不直接计入最终未见 holdout；当前正式门禁仍剩至少 13 个独立真实 P0/P1 根因、双跑、定位与误报标注。

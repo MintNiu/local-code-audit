@@ -6198,6 +6198,81 @@ collect_logical_warehouse_sku_replace_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sales_return_idempotency_race_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file schema_file method_block line_number
+  [[ -n "$source_root" ]] || return 0
+
+  # A tenant-wide unique request_no is not sufficient when the application
+  # performs a plain read followed by insert. Keep this guard project-shaped:
+  # require the changed create-and-submit flow, the current SQL unique key,
+  # and no visible duplicate-key recovery or request-row lock in that method.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-sales-return-idempotency-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = ""; next }
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ b\//) {
+        code = substr($0, 2)
+        if (path ~ /(^|\/)SalesReturnApplication\.java$/ &&
+            code ~ /findByRequestNo[[:space:]]*\([[:space:]]*tenantId[[:space:]]*,[[:space:]]*requestNo[[:space:]]*\)/) {
+          printf "%s\t%d\n", path, new_line
+        }
+        new_line++
+      } else if (prefix != "-") {
+        new_line++
+      }
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    grep -Eq 'createAndSubmit[[:space:]]*\(' "$source_file" || continue
+    method_block="$(awk '
+      /public[[:space:]]+SalesReturnApplicationVO[[:space:]]+createAndSubmit[[:space:]]*\(/ { in_method = 1 }
+      in_method { print }
+      in_method && /^    }[[:space:]]*$/ { exit }
+    ' "$source_file")"
+    [[ -n "$method_block" ]] || continue
+    printf '%s\n' "$method_block" | grep -Eq 'findByRequestNo[[:space:]]*\([[:space:]]*tenantId[[:space:]]*,[[:space:]]*requestNo[[:space:]]*\)' || continue
+    printf '%s\n' "$method_block" | grep -Eq 'returnRepository\.save[[:space:]]*\([[:space:]]*order[[:space:]]*\)' || continue
+    if printf '%s\n' "$method_block" | grep -Eqi 'findByRequestNoForUpdate|DuplicateKeyException|DataIntegrityViolationException|duplicate[[:space:]_-]*key'; then
+      continue
+    fi
+
+    schema_file="$source_root/sql/platform_erp.sql"
+    [[ -f "$schema_file" ]] || continue
+    grep -Eq 'uk_sales_return_order_request_tenant' "$schema_file" || continue
+    grep -Eqi 'UNIQUE.*request_no' "$schema_file" || continue
+    line_number="$(grep -n -m1 -E 'findByRequestNo[[:space:]]*\([[:space:]]*tenantId[[:space:]]*,[[:space:]]*requestNo[[:space:]]*\)' "$source_file" | cut -d: -f1)"
+    [[ "$line_number" =~ ^[0-9]+$ ]] || line_number="$candidate_line"
+    {
+      printf '%s\n' "P1 $candidate_path:$line_number - 退货创建并提交在租户级唯一 requestNo 前只做普通查询，随后直接插入，未处理并发相同幂等号的唯一键竞态。"
+      printf '%s\n' '影响：同一租户对不同订单并发使用相同 requestNo 时，一次请求可能插入成功，另一次落入数据库唯一键异常而不是返回幂等结果；客户端重试会放大 5xx、告警和重复提交风险。'
+      printf '%s\n' '修复建议：使用独立幂等记录或 requestNo 锁在插入前串行化，并在唯一键冲突时重新读取并比较请求内容后返回原结果；内容不一致必须明确拒绝。'
+      printf '%s\n' '验证方式：让同一租户不同订单并发提交相同 requestNo，确认最终只有一条记录且重复请求得到稳定幂等响应；再用不同明细复用该 requestNo，确认返回内容不一致错误而不是未处理数据库异常。'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_role_api_tenant_scope_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -8212,6 +8287,7 @@ collect_xxl_job_reliability_preflight "$chunk_input_file" "$build_preflight_file
 collect_sales_stock_warehouse_owner_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_shopping_cart_price_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_logical_warehouse_sku_replace_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sales_return_idempotency_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
