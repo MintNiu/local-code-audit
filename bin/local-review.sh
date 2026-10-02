@@ -4696,7 +4696,7 @@ collect_non_atomic_authorization_code_preflight() {
   local diff_file="$1"
   local output_file="$2"
   local source_root="${3:-}"
-  local candidates candidate_path candidate_line source_file
+  local candidates candidate_path candidate_line source_file source_window
 
   # A one-time authorization code is security-sensitive state.  Keep this
   # preflight deliberately narrow: require a changed SSO authorization-code
@@ -4740,9 +4740,15 @@ collect_non_atomic_authorization_code_preflight() {
     source_file="$source_root/$candidate_path"
     [[ -f "$source_file" ]] || continue
     grep -Eq 'getSsoAuthorizationCodeKey[[:space:]]*\(' "$source_file" || continue
-    grep -Eq 'redisUtil[[:space:]]*\.[[:space:]]*get[[:space:]]*\(' "$source_file" || continue
-    grep -Eq 'redisUtil[[:space:]]*\.[[:space:]]*delete[[:space:]]*\(' "$source_file" || continue
-    if grep -Eq 'redisUtil[[:space:]]*\.[[:space:]]*getAndDelete[[:space:]]*\(|opsForValue[[:space:]]*\(.*\)[[:space:]]*\.[[:space:]]*getAndDelete[[:space:]]*\(|GETDEL|compareAndDelete' "$source_file"; then
+    # The diff can add the same authorization-code key in both the issuer and
+    # the exchanger. Inspect only the bounded source window after the changed
+    # line so the issuer is not mistaken for the non-atomic consumer.
+    source_window="$(awk -v start="$candidate_line" '
+      NR >= start && NR <= start + 12 { print }
+    ' "$source_file")"
+    printf '%s\n' "$source_window" | grep -Eq 'redisUtil[[:space:]]*\.[[:space:]]*get[[:space:]]*\(' || continue
+    printf '%s\n' "$source_window" | grep -Eq 'redisUtil[[:space:]]*\.[[:space:]]*delete[[:space:]]*\(' || continue
+    if printf '%s\n' "$source_window" | grep -Eq 'redisUtil[[:space:]]*\.[[:space:]]*getAndDelete[[:space:]]*\(|opsForValue[[:space:]]*\(.*\)[[:space:]]*\.[[:space:]]*getAndDelete[[:space:]]*\(|GETDEL|compareAndDelete'; then
       continue
     fi
     {
