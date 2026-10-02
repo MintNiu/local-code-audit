@@ -22,6 +22,7 @@ extract_helper() {
 eval "$(extract_helper sort_findings_by_severity)"
 eval "$(extract_helper annotate_preflight_blocks)"
 eval "$(extract_helper merge_preflight_findings)"
+eval "$(extract_helper dedup_exact_findings)"
 
 model_file="$fixture_root/model.txt"
 preflight_file="$fixture_root/preflight.txt"
@@ -64,6 +65,32 @@ grep -F '来源：确定性预检（代码证据，非模型原文）' "$output_
 }
 [[ "$(cat "$kind_file")" == findings ]] || {
   echo 'visible findings were not marked as findings' >&2
+  exit 1
+}
+
+# A model block and a code-proven block can share the same location and risk
+# family while still carrying different evidence. The final shard dedup must
+# never hide either one under the all-findings contract.
+same_location_file="$fixture_root/same-location.txt"
+cat >"$same_location_file" <<'EOF'
+P1 src/main/java/example/Example.java:10 - MODEL_SAME_LOCATION：模型发现认证令牌暴露，且还存在独立的租户边界风险。
+影响：凭据和租户数据可能被泄露。
+修复建议：脱敏令牌并校验当前租户。
+验证方式：执行跨租户和凭据暴露回归。
+
+P1 src/main/java/example/Example.java:10 - PREFLIGHT_SAME_LOCATION：代码证据确认认证令牌从 URL 查询参数读取。
+来源：确定性预检（代码证据，非模型原文）
+影响：令牌可能进入访问日志。
+修复建议：改用受保护的请求头。
+验证方式：检查代理日志。
+EOF
+same_location_output="$(dedup_exact_findings <"$same_location_file")"
+grep -F 'MODEL_SAME_LOCATION' <<<"$same_location_output" >/dev/null || {
+  echo 'same-location model finding was hidden by dedup' >&2
+  exit 1
+}
+grep -F 'PREFLIGHT_SAME_LOCATION' <<<"$same_location_output" >/dev/null || {
+  echo 'same-location preflight finding was hidden by dedup' >&2
   exit 1
 }
 

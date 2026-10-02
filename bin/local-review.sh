@@ -1098,6 +1098,12 @@ dedup_exact_findings() {
       blocks[++count] = block
       keys[count] = key
       bodies[count] = body_text
+      # A deterministic preflight block and a model block may point to the
+      # same path/range while carrying different evidence. Keep both visible
+      # under the all-findings contract; only compare blocks from the same
+      # provenance class for semantic deduplication.
+      source_block[count] = (body_text ~ /来源：确定性预检（代码证据，非模型原文）/ ||
+                             body_text ~ /来源：确定性锁序预检（代码证据，非模型原文）/)
       has_null[count] = (body_text ~ /null|NullPointerException|空/)
       has_div[count] = (body_text ~ /ArithmeticException|除零|除数|b[[:space:]]*==[[:space:]]*0/)
       has_credential[count] = (body_text ~ /凭据|AccessKey|Secret|secret|password|passwd|token|令牌|硬编码/)
@@ -1155,12 +1161,12 @@ dedup_exact_findings() {
       # implementation could print an early P2 and only later discover a
       # more severe P1 for the same location, leaving both in the report.
       for (i = 1; i <= count; i++) {
-        aggregate = has_null[i] && has_div[i]
-        if (aggregate) {
-          null_component = 0
-          div_component = 0
-          for (j = 1; j <= count; j++) {
-            if (j == i || keys[j] != keys[i]) continue
+          aggregate = has_null[i] && has_div[i]
+          if (aggregate) {
+            null_component = 0
+            div_component = 0
+            for (j = 1; j <= count; j++) {
+            if (j == i || keys[j] != keys[i] || source_block[j] != source_block[i]) continue
             if (has_null[j] && !has_div[j]) null_component = 1
             if (has_div[j] && !has_null[j]) div_component = 1
           }
@@ -1174,7 +1180,7 @@ dedup_exact_findings() {
       for (i = 1; i <= count; i++) {
         if (skipped[i] || !has_credential[i]) continue
         for (j = 1; j <= count; j++) {
-          if (i == j || skipped[j] || keys[j] != keys[i] || !has_credential[j] ||
+          if (i == j || skipped[j] || source_block[j] != source_block[i] || keys[j] != keys[i] || !has_credential[j] ||
               credential_family[j] == "" || credential_family[j] != credential_family[i]) continue
           if (severity[j] < severity[i] || (severity[j] == severity[i] && j < i)) {
             skipped[i] = 1
@@ -1188,7 +1194,7 @@ dedup_exact_findings() {
       for (i = 1; i <= count; i++) {
         if (skipped[i] || finding_family[i] == "") continue
         for (j = 1; j <= count; j++) {
-          if (i == j || skipped[j] || keys[j] != keys[i] || finding_family[j] != finding_family[i]) continue
+          if (i == j || skipped[j] || source_block[j] != source_block[i] || keys[j] != keys[i] || finding_family[j] != finding_family[i]) continue
           if (severity[j] < severity[i] || (severity[j] == severity[i] && j < i)) {
             skipped[i] = 1
             break
@@ -8566,7 +8572,14 @@ if [[ "$has_findings" == true ]]; then
   # is ordered independently, so lexical chunk order cannot guarantee P0/P1
   # findings appear before lower-severity findings. Keep every model block;
   # source markers distinguish deterministic preflight additions.
-  sort_findings_by_severity <"$combined_output_file" | dedup_deterministic_preflight_blocks
+  # A large diff can surface the same semantic finding from several shards
+  # with slightly different wording. Collapse only same-root duplicates after
+  # restoring severity order; distinct locations, expressions, and independent
+  # roots remain visible. Deterministic preflight blocks are then deduplicated
+  # by their complete provenance-marked paragraph.
+  sort_findings_by_severity <"$combined_output_file" \
+    | dedup_exact_findings \
+    | dedup_deterministic_preflight_blocks
 else
   printf '未发现阻塞问题\n'
 fi
