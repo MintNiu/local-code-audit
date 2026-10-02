@@ -868,3 +868,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同轮复核 `platform-erp-service:fb8a35780b64c8aca9df569f20071869b45f0ef2` 逻辑仓 SKU 提交时，两轮均稳定 clean；人工核对发现 `occupiedQuantity` 字段并不存在于该目标提交，而是后续状态才加入，因此没有把未来代码证据反推为历史问题。针对当前代码仍保留“替换明细前保护占用行”的防回归预检，但该提交不计为 gold 根因。
 
 2026-10-02：补充退货创建并提交的幂等竞态预检。复核 `platform-erp-service:dbeb99f` 时确认，`SalesReturnApplication.createAndSubmit` 在租户级 `uk_sales_return_order_request_tenant` 唯一键前使用普通 `findByRequestNo`，随后直接保存；同一租户对不同订单并发复用 requestNo 时，订单行锁不能互相串行，后一请求可能落入唯一键异常而不是返回稳定幂等结果。运行器新增窄范围 P1 预检，必须同时看到当前差异中的 `findByRequestNo(tenantId, requestNo)`、同一方法直接 `save(order)`、现行 SQL 唯一键，且没有 requestNo 行锁或重复键恢复；带锁/竞态恢复的负例保持 clean。该规则和四字段输出回归已通过，并在真实直采快照中验证没有破坏既有供方隔离预检。该样本属于本轮规则设计来源，先记为候选根因，不直接增加正式未见 holdout 分母；阶段一仍需至少 13 个未参与调优的独立真实 P0/P1 根因。
+
+同日补充 `platform-auth:d5317b6691edaba122a3eba71ad0a538d7b84f6b` 手机号响应字段样本。个人 tuned 入口两轮均 1/1 分片完整，耗时 41/5 秒，finding signature 和结果均为 clean。人工复核确认该差异只是把当前已认证用户自己的 `SysUser.mobile` 复制到通用登录响应；没有跨用户、跨租户查询或第三方号码拼接证据，因此标记为 clean 对照，不把“出现手机号字段”泛化成隐私泄露问题。
