@@ -4404,6 +4404,121 @@ printf '%s\n' "$session_token_output" | grep -F '在线会话查询返回对象�
   exit 1
 }
 
+# A one-time SSO authorization code must be consumed atomically.  A plain
+# GET followed by DELETE lets two concurrent exchanges observe the same code
+# before either request removes it.  The fixture starts from an atomic
+# getAndDelete implementation and changes only the consumption sequence so
+# the deterministic preflight is exercised through the diff, not the whole
+# repository snapshot.
+sso_auth_code_repo="$fixture_root/sso-auth-code-repo"
+mkdir -p "$sso_auth_code_repo/src/main/java/example/sso"
+git -C "$sso_auth_code_repo" init -q
+git -C "$sso_auth_code_repo" config user.email test@example.invalid
+git -C "$sso_auth_code_repo" config user.name preflight-sso-auth-code
+cat >"$sso_auth_code_repo/src/main/java/example/sso/SsoController.java" <<'EOF'
+package example.sso;
+
+final class SsoController {
+    private final RedisUtil redisUtil = new RedisUtil();
+
+    String exchangeCode(String code) {
+        String key = RedisKeyUtil.getSsoAuthorizationCodeKey(code);
+        Object cached = redisUtil.getAndDelete(key);
+        return cached == null ? null : "/sso/token";
+    }
+
+    static final class RedisUtil {
+        Object getAndDelete(String key) { return key; }
+    }
+
+    static final class RedisKeyUtil {
+        static String getSsoAuthorizationCodeKey(String code) { return code; }
+    }
+}
+EOF
+git -C "$sso_auth_code_repo" add .
+git -C "$sso_auth_code_repo" commit -qm sso-auth-code-base
+python3 - "$sso_auth_code_repo/src/main/java/example/sso/SsoController.java" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+old = '        Object cached = redisUtil.getAndDelete(key);'
+new = '        Object cached = redisUtil.get(key);\n        redisUtil.delete(key);'
+if old not in text:
+    raise SystemExit('SSO authorization-code fixture mutation anchor missing')
+path.write_text(text.replace(old, new, 1))
+PY
+sso_auth_code_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$sso_auth_code_repo")"
+printf '%s\n' "$sso_auth_code_output" | grep -F '一次性授权码先读取后删除，消费过程非原子，存在并发重放风险' >/dev/null || {
+  echo 'SSO authorization-code non-atomic preflight missed the positive fixture' >&2
+  printf '%s\n' "$sso_auth_code_output" >&2
+  exit 1
+}
+sso_auth_code_p1_count="$(printf '%s\n' "$sso_auth_code_output" | grep -c '^P1 ' || true)"
+[[ "$sso_auth_code_p1_count" -eq 1 ]] || {
+  echo "SSO authorization-code preflight emitted duplicate or malformed blocks: $sso_auth_code_p1_count" >&2
+  printf '%s\n' "$sso_auth_code_output" >&2
+  exit 1
+}
+for sso_auth_code_field in '影响：' '修复建议：' '验证方式：' '来源：确定性预检（代码证据，非模型原文）'; do
+  sso_auth_code_field_count="$(printf '%s\n' "$sso_auth_code_output" | grep -c "$sso_auth_code_field" || true)"
+  [[ "$sso_auth_code_field_count" -eq 1 ]] || {
+    echo "SSO authorization-code preflight field count mismatch for $sso_auth_code_field: $sso_auth_code_field_count" >&2
+    printf '%s\n' "$sso_auth_code_output" >&2
+    exit 1
+  }
+done
+
+# The same endpoint remains clean when the atomic operation is retained.  A
+# changed comment proves the negative assertion is evaluated against the
+# resulting diff rather than merely matching a repository-wide keyword.
+sso_auth_code_safe_repo="$fixture_root/sso-auth-code-safe-repo"
+mkdir -p "$sso_auth_code_safe_repo/src/main/java/example/sso"
+git -C "$sso_auth_code_safe_repo" init -q
+git -C "$sso_auth_code_safe_repo" config user.email test@example.invalid
+git -C "$sso_auth_code_safe_repo" config user.name preflight-sso-auth-code-safe
+cp "$sso_auth_code_repo/src/main/java/example/sso/SsoController.java" \
+  "$sso_auth_code_safe_repo/src/main/java/example/sso/SsoController.java"
+# Restore the safe operation in the copied source; the positive repository is
+# intentionally left untouched for the assertion above.
+python3 - "$sso_auth_code_safe_repo/src/main/java/example/sso/SsoController.java" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    '        Object cached = redisUtil.get(key);\n        redisUtil.delete(key);',
+    '        Object cached = redisUtil.getAndDelete(key);',
+    1,
+)
+path.write_text(text)
+PY
+git -C "$sso_auth_code_safe_repo" add .
+git -C "$sso_auth_code_safe_repo" commit -qm sso-auth-code-safe-base
+python3 - "$sso_auth_code_safe_repo/src/main/java/example/sso/SsoController.java" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+old = '        String key = RedisKeyUtil.getSsoAuthorizationCodeKey(code);'
+new = '        String key = RedisKeyUtil.getSsoAuthorizationCodeKey(code); // safe atomic consume'
+if old not in text:
+    raise SystemExit('SSO safe fixture mutation anchor missing')
+path.write_text(text.replace(old, new, 1))
+PY
+sso_auth_code_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$sso_auth_code_safe_repo")"
+if printf '%s\n' "$sso_auth_code_safe_output" | grep -F '一次性授权码先读取后删除，消费过程非原子，存在并发重放风险' >/dev/null; then
+  echo 'SSO authorization-code preflight reported the safe atomic fixture' >&2
+  printf '%s\n' "$sso_auth_code_safe_output" >&2
+  exit 1
+fi
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.
