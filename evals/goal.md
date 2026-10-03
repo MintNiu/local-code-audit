@@ -464,7 +464,7 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 
 2026-10-04：完成独立替补与角色权限边界批次。`platform-auth:3d1eaac` 双轮完整稳定，新增 localhost 配置中的固定数据库/Redis/Nacos 凭据，按一个独立 P1 根因计入 holdout；`platform-system:ecc8d75` 的 `RolePermissionApplication` 菜单/部门跨租户绑定预检在真实快照稳定命中，转为 tuning-source。当前独立表为 17 个记录（严格排除 HR 条件样本为 16 个），严格 gold P0/P1 为 16 个、命中 7 个，严格召回约 43.8%；tuning-source 为 7 个。按阶段一门禁仍需至少 4 个未见的新 P0/P1 根因，并至少补足 3 个独立提交记录，同时完成 train/dev/holdout split。
 
-2026-10-04：统一冻结 scorecard 口径并切换为高效率补样流程。私有冻结目录三张表完成只读一致性审计；候选 TSV 的缺失 `parent` 列、状态拼写和仓库名拼写已修复。最终计分以 `independent-probe-results.tsv` 的 `label_status` 为唯一依据：`manual-confirmed` 才进入独立 holdout，`manual-confirmed-conditional` 单独记录部署前置条件，`tuning-source` 只用于回归保护。当前严格独立表为 9 个 P0/P1 根因，命中 4 个，定位准确 4/4，双轮完整稳定 9/9，严格召回率 44.4%；另有 1 个 HR 部署条件样本和 13 个调优源。历史快照中的 16/17/20 等数字保留，但不再与当前最终口径混用。
+2026-10-04：统一冻结 scorecard 口径并切换为高效率补样流程。私有冻结目录三张表完成只读一致性审计；候选 TSV 的缺失 `parent` 列、状态拼写和仓库名拼写已修复。最终计分以 `independent-probe-results.tsv` 的 `label_status` 为唯一依据：`manual-confirmed` 才进入独立 holdout，`manual-confirmed-conditional` 单独记录部署前置条件，`tuning-source` 只用于回归保护。当前严格独立表为 9 个 P0/P1 根因，命中 4 个，定位准确 4/4，双轮完整稳定 9/9，严格召回率 44.4%；另有 1 个 HR 部署条件样本和 14 个调优源。历史快照中的 16/17/20 等数字保留，但不再与当前最终口径混用。
 
 为提高效率，后续流程固定为“静态证据预筛 → 多角色并行根因审计 → 只对通过审计的少量样本双跑 → 发现规则后立即移出 holdout 并补新样本”。静态预筛先排除冻结表已有样本、修复提交派生、同一凭据族和纯功能改动；模型双跑只用于未见根因的真值、定位与稳定性确认。任何新增预检命中的样本立即标记为 `tuning-source`，由下一批未参与设计的样本补回分母。当前仍需至少 11 个新的独立根因达到 20 个样本，并在最终冻结后重跑召回、误报、定位、稳定性与输出完整性门禁。
 
