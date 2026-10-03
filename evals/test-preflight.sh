@@ -5210,6 +5210,80 @@ if printf '%s\n' "$workflow_scope_safe_output" | grep -F "$workflow_scope_marker
   exit 1
 fi
 
+# Provider login must not resolve an external identity globally and then issue
+# a session for the matched tenant.  The positive fixture changes both the
+# application and mapper files so the location gate sees a real login diff.
+sso_scope_repo="$fixture_root/sso-provider-scope-repo"
+mkdir -p "$sso_scope_repo/src/main/java/com/bit/auth/application" "$sso_scope_repo/src/main/java/com/bit/auth/mapper"
+git -C "$sso_scope_repo" init -q
+git -C "$sso_scope_repo" config user.email test@example.invalid
+git -C "$sso_scope_repo" config user.name preflight-sso-provider-scope
+cat >"$sso_scope_repo/src/main/java/com/bit/auth/application/SsoProviderLoginApplication.java" <<'EOF'
+package com.bit.auth.application;
+final class SsoProviderLoginApplication {}
+EOF
+cat >"$sso_scope_repo/src/main/java/com/bit/auth/mapper/SysExternalIdentityMapper.java" <<'EOF'
+package com.bit.auth.mapper;
+interface SysExternalIdentityMapper {}
+EOF
+git -C "$sso_scope_repo" add .
+git -C "$sso_scope_repo" commit -qm sso-provider-scope-base
+cat >"$sso_scope_repo/src/main/java/com/bit/auth/application/SsoProviderLoginApplication.java" <<'EOF'
+package com.bit.auth.application;
+final class SsoProviderLoginApplication {
+    LoginResult login(SsoProviderLoginDTO dto) {
+        Binding binding = identityMapper.findByProviderCodeAndTerminalTypeAndExternalUserId(
+            dto.providerCode(), dto.terminalType(), dto.externalUserId());
+        return loginService.login(binding.getUserId(), binding.getTenantId());
+    }
+    private final SysExternalIdentityMapper identityMapper = null;
+    private final LoginService loginService = null;
+}
+EOF
+cat >"$sso_scope_repo/src/main/java/com/bit/auth/mapper/SysExternalIdentityMapper.java" <<'EOF'
+package com.bit.auth.mapper;
+@InterceptorIgnore(tenantLine = "true")
+interface SysExternalIdentityMapper {
+    @Select("SELECT user_id, tenant_id FROM sys_external_identity WHERE provider_code = #{providerCode} AND terminal_type = #{terminalType} AND external_user_id = #{externalUserId}")
+    Binding findByProviderCodeAndTerminalTypeAndExternalUserId(String providerCode, String terminalType, String externalUserId);
+}
+EOF
+sso_scope_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$sso_scope_repo")"
+sso_scope_marker='第三方登录绑定按外部身份查询未带租户边界'
+printf '%s\n' "$sso_scope_output" | grep -F "$sso_scope_marker" >/dev/null || {
+  echo 'sso provider scope preflight missed the vulnerable binding fixture' >&2
+  printf '%s\n' "$sso_scope_output" >&2
+  exit 1
+}
+sso_scope_p1_count="$(printf '%s\n' "$sso_scope_output" | grep -c '^P1 .*第三方登录绑定按外部身份查询未带租户边界' || true)"
+[[ "$sso_scope_p1_count" -eq 1 ]] || {
+  echo "sso provider scope preflight emitted duplicate or malformed blocks: $sso_scope_p1_count" >&2
+  printf '%s\n' "$sso_scope_output" >&2
+  exit 1
+}
+for sso_scope_field in '影响：' '修复建议：' '验证方式：' '证据行：' '来源：确定性预检'; do
+  [[ "$(printf '%s\n' "$sso_scope_output" | grep -cF "$sso_scope_field" || true)" -eq 1 ]] || {
+    echo "sso provider scope preflight omitted field: $sso_scope_field" >&2
+    printf '%s\n' "$sso_scope_output" >&2
+    exit 1
+  }
+done
+
+sso_scope_safe_repo="$fixture_root/sso-provider-scope-safe-repo"
+cp -R "$sso_scope_repo" "$sso_scope_safe_repo"
+perl -0pi -e 's/external_user_id = #\{externalUserId\}/external_user_id = #{externalUserId} AND tenant_id = #{tenantId}/' \
+  "$sso_scope_safe_repo/src/main/java/com/bit/auth/mapper/SysExternalIdentityMapper.java"
+perl -0pi -e 's/dto\.externalUserId\(\)\);/dto.externalUserId(), dto.tenantId());\n        assertTenantMembership(binding);/' \
+  "$sso_scope_safe_repo/src/main/java/com/bit/auth/application/SsoProviderLoginApplication.java"
+sso_scope_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$sso_scope_safe_repo")"
+if printf '%s\n' "$sso_scope_safe_output" | grep -F "$sso_scope_marker" >/dev/null; then
+  echo 'sso provider scope preflight reported the tenant-scoped safe fixture' >&2
+  printf '%s\n' "$sso_scope_safe_output" >&2
+  exit 1
+fi
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.

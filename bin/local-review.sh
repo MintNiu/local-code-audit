@@ -6732,13 +6732,89 @@ collect_gateway_workflow_application_scope_preflight() {
 
   while IFS=$'\t' read -r route_path route_line; do
     [[ -n "$route_path" && "$route_line" =~ ^[0-9]+$ ]] || continue
-    printf '%s\n%s\n%s\n%s\n%s\n%s\n\n' \
+    printf '%s\n%s\n%s\n%s\n%s\n\n' \
       "P1 $route_path:$route_line - 新增 /workflow/** 网关路由未加入业务应用租户映射，空 applicationCode 分支会绕过应用授权。" \
       '影响：普通租户可能访问未开通的 workflow 能力，平台租户切换也可能跳过目标租户的 workflow 应用授权，形成跨租户边界绕过。' \
       '修复建议：在 BUSINESS_APPLICATION_BY_PATH_PREFIX 中加入精确的 /workflow/ 到业务应用编码映射，并保持内部 workflow 路径的显式限制；空 applicationCode 或无法解析应用时默认拒绝。' \
       '验证方式：使用未开通 workflow 的普通租户、已开通租户和 ROOT 切换目标租户分别请求 /workflow/**，断言未授权均拒绝且 hasEnabledAccess("workflow", tenant) 被校验。' \
-      "证据行：SaTokenAuthGlobalFilter.java:${map_line}（应用映射）、:${resolve_line}（应用解析）、:${allow_line}（空 applicationCode 放行）、:${internal_line}（内部路径例外）。" \
-      '来源：确定性预检（代码证据，非模型原文）。' >>"$output_file"
+      "证据行：SaTokenAuthGlobalFilter.java:${map_line}（应用映射）、:${resolve_line}（应用解析）、:${allow_line}（空 applicationCode 放行）、:${internal_line}（内部路径例外）。" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_sso_provider_login_tenant_scope_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates app_file mapper_file changed_path changed_line mapper_line
+  [[ -n "$source_root" ]] || return 0
+
+  # Only inspect a changed provider-login/identity binding surface.  The
+  # finding requires all three runtime links: external identity input,
+  # tenant-ignored identity lookup, and session/token issuance.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-sso-provider-scope-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ / &&
+          path ~ /(SsoProviderLoginApplication|SysExternalIdentityMapper|ExternalIdentityRepository)\.java$/)
+        printf "%s\t%d\n", path, line_no
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+  [[ -s "$candidates" ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+
+  app_file="$(find "$source_root" -type f -name 'SsoProviderLoginApplication.java' -print -quit 2>/dev/null || true)"
+  mapper_file="$(find "$source_root" -type f -name 'SysExternalIdentityMapper.java' -print -quit 2>/dev/null || true)"
+  [[ -n "$app_file" && -f "$app_file" && -n "$mapper_file" && -f "$mapper_file" ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eiq 'provider(Code)?|terminal(Type)?|external(UserId|OpenId|UnionId)|openId|unionId' "$app_file" || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eiq 'binding[^[:space:]]*(UserId|TenantId|userId|tenantId)|loginService[[:space:]]*[.]?[[:space:]]*login|issue(Session|Token)|create(Token|Session)' "$app_file" || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eiq "@InterceptorIgnore[[:space:]]*\\([^)]*tenantLine[[:space:]]*=[[:space:]]*['\"]true['\"]" "$mapper_file" || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eiq 'provider(_code)?|external(_user)?_?(id|open_id|union_id)|openId|unionId' "$mapper_file" || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eiq '(WHERE|AND|OR)[[:space:]]+tenant_id[[:space:]]*=' "$mapper_file" && {
+    rm -f "$candidates"
+    return 0
+  }
+
+  mapper_line="$(grep -nE '@InterceptorIgnore|@Select|FROM[[:space:]]+sys_external_identity|provider(_code)?|external' "$mapper_file" | head -n 1 | cut -d: -f1)"
+  mapper_line="${mapper_line:-?}"
+  while IFS=$'\t' read -r changed_path changed_line; do
+    [[ -n "$changed_path" && "$changed_line" =~ ^[0-9]+$ ]] || continue
+    printf '%s\n%s\n%s\n%s\n%s\n\n' \
+      "P1 $changed_path:$changed_line - 第三方登录绑定按外部身份查询未带租户边界，可能把其他租户的身份绑定直接换成当前登录态。" \
+      '影响：攻击者可在 provider/terminal/externalUserId 可控时命中其他租户的绑定记录，再获得该租户用户的会话或令牌，形成跨租户身份冒用。' \
+      '修复建议：身份查询和唯一键显式包含 tenantId，并从已验证的登录上下文或 SSO state 获取；签发登录态前再次校验 binding.tenantId 与当前租户/应用归属，禁止直接信任回调或请求参数。' \
+      '验证方式：用同一外部身份在两个租户分别绑定，交叉提交 provider/terminal/externalUserId 和伪造租户参数，断言只能命中当前租户绑定且跨租户登录被拒绝。' \
+      "证据行：${app_file##*/} 外部身份输入与登录态签发；${mapper_file##*/}:$mapper_line 忽略租户且查询未包含 tenant_id。" >>"$output_file"
+    break
   done <"$candidates"
   rm -f "$candidates"
   dedup_preflight_blocks "$output_file"
@@ -9085,6 +9161,7 @@ collect_sales_return_idempotency_race_preflight "$chunk_input_file" "$build_pref
 collect_sales_payment_voucher_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_inventory_stock_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_gateway_workflow_application_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sso_provider_login_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
