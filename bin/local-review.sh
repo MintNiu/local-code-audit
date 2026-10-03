@@ -7025,6 +7025,106 @@ collect_system_dept_tenant_write_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_bafan_admin_role_menu_authorization_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file mvc_file module_web_config interceptor_file candidate_path candidate_line
+  local method_text locations first_path first_line permission_registered
+  [[ -n "$source_root" ]] || return 0
+
+  # Match only the Bafan role-menu write endpoints.  A valid admin JWT proves
+  # authentication, not permission to rewrite RBAC bindings; the concrete
+  # service methods delete/rebuild role-menu rows or initialize several roles.
+  # Keep method-level guards and a registered permission interceptor as clean
+  # boundaries so this does not become a generic role-controller heuristic.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-bafan-role-menu-authz-candidates.XXXXXX")"
+  awk '
+    function is_role_path(value) {
+      return value == "src/main/java/com/bofan/modules/admin/controller/AdminRoleController.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_role_path(path) &&
+          (text ~ /@PutMapping\("\/[^"]*menus"\)/ ||
+           text ~ /@PostMapping\("\/init-role-menus"\)/)) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+
+  controller_file="$source_root/src/main/java/com/bofan/modules/admin/controller/AdminRoleController.java"
+  mvc_file="$source_root/src/main/java/com/bofan/common/config/WebMvcConfig.java"
+  module_web_config="$source_root/src/main/java/com/bofan/modules/admin/config/WebConfig.java"
+  interceptor_file="$source_root/src/main/java/com/bofan/modules/admin/interceptor/AdminAuthInterceptor.java"
+  if [[ ! -f "$controller_file" || ! -f "$interceptor_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bofan/modules/admin/controller/AdminRoleController.java" ||
+     path_has_symlink_component "src/main/java/com/bofan/modules/admin/interceptor/AdminAuthInterceptor.java" ||
+     ! grep -Fq '@RequestMapping("/admin/role")' "$controller_file" ||
+     ! grep -Fq 'AdminContext.setRole' "$interceptor_file" ||
+     ! ( { [[ -f "$mvc_file" ]] && grep -Fq 'addPathPatterns("/admin/**")' "$mvc_file"; } ||
+         { [[ -f "$module_web_config" ]] && grep -Fq 'addPathPatterns("/admin/**")' "$module_web_config"; } ); then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  permission_registered=false
+  if rg -n -g '*.java' 'addInterceptor\([[:space:]]*adminPermissionInterceptor\)|AdminPermissionInterceptor' \
+      "$source_root/src/main/java" >/dev/null 2>&1; then
+    permission_registered=true
+  fi
+  [[ "$permission_registered" == false ]] || { rm -f "$candidates"; return 0; }
+
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_root/$candidate_path" "$candidate_line" --masked-comments 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    if printf '%s\n' "$method_text" | grep -Eqi '@PreAuthorize|@Secured|@RolesAllowed|@RequiresPermissions|@Permission|@SaCheckPermission|hasPermission[[:space:]]*\('; then
+      continue
+    fi
+    if ! printf '%s\n' "$method_text" | grep -Eqi 'roleService\.(saveRoleMenus|initBasicRoleMenus)[[:space:]]*\('; then
+      continue
+    fi
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+  [[ -n "$locations" ]] || { rm -f "$candidates"; return 0; }
+
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 角色菜单写接口只有 JWT 认证，缺少角色/权限授权校验，低权限后台账号可直接改写 RBAC 菜单绑定或触发全局角色初始化。" \
+    "影响：任何拥有有效后台账号但没有角色管理权限的管理员，都可能调用 /admin/role/{roleId}/menus 修改任意角色的菜单关联，或调用 /admin/role/init-role-menus 重建多个基础角色权限，导致越权获得后台能力、权限模型被破坏以及现有授权关系被覆盖。" \
+    "修复建议：为角色菜单读取/写入和初始化接口配置稳定的权限规则（例如 role:list、role:assign、仅超级管理员的初始化权限），并在服务层再次校验当前管理员是否有权操作目标角色；采用默认拒绝的权限拦截器或方法级授权，不能把 JWT 有效、角色字段或操作日志当作授权。" \
+    "验证方式：使用有效但无角色管理权限的管理员 JWT，分别请求 PUT /admin/role/{roleId}/menus 和 POST /admin/role/init-role-menus，确认返回 403 且 role_menu 表不变；授权角色验证允许路径，并覆盖任意 roleId、空/超大 menuIds、并发更新和直接调用 service 的服务层授权。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_bafan_admin_category_authorization_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11005,6 +11105,7 @@ collect_system_dict_global_authorization_preflight "$chunk_input_file" "$build_p
 collect_bafan_oss_anonymous_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_bafan_public_entity_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_dept_tenant_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_bafan_admin_role_menu_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_bafan_admin_category_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_application_secret_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_api_resource_sync_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
