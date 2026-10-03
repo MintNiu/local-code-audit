@@ -439,3 +439,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 2026-10-03：针对 `platform-job:4a0850b` 的稳定漏报新增 XXL-JOB 空 `accessToken` fail-open 预检。仅当 `xxl-job-admin` 运行配置新增空最终回退、当前 `OpenApiController` 方法在 token 非空时才比较、且 `PlatformJobSecurityConfig` 对 `/api/**` 使用 `permitAll` 时报告一个聚合 P1；非空 dev 回退、普通配置 key、缺少端点证据或默认拒绝实现均保持 clean。正负 fixture 与完整确定性回归通过。该提交已经参与规则调优，后续结果只能作为 tuning-source/稳定性证据，不能计入独立 holdout；正式门禁仍需要新的未见根因、双跑、定位准确率和误报标签。
 
 同一 `platform-job:4a0850b` 长提交在个人 profile 默认 3KB 下被拆为 140 片并因总超时 fail-closed；受控 12KB 配置下为 35 片，两轮均完整稳定（1127/1105 秒），空令牌 P1 在真实差异中可见。结合既有 6KB 大提交稳定证据，个人 wrapper 默认分片预算调整为 6000 字节；12KB 仅作为受控复测参数，通用 core 仍为 3000 字节。该 tuning-source 结果不进入独立召回分母。
+
+2026-10-03：对 `platform-publishing-mcp-service:6cb134b` 的工作区边界新增窄范围符号链接逃逸预检。仅当两个具体 MCP 工具类新增 `workspaceRoot.resolve(...).normalize()`、实际执行 DOCX 读写/目录创建/LibreOffice 进程操作，且当前快照没有 realpath 或 `NOFOLLOW_LINKS` 等链接防护时报告聚合 P1；已有真实路径校验和普通路径工具不触发。正负 fixture 已通过，真实双轮复测待完成；该提交参与规则设计，不能计入独立 holdout，后续需用未见根因替补。

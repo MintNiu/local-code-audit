@@ -936,3 +936,9 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 新增正负 fixture 已通过：正例只输出一条 P1 并列出多个配置位置，开发环境非空回退不会混入；`test-preflight.sh`、分片预检、分片、输出可见性、证据过滤和 HTTP SSRF 回归全部通过。该规则针对的 `4a0850b` 已参与调优，后续复跑结果只作为 tuning-source/工程稳定性证据，不回填正式 holdout；仍需由未参与规则设计的新根因替补，并完成双跑、定位和误报标签。
 
 同一提交的真实长尾复测也完成了分片预算对照：个人 profile 默认 3KB 时产生 140 个分片并在 2400 秒总预算内 fail-closed；受控 12KB 配置降为 35 个分片，两轮分别 1127/1105 秒完整结束，finding signature 稳定且空令牌 P1 可见。基于该结果与此前 6KB 大提交双跑证据，个人 wrapper 默认调整为 6KB；12KB 只保留为超大提交的受控复测参数，通用 core 仍保持 3KB。任何分片超时、截断或不完整响应仍按失败处理，不用提高总超时掩盖容量问题。
+
+### 2026-10-03：补齐出版 MCP 工作区符号链接逃逸预检
+
+对 `platform-publishing-mcp-service:6cb134b` 的路径边界进行源码复核后，新增 `collect_publishing_workspace_symlink_preflight`。规则只匹配两个具体出版 MCP 工具类：当前差异新增 `workspaceRoot.resolve(...).normalize()`，同一快照中确实存在 DOCX 文件读写、目录创建或 LibreOffice 进程启动，同时没有 `toRealPath`、`isSymbolicLink`、`NOFOLLOW_LINKS` 或属性级链接防护。普通 Java 路径拼接、已有真实路径校验和不涉及文件/进程操作的工具均保持 clean；多个工具位置聚合成一个 P1。
+
+正负 fixture 已通过，下一步将对该提交做真实双轮复测。由于该提交会参与规则设计，真实结果只进入 tuning-source 回归，不增加正式 holdout；若规则在真实大差异中稳定可见，再用新的未参与规则设计根因替补盲测分母。

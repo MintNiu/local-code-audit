@@ -5953,6 +5953,81 @@ collect_xxl_job_empty_token_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_publishing_workspace_symlink_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line document_file tools_file locations first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # A lexical `normalize().startsWith(workspaceRoot)` check does not contain
+  # filesystem symlinks.  The publishing MCP tools subsequently read/write
+  # DOCX files, create job directories, and launch LibreOffice, so an
+  # attacker-controlled link inside a job workspace can escape the intended
+  # root.  Keep this rule tied to the two concrete tool classes and require
+  # the current source to lack real-path/link defenses; ordinary path joining
+  # in unrelated services remains out of scope.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-publishing-symlink-candidates.XXXXXX")"
+  awk '
+    function publishing_tool_path(value) {
+      return value ~ /^src\/main\/java\/com\/bit\/publishing\/mcp\/tool\/(PublishingDocumentTools|PublishingMcpTools)\.java$/
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && publishing_tool_path(path) &&
+          text ~ /workspaceRoot[[:space:]]*\.[[:space:]]*resolve[[:space:]]*\(/ &&
+          text ~ /normalize[[:space:]]*\([[:space:]]*\)/) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  document_file="$source_root/src/main/java/com/bit/publishing/mcp/tool/PublishingDocumentTools.java"
+  tools_file="$source_root/src/main/java/com/bit/publishing/mcp/tool/PublishingMcpTools.java"
+  if [[ ! -f "$document_file" || ! -f "$tools_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/mcp/tool/PublishingDocumentTools.java" ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/mcp/tool/PublishingMcpTools.java" ||
+     ! grep -Eq 'workspaceRoot[[:space:]]*\.[[:space:]]*resolve[[:space:]]*\([^;]+\)[[:space:]]*\.[[:space:]]*normalize[[:space:]]*\(' "$document_file" ||
+     ! grep -Eq 'workspaceRoot[[:space:]]*\.[[:space:]]*resolve[[:space:]]*\([^;]+\)[[:space:]]*\.[[:space:]]*normalize[[:space:]]*\(' "$tools_file" ||
+     ! grep -Eqi 'Files\.(newInputStream|newOutputStream|createDirectories)|new[[:space:]]+ProcessBuilder' "$document_file" ||
+     grep -Eqi 'toRealPath|isSymbolicLink|NOFOLLOW_LINKS|readAttributes' "$document_file" ||
+     grep -Eqi 'toRealPath|isSymbolicLink|NOFOLLOW_LINKS|readAttributes' "$tools_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations="$(awk -F '\t' '{ printf "%s%s:%s", (seen++ ? ", " : ""), $1, $2 }' "$candidates")"
+  IFS=$'\t' read -r first_path first_line <"$candidates"
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 出版 MCP 工作区只做词法路径归一化，未处理工作区内符号链接导致的根目录逃逸。" \
+    "影响：攻击者若能在任务工作区放置或控制符号链接，可使 DOCX 读取/写入、输出目录创建或 LibreOffice 渲染访问受控根目录之外的文件，造成任意文件读写或进程输入路径越界。" \
+    "修复建议：对每个输入、输出和任务目录执行 realpath/规范化后的祖先校验，并拒绝符号链接或使用 NOFOLLOW_LINKS；创建目录后再次校验真实路径，渲染进程只接收已验证的真实路径。" \
+    "验证方式：在 input/work/output 下分别放置指向根目录外文件和目录的符号链接，覆盖 inspect、profile、render 和 create workspace，确认所有调用在打开/创建/启动进程前拒绝，普通目录仍可用。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_url_prefix_whitelist_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -9408,6 +9483,7 @@ collect_partial_side_effect_preflight "$chunk_input_file" "$build_preflight_file
 collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_reactive_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxl_job_empty_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_publishing_workspace_symlink_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
