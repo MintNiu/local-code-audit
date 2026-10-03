@@ -29,6 +29,8 @@ final class PlatformFileWorkspaceClient {
         URI candidate = URI.create(ticketUrl);
         if (!candidate.isAbsolute()) return base.resolve(ticketUrl);
         if ("https".equalsIgnoreCase(candidate.getScheme())) return candidate;
+        if ("http".equalsIgnoreCase(candidate.getScheme())
+                && candidate.getHost().equalsIgnoreCase(base.getHost())) return candidate;
         throw new IllegalStateException("untrusted");
     }
 }

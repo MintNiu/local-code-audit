@@ -5961,7 +5961,7 @@ collect_publishing_external_ticket_token_preflight() {
   local diff_file="$1"
   local output_file="$2"
   local source_root="${3:-}"
-  local candidates source_file locations first_path first_line
+  local candidates source_file locations first_path first_line https_line https_branch
   local candidate_path candidate_line
   [[ -n "$source_root" ]] || return 0
 
@@ -6018,9 +6018,16 @@ collect_publishing_external_ticket_token_preflight() {
     grep -F 'resolveTicketUri' "$source_file" >/dev/null || continue
     grep -Eq 'https.*candidate\.getScheme|candidate\.getScheme.*https' "$source_file" || continue
     grep -Eq 'https.*return[[:space:]]+candidate|return[[:space:]]+candidate.*https' "$source_file" || continue
-    # Host checks, allowlists, or an explicit internal-URL branch are
-    # counter-evidence that the external credential sink was fenced.
-    if grep -Eqi 'getHost|allow(list|ed)?|trustedHost|isTrusted|白名单|same.?host|internal.?url' "$source_file"; then
+    # Host checks, allowlists, or an explicit internal-URL branch on the HTTPS
+    # branch are counter-evidence.  Do not treat an unrelated HTTP same-host
+    # fallback as protection for the already-accepted HTTPS URL.
+    https_line="$(grep -E 'https.*candidate\.getScheme|candidate\.getScheme.*https' "$source_file" | head -n 1 || true)"
+    if printf '%s\n' "$https_line" | grep -Eq 'return[[:space:]]+candidate'; then
+      https_branch="$https_line"
+    else
+      https_branch="$(grep -A1 -E 'https.*candidate\.getScheme|candidate\.getScheme.*https' "$source_file" || true)"
+    fi
+    if printf '%s\n' "$https_branch" | grep -Eqi 'getHost|allow(list|ed)?|trustedHost|isTrusted|白名单|same.?host|internal.?url'; then
       continue
     fi
     if [[ -z "$locations" ]]; then
