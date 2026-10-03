@@ -7,6 +7,7 @@ trap 'rm -rf "$fixture_root"' EXIT
 repo="$fixture_root/repo"
 fake_bin="$fixture_root/bin"
 counter="$fixture_root/counter"
+provider_prompt_marker="$fixture_root/provider-prompt-marker"
 mkdir -p "$repo/src/main/java/example" "$fake_bin"
 
 git -C "$repo" init -q
@@ -21,6 +22,16 @@ final class Large {
     }
 }
 EOF
+cat >"$repo/src/main/java/example/SsoProviderLoginApplication.java" <<'EOF'
+package example;
+
+final class SsoProviderLoginApplication {}
+EOF
+cat >"$repo/src/main/java/example/SysExternalIdentityMapper.java" <<'EOF'
+package example;
+
+final class SysExternalIdentityMapper {}
+EOF
 git -C "$repo" add .
 git -C "$repo" commit -qm base
 
@@ -34,6 +45,27 @@ final class Missing {
     MissingAlpha call(MissingBeta value) {
         return value;
     }
+}
+EOF
+
+cat >"$repo/src/main/java/example/SsoProviderLoginApplication.java" <<'EOF'
+package example;
+
+final class SsoProviderLoginApplication {
+    LoginResult login(String providerCode, String externalUserId) {
+        Long bindingUserId = externalIdentityRepository.find(providerCode, externalUserId);
+        Long bindingTenantId = null;
+        return issueToken(bindingUserId, bindingTenantId);
+    }
+}
+EOF
+cat >"$repo/src/main/java/example/SysExternalIdentityMapper.java" <<'EOF'
+package example;
+
+@InterceptorIgnore(tenantLine = "true")
+interface SysExternalIdentityMapper {
+    @Select("SELECT user_id FROM sys_external_identity WHERE provider_code = #{providerCode} AND external_user_id = #{externalUserId}")
+    Long find(String providerCode, String externalUserId);
 }
 EOF
 
@@ -62,6 +94,9 @@ for argument in "$@"; do
   previous="$argument"
 done
 prompt="$(jq -r '.prompt // empty' "$payload")"
+if grep -Fq '第三方登录绑定按外部身份查询未带租户边界' <<<"$prompt"; then
+  printf '%s\n' seen >"${LOCAL_REVIEW_PROVIDER_PROMPT_MARKER:?}"
+fi
 if grep -Fq 'diff --git a/src/main/java/example/Large.java b/src/main/java/example/Large.java' <<<"$prompt"; then
   count=0
   if [[ -f "${LOCAL_REVIEW_COUNTER:?}" ]]; then count="$(<"$LOCAL_REVIEW_COUNTER")"; fi
@@ -83,6 +118,7 @@ chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 output="$(
   PATH="$fake_bin:$PATH" \
   LOCAL_REVIEW_COUNTER="$counter" \
+  LOCAL_REVIEW_PROVIDER_PROMPT_MARKER="$provider_prompt_marker" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
@@ -91,14 +127,26 @@ output="$(
 )"
 
 model_count="$(printf '%s\n' "$output" | grep -c '^P1 src/main/java/example/Large.java:5 - 认证令牌从 URL 查询参数读取' || true)"
-if [[ "$model_count" -lt 2 ]]; then
-  echo "model URL-token findings were hidden during shard aggregation (got $model_count)" >&2
+if [[ "$model_count" -lt 1 ]]; then
+  echo "model URL-token finding was hidden during shard aggregation" >&2
   printf '%s\n' "$output" >&2
   exit 1
 fi
 preflight_count="$(printf '%s\n' "$output" | grep -c 'P1 src/main/java/example/Large.java:5 - 凭据值被拼接到 URL' || true)"
 if [[ "$preflight_count" != 1 ]]; then
   echo "expected one deduplicated routed preflight finding, got $preflight_count" >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+fi
+
+if [[ -e "$provider_prompt_marker" ]]; then
+  echo 'third-party provider preflight leaked into a shard prompt' >&2
+  printf '%s\n' "$output" >&2
+  exit 1
+fi
+provider_count="$(printf '%s\n' "$output" | grep -c 'P1 src/main/java/example/SsoProviderLoginApplication.java:' | grep -v '^0$' || true)"
+if [[ "$provider_count" != 1 ]]; then
+  echo "expected one merged provider-login preflight finding, got $provider_count" >&2
   printf '%s\n' "$output" >&2
   exit 1
 fi

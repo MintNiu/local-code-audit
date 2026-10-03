@@ -3567,7 +3567,10 @@ $(cat "$changed_paths_file")
   # exclude the same blocks from this budget probe or they would reserve
   # context that no request will consume and reject otherwise valid diffs.
   budget_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-preflight.XXXXXX")"
-  awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "声明式权限注解被注释/删除") == 0 { print }' \
+  awk 'BEGIN { RS = ""; ORS = "\n\n" }
+    index($0, "声明式权限注解被注释/删除") == 0 &&
+    index($0, "第三方登录绑定按外部身份查询未带租户边界") == 0 { print }
+  ' \
     "$build_preflight_file" >"$budget_preflight_file"
   probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$budget_preflight_file")"
   rm -f "$budget_preflight_file"
@@ -9471,6 +9474,13 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
       if (index(header, "声明式权限注解被注释/删除") > 0) {
         next
       }
+      # Third-party provider-login scope is deterministic evidence and is
+      # merged once after all shard calls. Repeating it in the model prompt
+      # wastes context and can push the affected shard into a long-tail
+      # timeout; the final merge still preserves the complete finding.
+      if (index(header, "第三方登录绑定按外部身份查询未带租户边界") > 0) {
+        next
+      }
       sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
       # Keep comma-separated locations (for example `:3,4,5`) attached to
       # the same path when routing aggregated deterministic findings.
@@ -9490,6 +9500,8 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   # marked as deterministic additions; model findings remain intact.
   cp "$chunk_preflight_file" "$chunk_merge_preflight_file"
   awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "声明式权限注解被注释/删除") > 0 { print }' \
+    "$build_preflight_file" >>"$chunk_merge_preflight_file"
+  awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "第三方登录绑定按外部身份查询未带租户边界") > 0 { print }' \
     "$build_preflight_file" >>"$chunk_merge_preflight_file"
   chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_preflight_file")"
   # Give each shard the complete changed-path inventory as scope metadata.
