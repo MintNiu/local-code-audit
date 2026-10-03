@@ -8202,6 +8202,57 @@ collect_inventory_stock_race_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_inventory_serial_null_migration_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local repository_file schema_file migration_contract_file line_number schema_line
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # A NULL-to-empty-string contract change is only actionable when the
+  # current snapshot also adds the uniqueness/NOT NULL schema and removes the
+  # old NULL-compatible lookup.  This keeps the check focused on the proven
+  # legacy-data break: CREATE TABLE IF NOT EXISTS cannot alter an already
+  # deployed table, and no versioned migration means existing NULL rows stay
+  # invisible to the new no-serial queries.
+  grep -Eq '^-.*isNull\(ErpLogicalWarehouseSku::getSerialNo\)' "$diff_file" || return 0
+  grep -Eq '^\+.*eq\(ErpLogicalWarehouseSku::getSerialNo,[[:space:]]*""\)' "$diff_file" || return 0
+  grep -Eq '^\+.*serial_no.*NOT NULL DEFAULT' "$diff_file" || return 0
+  grep -Eq '^\+.*UNIQUE KEY.*uk_logical_warehouse_sku_serial' "$diff_file" || return 0
+  if awk '
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      if (path ~ /(^|\/)sql\/(migration|migrations)\//) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file"; then
+    return 0
+  fi
+
+  repository_file="$(find "$source_root/src/main/java" -type f -name 'LogicalWarehouseSkuRepository.java' -print -quit 2>/dev/null || true)"
+  schema_file="$source_root/sql/platform_erp.sql"
+  [[ -f "$repository_file" && -f "$schema_file" ]] || return 0
+  migration_contract_file="$(rg -l --glob 'README*' 'sql/migration|db/migration|已有库.*迁移|版本化迁移' "$source_root" 2>/dev/null | head -n 1 || true)"
+  [[ -n "$migration_contract_file" ]] || return 0
+  grep -Eq 'getSerialNo,[[:space:]]*""' "$repository_file" || return 0
+  grep -Eq 'listNoSerialByLogicalWarehouseIdAndSkuId|findNoSerialByLogicalWarehouseIdAndSkuId' "$source_root/src/main/java/com/bit/erp/application/warehouse/OutboundOrderApplication.java" "$source_root/src/main/java/com/bit/erp/application/warehouse/NonPhysicalTransferApplication.java" 2>/dev/null || return 0
+
+  line_number="$(grep -n -m1 -E 'getSerialNo,[[:space:]]*""' "$repository_file" | cut -d: -f1)"
+  [[ "$line_number" =~ ^[0-9]+$ ]] || line_number=1
+  schema_line="$(grep -n -m1 'uk_logical_warehouse_sku_serial' "$schema_file" | cut -d: -f1)"
+  [[ "$schema_line" =~ ^[0-9]+$ ]] || schema_line=1
+  {
+    printf '%s\n' "P1 ${repository_file#"$source_root/"}:$line_number - 无串码库存查询从 NULL/空字符串兼容改为只匹配空字符串，但当前差异只修改 CREATE TABLE 快照并新增唯一/非空约束，没有为已有 NULL 数据提供版本化迁移。"
+    printf '%s\n' '影响：历史库中由旧版本写入的 serial_no=NULL 库存行不会再被出库、调拨和库存可用量查询命中，业务会误报库存不足；若新写入空字符串行与历史 NULL 行并存，还可能造成数量分裂或重复库存。'
+    printf '%s\n' '修复建议：新增幂等版本化 migration，先把目标表 NULL 规范化为空字符串并清理/合并重复行，再安全补充 NOT NULL 与唯一索引；迁移完成前保留 NULL 兼容查询或明确阻断启动。'
+    printf '%s\n' '验证方式：在含 NULL 无串码行、重复 NULL/空字符串行和已部署旧表的数据库上执行升级，确认历史数量可被出库/调拨命中、重复行按业务规则合并且迁移可重复执行。'
+    printf '%s\n' "证据行：${repository_file#"$source_root/"}:${line_number}；${schema_file#"$source_root/"}:${schema_line}；迁移契约：${migration_contract_file#"$source_root/"}"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_gateway_workflow_application_scope_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -10723,6 +10774,7 @@ collect_logical_warehouse_sku_replace_preflight "$chunk_input_file" "$build_pref
 collect_sales_return_idempotency_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_payment_voucher_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_inventory_stock_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_inventory_serial_null_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_gateway_workflow_application_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sso_provider_login_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
