@@ -151,6 +151,12 @@ manifest SHA-256、commit 和 parent，防止清单漂移后把旧结果绑定�
 ./evals/test-preflight.sh
 ```
 
+Bafan 公开接口直接返回持久化实体的跨文件预检有独立正/负回归：
+
+```bash
+bash evals/test-bafan-public-entity-preflight.sh
+```
+
 无模型回归较多时，可用并行编排器缩短反馈回路；每个套件拥有独立的临时目录和 Ollama 锁路径，真实模型审查仍应串行执行：
 
 ```bash

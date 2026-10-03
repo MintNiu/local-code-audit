@@ -2589,6 +2589,8 @@ review_system="$(cat <<'EOF'
 
 找出所有能由代码或明确契约直接证明的逻辑、边界、异常、安全、权限/租户隔离、并发/事务、性能、兼容性和测试问题。每个独立根因都要保留；可独立修复的根因必须分别输出，即使发生在同一方法或相邻行（例如 null 解引用与除零是两条问题）。只有同一根因在相同调用点重复出现时才可合并，并列出全部受影响文件/行号范围。不要编造不确定问题，不要报告风格、命名、Javadoc、final 或泛化可维护性建议。
 
+公开接口与持久化实体边界：如果当前差异把匿名、allowlist、`permitAll` 或明确公开的 GET 接口直接返回 `@TableName`/JPA 等持久化实体（例如 `Result<PageResult<Entity>>`、`Result<List<Entity>>`），并且该实体可序列化出内部身份、生命周期/删除状态、权限/租户、审计或编辑授权字段，应报告一条 P1 数据暴露问题。必须核对当前差异中的具体公开路由、控制器返回类型和实体字段，并说明后果；修复应使用只含公开字段的 DTO/Projection。仅凭返回类型是实体、没有公开访问证据，或已经使用 DTO/Projection，不得报告；已认证且契约明确允许返回完整实体的接口也不要猜测报告。
+
 对象存储上传取消边界：可见预签名票据仍在有效期、取消先删除 objectKey 后标记终态、且清理只扫活动状态时，必须报告一个 P1 重放/孤儿对象风险；有撤销/版本化证据则不报告。已有 `expiresAt().isAfter(...)` 时不要重复报告过期校验；没有明确契约时不要泛化要求 objectKey/id/ticket 格式校验。
 
 上下文边界：`AGENTS.md` 等规则文件只提供约束/契约，不单独生成 finding；契约问题定位实际代码行。
@@ -6570,6 +6572,88 @@ collect_bafan_oss_anonymous_policy_preflight() {
     "影响：未登录或无有效小程序用户身份的调用方可直接获取共享 bucket 的 OSS policy/signature，向任意前缀写入或覆盖对象（当前上限 100MB），造成内容污染、存储/流量成本耗尽和后续恶意文件传播。" \
     "修复建议：移除 /api/oss/** 与上传路径的粗粒度匿名白名单，只保留精确公开接口；要求 UserContext 用户身份和用途/扩展名白名单，生成绑定 userId、UUID、固定目录和精确 key/content-type/大小的 policy，并增加日配额/速率限制。" \
     "验证方式：匿名请求、伪造/过期 Token 和跨用户 key 均应在签名生成前返回 401/403；有效用户只能获得绑定自身用途和目录的短时 policy，尝试替换 key、content-type、大小和 bucket 前缀均被 OSS 拒绝，并覆盖限流配额。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_bafan_public_entity_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file mvc_file entity_file candidate_path candidate_line
+  local locations="" first_path="" first_line=""
+  [[ -n "$source_root" ]] || return 0
+
+  # Keep this guard narrow and evidence-driven: the changed Bafan merchant
+  # controller must expose the raw AppMerchant entity, the current MVC config
+  # must explicitly bypass auth for the exact list/hot routes, and the entity
+  # must contain internal lifecycle/identity fields. DTO/projection responses
+  # and authenticated routes stay outside the rule.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-bafan-public-entity-candidates.XXXXXX")"
+  awk '
+    function is_merchant_controller(value) {
+      return value == "src/main/java/com/bofan/modules/merchant/controller/AppMerchantController.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_merchant_controller(path) &&
+          text ~ /Result[[:space:]]*<[^>]*PageResult[[:space:]]*<[[:space:]]*AppMerchant[[:space:]]*>/) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  controller_file="$source_root/src/main/java/com/bofan/modules/merchant/controller/AppMerchantController.java"
+  mvc_file="$source_root/src/main/java/com/bofan/common/config/WebMvcConfig.java"
+  entity_file="$source_root/src/main/java/com/bofan/modules/merchant/entity/AppMerchant.java"
+  if [[ ! -f "$controller_file" || ! -f "$mvc_file" || ! -f "$entity_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bofan/modules/merchant/controller/AppMerchantController.java" ||
+     path_has_symlink_component "src/main/java/com/bofan/common/config/WebMvcConfig.java" ||
+     path_has_symlink_component "src/main/java/com/bofan/modules/merchant/entity/AppMerchant.java" ||
+     ! grep -Fq '@RequestMapping("/api/merchant")' "$controller_file" ||
+     ! grep -Fq 'excludePathPatterns' "$mvc_file" ||
+     ! grep -Fq '"/api/merchant/list"' "$mvc_file" ||
+     ! grep -Fq '"/api/merchant/hot"' "$mvc_file" ||
+     ! grep -Fq '@TableName("app_merchant")' "$entity_file" ||
+     ! grep -Eq 'Long[[:space:]]+finderId|LocalDateTime[[:space:]]+editExpireTime' "$entity_file" ||
+     ! grep -Eq 'Integer[[:space:]]+(status|deleted)' "$entity_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    [[ -z "$first_path" ]] && { first_path="$candidate_path"; first_line="$candidate_line"; }
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+  [[ -n "$locations" ]] || { rm -f "$candidates"; return 0; }
+
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 匿名商户读取接口直接返回持久化 AppMerchant 实体，响应暴露内部身份、生命周期和编辑授权字段。" \
+    "影响：未登录调用方可从 /api/merchant/list 或 /api/merchant/hot 获取 finderId、editExpireTime、status、deleted 及内部统计等不应属于公开展示契约的字段，造成用户身份/运营状态泄露并扩大后续授权攻击面。" \
+    "修复建议：公开接口只返回白名单字段的 PublicMerchantVO/Projection；保留 AppMerchant 作为持久化实体，禁止控制器直接序列化实体，并对公开路由做字段级契约测试。" \
+    "验证方式：匿名请求两个公开路由，断言响应不包含 finderId、editExpireTime、status、deleted 等内部字段；已认证详情接口和后台接口分别验证原有字段/权限契约不受影响。" \
     "证据行：$locations" >>"$output_file"
   rm -f "$candidates"
   dedup_preflight_blocks "$output_file"
@@ -10620,6 +10704,7 @@ collect_publishing_evidence_write_preflight "$chunk_input_file" "$build_prefligh
 collect_publishing_review_issue_waiver_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_dict_global_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_bafan_oss_anonymous_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_bafan_public_entity_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_dept_tenant_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_bafan_admin_category_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_application_secret_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

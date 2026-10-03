@@ -992,3 +992,11 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 随后从未扫描的文件配置回归族中补入 `platform-file:7eb92a127ff3a52a6dc2bbc4549f91c55fe8ceb3`。源码核验确认父版本使用 `ALIYUN_OSS_*` 环境变量，目标提交将 OSS access key/secret 改为明文且当前 HEAD 仍保留；两轮个人 profile 均 1/1 分片完整，结果哈希和 finding signature 一致，模型原生 P1 稳定定位 `nacos-config/platform-file-localhost.yml:98-99`，确定性凭据预检同时保留两行。该样本未参与规则设计，计入严格独立 holdout；当前严格表为 10 个 P0/P1、命中 5 个、召回 50.0%，双轮完整稳定 10/10，命中定位准确 5/5。达到 20 个样本前仍需至少 10 个未见根因。
 
 随后完成独立替补与角色权限边界批次：`platform-auth:3d1eaac` 双轮完整稳定，新增 localhost 配置中的固定数据库/Redis/Nacos 凭据，按一个独立 P1 根因计入 holdout；`platform-system:ecc8d75` 的 `RolePermissionApplication` 菜单/部门跨租户绑定预检在真实快照稳定命中，转为 tuning-source。当前私有表为 17 个独立记录（严格排除 HR 条件样本为 16 个），严格 gold P0/P1 为 16 个、命中 7 个，严格召回约 43.8%；tuning-source 为 7 个。按阶段一门禁，仍需至少 4 个未参与调优的新 P0/P1 根因，并至少补足 3 个独立提交记录，同时完成 train/dev/holdout split；调优源继续只用于回归保护，不计入独立 holdout 分母。
+
+### 2026-10-04：补齐公开实体序列化边界并记录一次超时
+
+从未扫描的 Bafan 商户模块中确认新的 P1 根因：`b4271c98cc61bb36e0a27c2da40b7195afdc99df` 在 `/api/merchant/list` 和 `/api/merchant/hot` 已被认证拦截器公开排除的情况下，控制器直接返回 `Result<PageResult<AppMerchant>>`；`AppMerchant` 同时包含 `finderId`、`editExpireTime`、`status`、`deleted` 和内部统计字段，后续 `2e1b013` 引入 `PublicMerchantVO` 移除这些字段，形成完整修复链。个人 profile 的前两轮均 1/1 分片、exit=0、输出哈希与 finding signature 一致，但两轮都返回 clean，确认这是稳定模型漏报，样本转为 `tuning-source`，不计入严格 holdout。
+
+针对该漏报，SYSTEM 增加“明确公开路由 + 持久化实体 + 内部字段”三条件边界，并新增窄范围 Bafan 跨文件确定性预检：必须同时验证控制器新增原始 `AppMerchant` 返回类型、`WebMvcConfig` 的 list/hot 认证排除、`@TableName` 实体和内部字段；DTO/Projection、受保护路由或缺少公开证据的夹具保持 clean。新增 `evals/test-bafan-public-entity-preflight.sh` 正负回归通过。真实复测中预检准确定位 `AppMerchantController.java:90`，但该轮 Ollama 分片请求超时，审查器按 fail-closed 以 exit=1 结束；因此不把不完整结果计入成功率或稳定性，预检也不冒充模型原生召回。
+
+本轮私有 scorecard 仍为严格 gold P0/P1 10 个、命中 5 个、召回 50.0%，输出完整/双轮稳定 10/10，命中定位准确 5/5；调优源增至 15 个，另有 1 个 HR 条件样本。效率改进的实际效果是先用静态证据和跨角色审计淘汰重复/修复/低危候选，再只对少量新根因做双轮；任何预检命中立即退出严格分母，避免把规则兜底误写成模型能力。达到 20 个独立根因前仍需至少 10 个未参与规则设计的新根因，并在冻结 runner、模型和提示词后重跑最终门禁。
