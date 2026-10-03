@@ -4920,6 +4920,74 @@ collect_non_atomic_authorization_code_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_non_atomic_sso_ticket_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file method_text
+
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # Keep this separate from the authorization-code rule: the SSO ticket is a
+  # different one-time credential and the current service uses a dedicated
+  # Redis key/helper.  Only inspect the concrete SsoController exchange
+  # method; generic GET/DELETE pairs elsewhere are not enough evidence.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-sso-ticket-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = ""; next }
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ b\//) {
+        added = substr($0, 2)
+        if (path ~ /(^|\/)SsoController\.java$/ &&
+            added ~ /RedisKeyUtil[[:space:]]*\.[[:space:]]*getSsoTicketKey[[:space:]]*\(/) {
+          printf "%s\t%d\n", path, new_line
+        }
+        new_line++
+      } else if (prefix != "-") {
+        new_line++
+      }
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    path_has_symlink_component "$candidate_path" && continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    grep -Eq '@RequestMapping[[:space:]]*\([[:space:]]*"/sso"' "$source_file" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" 2>/dev/null || true)"
+    printf '%s\n' "$method_text" | grep -Eq '@PostMapping[[:space:]]*\([[:space:]]*"/exchange"' || continue
+    printf '%s\n' "$method_text" | grep -Eq 'RedisKeyUtil[[:space:]]*\.[[:space:]]*getSsoTicketKey[[:space:]]*\(' || continue
+    printf '%s\n' "$method_text" | grep -Eq 'redisUtil[[:space:]]*\.[[:space:]]*get[[:space:]]*\(' || continue
+    printf '%s\n' "$method_text" | grep -Eq 'redisUtil[[:space:]]*\.[[:space:]]*delete[[:space:]]*\(' || continue
+    if printf '%s\n' "$method_text" | grep -Eq 'getAndDelete|GETDEL|compareAndDelete|EVAL|Lua|RedisScript'; then
+      continue
+    fi
+    {
+      printf '%s\n' "P1 $candidate_path:$candidate_line - SSO 一次性票据先读取后删除，兑换过程非原子，存在并发重放风险。"
+      printf '%s\n' '影响：两个并发兑换请求可能在删除前同时读取同一个 SSO ticket，并各自继续签发或返回登录凭据，破坏一次性消费语义。'
+      printf '%s\n' '修复建议：使用 Redis GETDEL/getAndDelete、Lua 原子脚本或带 compare-and-delete 语义的分布式锁，确保同一 ticket 只有一个请求能够成功兑换；失败请求应稳定返回已使用或无效。'
+      printf '%s\n' '验证方式：并发提交两次完全相同的 SSO ticket，确认最多一个请求成功，另一个请求在原子消费后稳定返回 ticket 无效或已使用。'
+      printf '%s\n' '来源：确定性预检（代码证据，非模型原文）'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_unsafe_deserialization_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -10915,6 +10983,7 @@ collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflig
 collect_raw_session_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_online_session_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_non_atomic_authorization_code_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_non_atomic_sso_ticket_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_unsafe_deserialization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxe_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_idor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

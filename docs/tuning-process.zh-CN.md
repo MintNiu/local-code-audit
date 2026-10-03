@@ -16,6 +16,8 @@
 
 随后复核 ERP 寻货状态提交 `555758b3`：它只有 1 个 Java 文件、9 行变更，个人 profile 两轮均单分片完整结束但都返回 clean。人工核验确认 `confirmInbound` 已完成入库单和库存更新后，新增 `ensureFinishable` 只拒绝 CANCELLED，仍允许 INBOUNDED/CLOSED 记录被 close/cancel，形成寻货状态与库存事实矛盾的独立 P1。该提交原本已在私有 pending 队列，本轮只完成双跑和人工标注，计入严格 scorecard；没有立即把单提交模式泛化成确定性规则，以免把合法“关闭寻货单但保留入库事实”的业务契约误报为缺陷。
 
+随后补齐 SSO ticket 竞态的窄范围确定性预检：仅匹配带有 `/sso`、`/exchange` 和 `RedisKeyUtil.getSsoTicketKey(...)` 的 `SsoController` 方法，并要求同一方法先调用 `redisUtil.get` 再调用 `redisUtil.delete`；`getAndDelete`、GETDEL、Lua/compare-and-delete 等原子实现和普通 Redis 读删代码保持 clean。正负夹具、真实 `platform-auth:5003d86b` 父子快照和完整 40 项回归均通过，准确定位 `SsoController.java:126`。该预检恢复了已知竞态在本地审计中的可见性，但不改变独立 scorecard 的模型原生召回口径。
+
 ## 当前进展：锁序候选与阶段一门禁（2026-09-27）
 
 运行器现在会对包含 `@Transactional`、`find*ForUpdate` 或 `FOR UPDATE` 的变更 Java 文件，受限列出变更文件及使用相同锁接收者的关联 Java 文件。证据包含源码行号、锁调用上下文窗口和完整调用顺序，但只作为 prompt 文本证据，不自动生成 finding，也不能单独证明同表、同事务或可达并发；文件/行数有上限，预算不足时可跳过。`test-sharding.sh` 已验证分片请求仍能看到变更文件、未变更关联文件和行锁调用。

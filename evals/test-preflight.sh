@@ -5469,6 +5469,8 @@ bash "$repo_root/evals/test-bafan-admin-category-authorization-preflight.sh"
 bash "$repo_root/evals/test-system-application-secret-scope-preflight.sh"
 bash "$repo_root/evals/test-system-api-resource-sync-scope-preflight.sh"
 bash "$repo_root/evals/test-system-role-permission-resource-scope-preflight.sh"
+# SSO ticket exchange must consume one-time tickets atomically.
+bash "$repo_root/evals/test-sso-ticket-replay-preflight.sh"
 # Existing NULL serial rows must have a versioned migration before the new
 # empty-string-only inventory contract is accepted.
 bash "$repo_root/evals/test-inventory-serial-null-migration-preflight.sh"
