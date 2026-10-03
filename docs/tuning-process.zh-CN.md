@@ -954,3 +954,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同轮补充 `collect_publishing_mcp_job_scope_preflight`：当出版 MCP 文件工具在 README/配置中声明只由共享 `X-Gateway-Token` 保护，但 `createJobWorkspace`、DOCX 读写或渲染方法没有 `ExecutionGrant`、租户/任务工作区服务或授权调用时，聚合报告资源授权 P1。后续引入 `PublishingExecutionGrantService`、`PublishingWorkspaceService` 和 HMAC execution grant 的实现作为 clean 边界；符号链接规则仍单独覆盖文件系统真实路径风险。该预检的正负 fixture 与完整回归均通过，`6cb134b` 已参与调优，不能计入正式 holdout。
 
 同日将出版 MCP 资源授权预检收紧为方法级证据：只分析发生文件/进程操作的具体工具方法，注释、无关 helper 或另一个工具方法中的授权调用不再压制该方法的告警；新增反例覆盖“真实工具方法有 grant、无关 helper 也有 grant”的边界。随后新增 system 字典全局写权限预检，仅在 `/api/v1/dicts` 的 POST/PUT/DELETE 方法实际调用字典写服务、服务直接写 `sys_dict/sys_dict_item` 且租户配置忽略这些全局表时报告缺少显式 `sys:dict:*` 权限的 P1；方法级 `@PreAuthorize`、权限表达式和无关查询/日志方法均保持 clean。两组正负 fixture 已通过，完整预检回归随本次提交复核。
+
+真实 `platform-system:a269a835` 快照随后完成一次 Ollama 实跑：分片全部结束且没有截断/超时，输出同时保留模型原生 P1 与确定性字典授权 P1。该提交已参与规则设计，私有 scorecard 将其从 `manual-confirmed` 转为 `tuning-source`，不再计入独立 holdout；这次运行只证明真实模型链路和“所有原始问题可见”契约正常。
