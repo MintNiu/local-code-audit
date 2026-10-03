@@ -6051,6 +6051,89 @@ collect_publishing_external_ticket_token_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_publishing_pdf_render_resource_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates source_file locations first_path first_line
+  local candidate_path candidate_line method_text
+  [[ -n "$source_root" ]] || return 0
+
+  # PDFBox allocates the raster image before the PNG byte-size/cache limit is
+  # applied.  A malicious but otherwise valid page with an enormous MediaBox
+  # can therefore consume CPU and heap during preview.  Keep this rule tied to
+  # the concrete publishing evidence application and require the current
+  # method to lack page-dimension/pixel-area evidence; an explicit geometric
+  # guard is counter-evidence.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-publishing-pdf-render-candidates.XXXXXX")"
+  awk '
+    function is_evidence_application(value) {
+      return value == "src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_evidence_application(path) &&
+          text ~ /PDFRenderer|renderImageWithDPI/) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  source_file="$source_root/src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java"
+  if [[ ! -f "$source_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java" ||
+     ! grep -F 'renderPdfPage' "$source_file" >/dev/null; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" --masked 2>/dev/null || true)"
+    printf '%s\n' "$method_text" | grep -Eq 'PDFRenderer|renderImageWithDPI' || continue
+    printf '%s\n' "$method_text" | grep -Eqi 'MediaBox|CropBox|getMediaBox|getCropBox|pixel|像素|area|面积|max[^[:space:]]*(width|height|pixel)|dimension|页面尺寸' && continue
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+
+  [[ -n "$locations" ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P2 $first_path:$first_line - PDF 预览在 PDFBox 光栅化前没有页面尺寸或像素面积上限。" \
+    "影响：如果租户可上传并预览自有 PDF，攻击者可提交带超大 MediaBox/CropBox 的有效页面，令 PDFRenderer 在 PNG/cache 限制生效前分配巨型位图，造成 CPU 飙升、堆内存耗尽或服务线程阻塞。" \
+    "修复建议：读取目标页 MediaBox/CropBox 后先计算宽高与 dpi 下的像素面积，设置硬上限并拒绝超限页面；同时保留渲染超时、并发上限和受控缓存，不能只限制最终 PNG 字节数。" \
+    "验证方式：用正常 A4、超大 MediaBox、极端 dpi 和重复并发预览分别测试，确认超限请求在 PDFRenderer 之前被拒绝，正常页面仍能渲染，服务内存和线程数保持有界。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_publishing_workspace_symlink_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -10844,6 +10927,7 @@ collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$prefli
 collect_reactive_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxl_job_empty_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_external_ticket_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_publishing_pdf_render_resource_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_workspace_symlink_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_mcp_job_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_evidence_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

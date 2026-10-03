@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$repo_root/evals/test-publishing-external-ticket-token-preflight.sh"
+"$repo_root/evals/test-publishing-pdf-render-resource-preflight.sh"
 # Keep this deterministic regression hermetic; a user's private few-shot file
 # must not change the request-size preflight or the expected assertions.
 export LOCAL_REVIEW_EXAMPLES_FILE=/dev/null

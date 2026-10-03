@@ -12,6 +12,8 @@
 
 同轮对 ERP `8a2c1e1` 做真实父子快照验证：通用 schema-migration 预检在 `sql/platform_erp.sql:2407` 准确发现新增 `request_no` 没有既有库 migration。该样本按机制族转为 tuning-source，未再启动昂贵模型双跑，证明静态预筛能有效减少重复评测。
 
+同轮新增 PDF 预览资源边界预检，真实 `platform-publishing-service:0ae0ffb` 快照稳定定位 `TypesetEvidenceApplication.java:143` 的无像素面积上限渲染，作为 P2 tuning-source 记录；带 MediaBox/CropBox 上限的负例保持 clean。
+
 ### 2026-10-01：真实冻结留出补强可空值与租户/仓库边界
 
 阶段一冻结留出新增并完成双跑：`platform-auth:9dbcc0c` 模型命中查询参数令牌 P1、漏掉在线会话对象中的原始 token；`platform-job:5dfc6a1` 与 `c071a63` 分别漏掉可空 `XxlJobHelper.getJobParam()` 和可空 `ReturnT.msg.length()`；`platform-system:ecc8d75` 漏掉角色 API 绑定未按租户应用范围校验；`platform-erp-service:5592758` 漏掉寻货入库绕过仓库/供方归属检查。五个样本的重复 finding signature 均稳定，job/system/ERP 原模型均返回 clean，不能把合成 100% 结果外推为真实召回率。
