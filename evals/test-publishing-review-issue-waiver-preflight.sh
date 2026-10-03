@@ -62,7 +62,10 @@ chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 python3 - "$repo/src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java" <<'PY'
 from pathlib import Path
 path = Path(__import__('sys').argv[1])
-text = path.read_text().replace('same status decision', 'same status decision; countOpenBlockingIssues remains the approval gate')
+text = path.read_text().replace(
+    'entity.setStatus(status);',
+    'entity.setStatus(status); // changed decision path; ERROR/BLOCKER waiver remains possible',
+)
 path.write_text(text)
 PY
 
@@ -83,11 +86,23 @@ marker='排版质量门禁允许人工把 ERROR/BLOCKER 问题改为已接受/�
 }
 
 cp -R "$repo" "$safe_repo"
-cat >>"$safe_repo/src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java" <<'EOF'
+python3 - "$safe_repo/src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java" <<'PY'
+from pathlib import Path
+import sys
 
-private static final Set<String> NON_WAIVABLE_SEVERITIES = Set.of("ERROR", "BLOCKER");
-if (NON_WAIVABLE_SEVERITIES.contains(entity.getSeverity())) throw new BusinessException("不能人工豁免");
-EOF
+path = Path(sys.argv[1])
+text = path.read_text().replace(
+    'entity.setStatus(status); // changed decision path; ERROR/BLOCKER waiver remains possible',
+    'if (NON_WAIVABLE_SEVERITIES.contains(entity.getSeverity())) throw new BusinessException("不能人工豁免");\n'
+    '        entity.setStatus(status); // guarded decision path',
+)
+text = text.replace(
+    'final class TypesetEvidenceApplication {',
+    'final class TypesetEvidenceApplication {\n'
+    '    private static final Set<String> NON_WAIVABLE_SEVERITIES = Set.of("ERROR", "BLOCKER");',
+)
+path.write_text(text)
+PY
 safe_output="$(
   PATH="$fake_bin:$PATH" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \

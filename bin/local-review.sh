@@ -6035,12 +6035,15 @@ collect_publishing_mcp_job_scope_preflight() {
   local output_file="$2"
   local source_root="${3:-}"
   local candidates mcp_file document_file readme_file locations first_path first_line
+  local candidate_path candidate_line source_file method_text relevant_method
   [[ -n "$source_root" ]] || return 0
 
   # A shared gateway token authenticates the MCP service, but does not prove
   # which tenant/job/execution may be read or mutated.  Keep this rule tied to
-  # the concrete publishing MCP file tools and require the current source to
-  # lack the grant/workspace authorization that later implementations add.
+  # the concrete publishing MCP file methods.  The current-source checks below
+  # deliberately inspect the method containing each changed entry point rather
+  # than grepping an entire file; comments, unrelated helpers, or a grant used
+  # by another tool must not suppress a finding for a vulnerable file method.
   candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-publishing-mcp-scope-candidates.XXXXXX")"
   awk '
     function is_tool_path(value) {
@@ -6081,16 +6084,50 @@ collect_publishing_mcp_job_scope_preflight() {
   if [[ ! -f "$mcp_file" || ! -f "$document_file" || ! -f "$readme_file" ]] ||
      path_has_symlink_component "src/main/java/com/bit/publishing/mcp/tool/PublishingMcpTools.java" ||
      path_has_symlink_component "src/main/java/com/bit/publishing/mcp/tool/PublishingDocumentTools.java" ||
-     ! grep -Eqi 'X-Gateway-Token|GATEWAY_INTERNAL_TOKEN' "$readme_file" ||
-     ! grep -Eq 'createJobWorkspace[[:space:]]*\([^)]*String[[:space:]]+jobNo|resolveExisting|resolveGeneratedOutput|resolveOutputDirectory' "$mcp_file" "$document_file" ||
-     ! grep -Eqi 'Files\.(newInputStream|newOutputStream|createDirectories)|new[[:space:]]+ProcessBuilder' "$mcp_file" "$document_file" ||
-     grep -Eqi 'PublishingExecutionGrantService|PublishingWorkspaceService|grantService[[:space:]]*\.[[:space:]]*authorize|workspaceService[[:space:]]*\.[[:space:]]*authorize|ExecutionGrant|executionGrant|tenantId.*jobNo' "$mcp_file" "$document_file"; then
+     ! grep -Eqi 'X-Gateway-Token|GATEWAY_INTERNAL_TOKEN' "$readme_file"; then
     rm -f "$candidates"
     return 0
   fi
 
-  locations="$(awk -F '\t' '{ printf "%s%s:%s", (seen++ ? ", " : ""), $1, $2 }' "$candidates")"
-  IFS=$'\t' read -r first_path first_line <"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" --masked 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+
+    relevant_method=false
+    if [[ "$candidate_path" == */PublishingMcpTools.java ]]; then
+      # Workspace creation is a resource-bearing operation only when this
+      # method actually resolves a job path and creates directories.
+      if printf '%s\n' "$method_text" | grep -Eq 'createJobWorkspace[[:space:]]*\(|Files\.(createDirectories|newInputStream|newOutputStream)|workspaceRoot[[:space:]]*\.[[:space:]]*resolve'; then
+        relevant_method=true
+      fi
+    else
+      # Document tools must be tied to a resolver plus a file/process sink in
+      # the same method, not merely somewhere in the tool class.
+      if printf '%s\n' "$method_text" | grep -Eq 'resolveExisting|resolveGeneratedOutput|resolveOutputDirectory' &&
+         printf '%s\n' "$method_text" | grep -Eqi 'Files\.(newInputStream|newOutputStream|createDirectories)|new[[:space:]]+ProcessBuilder'; then
+        relevant_method=true
+      fi
+    fi
+    [[ "$relevant_method" == true ]] || continue
+    if printf '%s\n' "$method_text" | grep -Eqi 'PublishingExecutionGrantService|PublishingWorkspaceService|grantService[[:space:]]*\.[[:space:]]*authorize|workspaceService[[:space:]]*\.[[:space:]]*authorize|ExecutionGrant|executionGrant|tenantId[[:space:]]*.*jobNo'; then
+      continue
+    fi
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+
+  [[ -n "$locations" ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+
   printf '%s\n%s\n%s\n%s\n%s\n\n' \
     "P1 $first_path:$first_line - 出版 MCP 文件工具只有共享网关令牌认证，缺少 tenant/job/execution 级授权边界。" \
     "影响：任何获得网关令牌的调用方都可自行指定 jobNo 或工作区相对路径，读取、覆盖或渲染其他任务/租户的工作区文件；任务号可猜测或路径可枚举时会形成跨任务、跨租户数据读写和审计污染。" \
@@ -6106,6 +6143,8 @@ collect_publishing_evidence_write_preflight() {
   local output_file="$2"
   local source_root="${3:-}"
   local candidates controller_file application_file locations first_path first_line
+  local candidate_path candidate_line source_file method_text controller_vulnerable
+  local application_weak app_method app_line app_method_text review_line review_method_text
   [[ -n "$source_root" ]] || return 0
 
   # A human-facing execute permission is not an execution grant.  In the
@@ -6154,21 +6193,76 @@ collect_publishing_evidence_write_preflight() {
   if [[ ! -f "$controller_file" || ! -f "$application_file" ]] ||
      path_has_symlink_component "src/main/java/com/bit/publishing/controller/job/TypesetEvidenceController.java" ||
      path_has_symlink_component "src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java" ||
-     ! grep -Fq '@PreAuthorize("@perm.has('\''publishing:job:execute'\'')")' "$controller_file" ||
      ! grep -Fq '@PostMapping("/artifacts")' "$controller_file" ||
      ! grep -Fq '@PostMapping("/issues")' "$controller_file" ||
-     ! grep -Fq '@PostMapping("/tool-invocations")' "$controller_file" ||
-     ! grep -Eq 'setStatus\("READY"\)|setStatus\("OPEN"\)' "$application_file" ||
-     ! grep -Eq 'saveArtifact|saveIssue|saveInvocation' "$application_file" ||
-     ! grep -Eq 'countDeliverableArtifacts|countOpenBlockingIssues' "$application_file" ||
-     grep -Eqi 'ExecutionRef|requireExecution|lockActiveExecution|worker.*lease|lease.*worker|evidence.?grant' "$controller_file" "$application_file" ||
-     grep -Eqi 'MessageDigest|Files\.readAllBytes|contentInspector|verify.*sha256|sha256.*verify|toRealPath' "$application_file"; then
+     ! grep -Fq '@PostMapping("/tool-invocations")' "$controller_file"; then
     rm -f "$candidates"
     return 0
   fi
 
-  locations="$(awk -F '\t' '{ printf "%s%s:%s", (seen++ ? ", " : ""), $1, $2 }' "$candidates")"
-  IFS=$'\t' read -r first_path first_line <"$candidates"
+  controller_vulnerable=false
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" --masked 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -Eq 'application\.(addArtifact|addIssue|addInvocation)[[:space:]]*\(' || continue
+    if printf '%s\n' "$method_text" | grep -Eqi 'ExecutionRef|requireExecution|lockActiveExecution|worker.*lease|lease.*worker|evidence.?grant'; then
+      continue
+    fi
+    if [[ "$controller_vulnerable" == false ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    controller_vulnerable=true
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+  [[ "$controller_vulnerable" == true ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+
+  application_weak=false
+  for app_method in addArtifact addIssue addInvocation; do
+    app_line="$(grep -nE "^[[:space:]]*[^/].*[[:space:]]${app_method}[[:space:]]*\\(" "$application_file" | head -n 1 | cut -d: -f1 || true)"
+    [[ "$app_line" =~ ^[0-9]+$ ]] || continue
+    app_method_text="$(python3 "$java_method_window_script" "$application_file" "$app_line" --masked 2>/dev/null || true)"
+    case "$app_method" in
+      addArtifact)
+        printf '%s\n' "$app_method_text" | grep -Eq 'saveArtifact|setStatus\("READY"\)' || continue
+        ;;
+      addIssue)
+        printf '%s\n' "$app_method_text" | grep -Eq 'saveIssue|setStatus\("OPEN"\)' || continue
+        ;;
+      addInvocation)
+        printf '%s\n' "$app_method_text" | grep -F 'saveInvocation' >/dev/null || continue
+        ;;
+    esac
+    if printf '%s\n' "$app_method_text" | grep -Eqi 'ExecutionRef|requireExecution|lockActiveExecution|worker.*lease|lease.*worker|evidence.?grant|MessageDigest|Files\.readAllBytes|contentInspector|verify.*sha256|sha256.*verify|toRealPath'; then
+      continue
+    fi
+    application_weak=true
+    break
+  done
+  [[ "$application_weak" == true ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+
+  review_line="$(grep -nE "^[[:space:]]*[^/].*[[:space:]]review[[:space:]]*\\(" "$application_file" | head -n 1 | cut -d: -f1 || true)"
+  [[ "$review_line" =~ ^[0-9]+$ ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+  review_method_text="$(python3 "$java_method_window_script" "$application_file" "$review_line" --masked 2>/dev/null || true)"
+  printf '%s\n' "$review_method_text" | grep -Eq 'countDeliverableArtifacts|countOpenBlockingIssues' || {
+    rm -f "$candidates"
+    return 0
+  }
+
   printf '%s\n%s\n%s\n%s\n%s\n\n' \
     "P1 $first_path:$first_line - 排版任务证据写入端点仅受普通 execute 权限保护，未绑定执行实例/租约，也未验证实际产物内容与哈希。" \
     "影响：具备 publishing:job:execute 权限的用户可伪造 DOCX/PDF 产物、质量问题和工具调用审计记录；复核流程只按数据库中的 READY 产物和未处理问题计数，可能错误批准交付并污染审计证据。" \
@@ -6184,6 +6278,8 @@ collect_publishing_review_issue_waiver_preflight() {
   local output_file="$2"
   local source_root="${3:-}"
   local candidates application_file repository_file first_path first_line
+  local candidate_path candidate_line method_text vulnerable review_line review_method_text
+  local repository_line repository_method_text
   [[ -n "$source_root" ]] || return 0
 
   # The initial publishing review gate counted only OPEN ERROR/BLOCKER rows,
@@ -6229,25 +6325,164 @@ collect_publishing_review_issue_waiver_preflight() {
   repository_file="$source_root/src/main/java/com/bit/publishing/repository/job/TypesetEvidenceRepository.java"
   if [[ ! -f "$application_file" || ! -f "$repository_file" ]] ||
      path_has_symlink_component "src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java" ||
-     path_has_symlink_component "src/main/java/com/bit/publishing/repository/job/TypesetEvidenceRepository.java" ||
-     ! grep -Eq 'ISSUE_DECISIONS.*(RESOLVED|IGNORED)|(RESOLVED|IGNORED).*ISSUE_DECISIONS' "$application_file" ||
-     ! grep -Fq 'entity.setStatus(status)' "$application_file" ||
-     ! grep -Fq 'countOpenBlockingIssues' "$application_file" ||
-     ! grep -Fq 'countOpenBlockingIssues' "$repository_file" ||
-     ! grep -Fq 'getStatus, "OPEN"' "$repository_file" ||
-     ! grep -Eq 'ERROR|BLOCKER' "$repository_file" ||
-     grep -Eqi 'NON_WAIVABLE_SEVERITIES|nonWaivable|cannot.*(waiv|豁免)|不能人工豁免|AUTO_RESOLVED|status[[:space:]]*!=[[:space:]]*"AUTO_RESOLVED"' "$application_file"; then
+     path_has_symlink_component "src/main/java/com/bit/publishing/repository/job/TypesetEvidenceRepository.java"; then
     rm -f "$candidates"
     return 0
   fi
 
-  IFS=$'\t' read -r first_path first_line <"$candidates"
+  vulnerable=false
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_root/$candidate_path" "$candidate_line" --masked-comments 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -Eq 'ISSUE_DECISIONS|entity\.setStatus\(status\)' || continue
+    printf '%s\n' "$method_text" | grep -Eqi 'RESOLVED|IGNORED' || continue
+    if printf '%s\n' "$method_text" | grep -Eqi 'NON_WAIVABLE_SEVERITIES|nonWaivable|cannot.*(waiv|豁免)|不能人工豁免|AUTO_RESOLVED|status[[:space:]]*!=[[:space:]]*"AUTO_RESOLVED"'; then
+      continue
+    fi
+    if [[ "$vulnerable" == false ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    vulnerable=true
+  done <"$candidates"
+  [[ "$vulnerable" == true ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+
+  review_line="$(grep -nE "^[[:space:]]*[^/].*[[:space:]]review[[:space:]]*\\(" "$application_file" | head -n 1 | cut -d: -f1 || true)"
+  [[ "$review_line" =~ ^[0-9]+$ ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+  review_method_text="$(python3 "$java_method_window_script" "$application_file" "$review_line" --masked-comments 2>/dev/null || true)"
+  printf '%s\n' "$review_method_text" | grep -F 'countOpenBlockingIssues' >/dev/null || {
+    rm -f "$candidates"
+    return 0
+  }
+  repository_line="$(grep -nE "^[[:space:]]*[^/].*countOpenBlockingIssues[[:space:]]*\\(" "$repository_file" | head -n 1 | cut -d: -f1 || true)"
+  [[ "$repository_line" =~ ^[0-9]+$ ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+  repository_method_text="$(python3 "$java_method_window_script" "$repository_file" "$repository_line" --masked-comments 2>/dev/null || true)"
+  printf '%s\n' "$repository_method_text" | grep -F 'getStatus, "OPEN"' >/dev/null || {
+    rm -f "$candidates"
+    return 0
+  }
+  printf '%s\n' "$repository_method_text" | grep -Eqi 'ERROR|BLOCKER' || {
+    rm -f "$candidates"
+    return 0
+  }
+
   printf '%s\n%s\n%s\n%s\n\n' \
     "P1 $first_path:$first_line - 排版质量门禁允许人工把 ERROR/BLOCKER 问题改为已接受/已忽略，复核只统计 OPEN 阻塞项，形成可绕过的批准路径。" \
     "影响：具备 publishing:job:review 权限的同租户用户可先将 ERROR/BLOCKER 质量问题状态改为 IGNORED/RESOLVED，再提交 APPROVED 复核；数据库中不再有 OPEN 阻塞项时，任务可能在严重问题未解决的情况下被批准交付。" \
     "修复建议：ERROR/BLOCKER 不允许人工豁免，状态决策必须拒绝这些严重级别；复核门禁应按当前执行实例和非自动解决状态检查，并在事务内锁定任务与问题，不能只依赖 OPEN 状态计数。" \
     "验证方式：对 ERROR、BLOCKER 分别提交 IGNORED/RESOLVED 决策并立即 APPROVED，确认请求被拒绝且任务不变；对 INFO/WARNING 验证允许的人工决策仍可用，并覆盖已持久化的历史豁免记录。" >>"$output_file"
   rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_system_dict_global_authorization_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates vulnerable_candidates controller_file service_file locations first_path first_line
+  local candidate_path candidate_line source_file method_text
+  [[ -n "$source_root" ]] || return 0
+
+  # sys_dict and sys_dict_item are deliberately excluded from tenant-line
+  # rewriting in this application.  A controller write method therefore needs
+  # an explicit permission boundary.  Keep this rule narrow to the stable
+  # dictionary controller contract and inspect the changed method itself; a
+  # guard in an unrelated method or a comment must not make a write endpoint
+  # appear protected.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-system-dict-auth-candidates.XXXXXX")"
+  vulnerable_candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-system-dict-auth-vulnerable.XXXXXX")"
+  awk '
+    function is_controller_path(value) {
+      return value == "src/main/java/com/bit/system/controller/DictController.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_controller_path(path) &&
+          text ~ /@(PostMapping|PutMapping|DeleteMapping)/) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || {
+    rm -f "$candidates" "$vulnerable_candidates"
+    return 0
+  }
+
+  controller_file="$source_root/src/main/java/com/bit/system/controller/DictController.java"
+  service_file="$source_root/src/main/java/com/bit/system/service/impl/DictServiceImpl.java"
+  if [[ ! -f "$controller_file" || ! -f "$service_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/system/controller/DictController.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/service/impl/DictServiceImpl.java" ||
+     ! grep -Fq '@RequestMapping("/api/v1/dicts")' "$controller_file" ||
+     ! grep -Eq 'sysDictMapper\.(insert|updateById|deleteById)|sysDictItemMapper\.(insert|updateById|deleteById)' "$service_file" ||
+     ! grep -Rqs --include='*.java' 'SysDict' "$source_root/src/main/java" ||
+     ! grep -Rqs --include='*.java' 'SysDictItem' "$source_root/src/main/java" ||
+     ! grep -Rqs --include='*.yml' --include='*.yaml' --include='*.properties' 'sys_dict_item' "$source_root"; then
+    rm -f "$candidates" "$vulnerable_candidates"
+    return 0
+  fi
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" --masked 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -Eq 'dictService\.(create|update|delete)(Dict|Item)[[:space:]]*\(' || continue
+    # Method-level authorization is the relevant boundary.  Require a real
+    # permission expression, not merely an operation log or login check.
+    if printf '%s\n' "$method_text" | grep -Eqi '@PreAuthorize|@RequiresPermissions|hasPermission[[:space:]]*\(|@Permission|@SaCheckPermission|perm[[:space:]]*\.[[:space:]]*has[[:space:]]*\('; then
+      continue
+    fi
+    printf '%s\t%s\n' "$candidate_path" "$candidate_line" >>"$vulnerable_candidates"
+  done <"$candidates"
+
+  [[ -s "$vulnerable_candidates" ]] || {
+    rm -f "$candidates" "$vulnerable_candidates"
+    return 0
+  }
+
+  locations="$(awk -F '\t' '!seen[$0]++ { printf "%s%s:%s", (count++ ? ", " : ""), $1, $2 }' "$vulnerable_candidates")"
+  IFS=$'\t' read -r first_path first_line <"$vulnerable_candidates"
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 全局字典写入口缺少显式权限校验，且服务直接写入被租户隔离忽略的 sys_dict/sys_dict_item 表。" \
+    "影响：在网关已认证但路由未额外兜底的情况下，普通租户用户可调用字典类型或字典项的新增、修改、删除接口，改变所有租户共享的字典状态；这不是 TenantLine 插件能够自动修复的边界。" \
+    "修复建议：在每个字典写入口和服务层同时校验 sys:dict:create/update/delete/item 权限，保持全局表的跨租户操作仅对平台管理员开放；不要把 OperationLog、登录态或 tenant ignore 配置当作授权。" \
+    "验证方式：使用无 sys:dict 写权限的已登录租户用户分别请求字典和字典项 POST/PUT/DELETE，确认全部 403 且数据库无变化；使用平台管理员验证允许操作，并覆盖直接调用 service 的绕过控制器路径。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates" "$vulnerable_candidates"
   dedup_preflight_blocks "$output_file"
 }
 
@@ -9710,6 +9945,7 @@ collect_publishing_workspace_symlink_preflight "$chunk_input_file" "$build_prefl
 collect_publishing_mcp_job_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_evidence_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_review_issue_waiver_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_system_dict_global_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

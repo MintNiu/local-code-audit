@@ -37,7 +37,9 @@ final class AnnotatedMethod {
     @RequestParam(name = "{")
     private void target(@RequestParam(name = "}") Long id)
             throws IllegalStateException {
+        // @PreAuthorize("@perm.has('safe')")
         String brace = "}";
+        String status = "RESOLVED";
         if (id != null) {
             throw new IllegalStateException(brace);
         }
@@ -54,6 +56,18 @@ printf '%s\n' "$java_window_output" | grep -F 'private void target(' >/dev/null
 printf '%s\n' "$java_window_output" | grep -F 'String brace = "}";' >/dev/null
 if printf '%s\n' "$java_window_output" | grep -F 'private void next()' >/dev/null; then
   echo 'Java method window helper crossed into the next method' >&2
+  exit 1
+fi
+java_window_masked_output="$(python3 "$repo_root/bin/java-method-window.py" "$java_window_fixture" "$java_window_target_line" --masked)"
+if printf '%s\n' "$java_window_masked_output" | grep -F 'String brace = "}"' >/dev/null ||
+   printf '%s\n' "$java_window_masked_output" | grep -F '@PreAuthorize' >/dev/null; then
+  echo 'Java method window masked mode leaked comments or string literals' >&2
+  exit 1
+fi
+java_window_masked_comments_output="$(python3 "$repo_root/bin/java-method-window.py" "$java_window_fixture" "$java_window_target_line" --masked-comments)"
+printf '%s\n' "$java_window_masked_comments_output" | grep -F 'String status = "RESOLVED";' >/dev/null
+if printf '%s\n' "$java_window_masked_comments_output" | grep -F '@PreAuthorize' >/dev/null; then
+  echo 'Java method window masked-comments mode leaked comments' >&2
   exit 1
 fi
 
@@ -5446,6 +5460,7 @@ bash "$repo_root/evals/test-publishing-mcp-job-scope-preflight.sh"
 bash "$repo_root/evals/test-publishing-evidence-write-preflight.sh"
 # The review gate must not be bypassable by waiving ERROR/BLOCKER issues.
 bash "$repo_root/evals/test-publishing-review-issue-waiver-preflight.sh"
+bash "$repo_root/evals/test-system-dict-global-authorization-preflight.sh"
 
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed

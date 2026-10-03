@@ -103,12 +103,25 @@ import sys
 controller = Path(sys.argv[1])
 application = Path(sys.argv[2])
 controller.write_text(controller.read_text().replace(
-    '@PreAuthorize("@perm.has(\'publishing:job:execute\')")',
-    '@PreAuthorize("@perm.has(\'publishing:job:execute\')") // ExecutionRef worker grant required'))
-application.write_text(application.read_text() + '\n'
-    'ExecutionRef ref = requireExecutionRef();\n'
-    'lockActiveExecution(ref);\n'
-    'MessageDigest contentInspector = sha256Inspector();\n')
+    'Result<?> addArtifact(Long jobId, ArtifactCreateDTO dto) { return application.addArtifact(jobId, dto); }',
+    'Result<?> addArtifact(Long jobId, ArtifactCreateDTO dto) { ExecutionRef ref = requireExecutionRef(); return application.addArtifact(jobId, dto); }')
+    .replace(
+    'Result<?> addIssue(Long jobId, QualityIssueCreateDTO dto) { return application.addIssue(jobId, dto); }',
+    'Result<?> addIssue(Long jobId, QualityIssueCreateDTO dto) { ExecutionRef ref = requireExecutionRef(); return application.addIssue(jobId, dto); }')
+    .replace(
+    'Result<?> addInvocation(Long jobId, ToolInvocationCreateDTO dto) { return application.addInvocation(jobId, dto); }',
+    'Result<?> addInvocation(Long jobId, ToolInvocationCreateDTO dto) { ExecutionRef ref = requireExecutionRef(); return application.addInvocation(jobId, dto); }'))
+application_text = application.read_text()
+application_text = application_text.replace(
+    'void addArtifact(Long jobId, ArtifactCreateDTO dto) {',
+    'void addArtifact(Long jobId, ArtifactCreateDTO dto) { ExecutionRef ref = requireExecutionRef(); lockActiveExecution(ref); MessageDigest contentInspector = sha256Inspector();')
+application_text = application_text.replace(
+    'void addIssue(Long jobId, QualityIssueCreateDTO dto) {',
+    'void addIssue(Long jobId, QualityIssueCreateDTO dto) { ExecutionRef ref = requireExecutionRef(); lockActiveExecution(ref); MessageDigest contentInspector = sha256Inspector();')
+application_text = application_text.replace(
+    'void addInvocation(Long jobId, ToolInvocationCreateDTO dto) {',
+    'void addInvocation(Long jobId, ToolInvocationCreateDTO dto) { ExecutionRef ref = requireExecutionRef(); lockActiveExecution(ref);')
+application.write_text(application_text)
 PY
 safe_output="$(
   PATH="$fake_bin:$PATH" \

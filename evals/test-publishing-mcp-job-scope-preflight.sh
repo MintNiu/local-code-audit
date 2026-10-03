@@ -53,7 +53,14 @@ python3 - "$repo/src/main/java/com/bit/publishing/mcp/tool/PublishingMcpTools.ja
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
-path.write_text(path.read_text() + '\n@McpTool(name = "publishing_inspect_docx")\n// added MCP workspace tool declaration\n')
+text = path.read_text()
+text = text.replace(
+    '    WorkspaceResult createJobWorkspace(String jobNo) throws IOException {\n',
+    '    @McpTool(name = "publishing_create_job_workspace")\n'
+    '    // added MCP workspace tool declaration\n'
+    '    WorkspaceResult createJobWorkspace(String jobNo) throws IOException {\n',
+)
+path.write_text(text)
 PY
 
 cat >"$fake_bin/ollama" <<'EOF'
@@ -85,18 +92,39 @@ marker='出版 MCP 文件工具只有共享网关令牌认证'
 printf '%s\n' "$output" | grep -F 'PublishingMcpTools.java:' >/dev/null
 
 cp -R "$repo" "$safe_repo"
-cat >>"$safe_repo/src/main/java/com/bit/publishing/mcp/tool/PublishingMcpTools.java" <<'EOF'
+python3 - "$safe_repo/src/main/java/com/bit/publishing/mcp/tool/PublishingMcpTools.java" "$safe_repo/src/main/java/com/bit/publishing/mcp/tool/PublishingDocumentTools.java" <<'PY'
+from pathlib import Path
+import sys
 
+mcp_path, document_path = map(Path, sys.argv[1:])
+mcp = mcp_path.read_text()
+mcp = mcp.replace(
+    'Path root = workspaceRoot.resolve(jobNo).normalize();\n',
+    'var grant = grantService.authorize(executionGrant, "publishing_create_job_workspace");\n'
+    '        Path root = workspaceRoot.resolve(jobNo).normalize();\n',
+)
+mcp += '''
+// An unrelated helper must not suppress the guarded workspace method.
 private final PublishingExecutionGrantService grantService = null;
 private final PublishingWorkspaceService workspaceService = null;
-var grant = grantService.authorize(executionGrant, "publishing_create_job_workspace");
-EOF
-cat >>"$safe_repo/src/main/java/com/bit/publishing/mcp/tool/PublishingDocumentTools.java" <<'EOF'
+void unrelatedGrantHelper() {
+    var unrelated = grantService.authorize(executionGrant, "unrelated");
+}
+'''
+mcp_path.write_text(mcp)
 
+document = document_path.read_text()
+document = document.replace(
+    'Path input = resolveExisting(relativePath, ".docx");\n',
+    'var grant = grantService.authorize(executionGrant, "publishing_inspect_docx");\n'
+    '        Path input = resolveExisting(relativePath, ".docx");\n',
+)
+document += '''
 private final PublishingExecutionGrantService grantService = null;
 private final PublishingWorkspaceService workspaceService = null;
-var grant = grantService.authorize(executionGrant, "publishing_inspect_docx");
-EOF
+'''
+document_path.write_text(document)
+PY
 safe_output="$(
   PATH="$fake_bin:$PATH" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \

@@ -445,3 +445,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 2026-10-03：补齐出版任务证据边界与复核门禁预检。`platform-publishing-service:e41c1c3` 的 `/artifacts`、`/issues`、`/tool-invocations` 写入在普通 execute 权限下直接接受 DTO 并保存 READY/OPEN 证据，新增聚合 P1；同提交的复核流程还允许把 ERROR/BLOCKER 改为 IGNORED/RESOLVED，而批准只统计 OPEN 阻塞项，新增第二条聚合 P1。两条规则均要求可见的保存/计数/状态证据，并以 ExecutionRef/租约、实际内容校验和 NON_WAIVABLE_SEVERITIES 作为安全负例；独立 fixture、完整预检、输出与证据过滤回归均通过。该提交参与规则设计，不计入正式 holdout。
 
 同轮补充出版 MCP 资源授权预检：当文件工具只有共享 `X-Gateway-Token`、直接接受 jobNo/工作区相对路径，且当前源码没有 `PublishingExecutionGrantService`、`PublishingWorkspaceService` 或授权调用时，报告 tenant/job/execution scope 缺失 P1；后续 HMAC execution grant 与租户工作区服务作为安全负例。该规则与符号链接预检分开，前者覆盖资源授权，后者覆盖真实路径逃逸；正负 fixture 和完整回归均通过，相关提交移出正式 holdout。
+
+随后将出版 MCP 资源授权预检收紧为变更入口所在的方法窗口，新增“实际工具方法有 grant、无关 helper 也有 grant”的反例，避免整文件关键词造成误抑制；并新增 system 字典全局写权限预检。该规则要求 `/api/v1/dicts` 的 POST/PUT/DELETE 方法实际调用字典写服务，服务直接写 `sys_dict/sys_dict_item`，且租户配置将两表列为 ignore；缺少方法级 `@PreAuthorize`/等效权限表达式时报告 P1，带权限守卫的写入口和无关查询/日志方法保持 clean。

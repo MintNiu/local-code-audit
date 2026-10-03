@@ -86,8 +86,75 @@ def mask_non_code(text: str) -> str:
     return "".join(masked)
 
 
+def mask_comments_only(text: str) -> str:
+    """Mask comments while preserving string/annotation literal contents."""
+    masked = list(text)
+    state = "normal"
+    index = 0
+    while index < len(text):
+        if state == "normal":
+            if text.startswith("//", index):
+                masked[index] = masked[index + 1] = " "
+                index += 2
+                state = "line"
+                continue
+            if text.startswith("/*", index):
+                masked[index] = masked[index + 1] = " "
+                index += 2
+                state = "block"
+                continue
+            if text.startswith('"""', index):
+                index += 3
+                state = "text"
+                continue
+            if text[index] == '"':
+                index += 1
+                state = "string"
+                continue
+            if text[index] == "'":
+                index += 1
+                state = "char"
+                continue
+            index += 1
+            continue
+        if state == "line":
+            if text[index] == "\n":
+                state = "normal"
+            else:
+                masked[index] = " "
+            index += 1
+            continue
+        if state == "block":
+            if text.startswith("*/", index):
+                masked[index] = masked[index + 1] = " "
+                index += 2
+                state = "normal"
+            else:
+                if text[index] != "\n":
+                    masked[index] = " "
+                index += 1
+            continue
+        if state == "text":
+            if text.startswith('"""', index):
+                index += 3
+                state = "normal"
+            else:
+                index += 1
+            continue
+        if text[index] == "\\":
+            index += 2 if index + 1 < len(text) else 1
+            continue
+        if (state == "string" and text[index] == '"') or (state == "char" and text[index] == "'"):
+            index += 1
+            state = "normal"
+        else:
+            index += 1
+    return "".join(masked)
+
+
 def main() -> int:
-    if len(sys.argv) != 3 or not sys.argv[2].isdigit():
+    output_mode = sys.argv[3] if len(sys.argv) == 4 else ""
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and output_mode not in ("--masked", "--masked-comments")) or not sys.argv[2].isdigit():
         return 2
     path = Path(sys.argv[1])
     target_line = int(sys.argv[2])
@@ -98,7 +165,12 @@ def main() -> int:
     if target_line < 1 or target_line > len(starts):
         return 0
     target_offset = starts[target_line - 1]
-    lines = text.splitlines(keepends=True)
+    output_text = masked
+    if output_mode == "--masked-comments":
+        output_text = mask_comments_only(text)
+    elif output_mode != "--masked":
+        output_text = text
+    lines = output_text.splitlines(keepends=True)
     # Match every closing parenthesis to its opening parenthesis first. This
     # handles nested parameter annotations such as @Anno(value = "x"),
     # generic calls, and signatures whose parameters span multiple lines.
