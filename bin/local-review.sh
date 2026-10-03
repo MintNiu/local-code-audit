@@ -6486,6 +6486,95 @@ collect_system_dict_global_authorization_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_bafan_oss_anonymous_policy_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file mvc_file method_text first_path first_line locations
+  [[ -n "$source_root" ]] || return 0
+
+  # This is intentionally tied to Bafan's concrete policy endpoint.  An empty
+  # starts-with key condition plus a public interceptor exclusion grants a
+  # usable OSS signature for arbitrary object names; ordinary SDK uploads,
+  # admin uploads, and policy endpoints with an exact user-bound key stay
+  # outside this rule.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-bafan-oss-policy-candidates.XXXXXX")"
+  awk '
+    function is_policy_path(value) {
+      return value == "src/main/java/com/bofan/modules/common/controller/OssPolicyController.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_policy_path(path) &&
+          (text ~ /@GetMapping\("\/policy"\)/ || text ~ /starts-with/ || text ~ /getUploadPolicy[[:space:]]*\(/)) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  controller_file="$source_root/src/main/java/com/bofan/modules/common/controller/OssPolicyController.java"
+  mvc_file="$source_root/src/main/java/com/bofan/common/config/WebMvcConfig.java"
+  if [[ ! -f "$controller_file" || ! -f "$mvc_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bofan/modules/common/controller/OssPolicyController.java" ||
+     path_has_symlink_component "src/main/java/com/bofan/common/config/WebMvcConfig.java" ||
+     ! grep -Fq '@RequestMapping("/api/oss")' "$controller_file" ||
+     ! grep -Fq '@GetMapping("/policy")' "$controller_file" ||
+     ! grep -Eq '/api/oss/\*\*|/api/upload/\*\*' "$mvc_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_root/$candidate_path" "$candidate_line" --masked-comments 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -F 'starts-with' >/dev/null || continue
+    printf '%s\n' "$method_text" | grep -F '$key' >/dev/null || continue
+    printf '%s\n' "$method_text" | grep -F '104857600' >/dev/null || continue
+    printf '%s\n' "$method_text" | grep -Eqi 'accessKeyId|signature|policy' || continue
+    if printf '%s\n' "$method_text" | grep -Eqi '@PreAuthorize|@LoginRequired|@RequiresAuthentication|@SaCheckLogin|UserContext[[:space:]]*\.[[:space:]]*(getUserId|require)|userId[[:space:]]*==[[:space:]]*null'; then
+      continue
+    fi
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+  [[ -n "$locations" ]] || { rm -f "$candidates"; return 0; }
+
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - OSS Policy 接口被公开放行且签名条件允许任意对象 key，匿名调用方可取得可用的任意对象上传凭证。" \
+    "影响：未登录或无有效小程序用户身份的调用方可直接获取共享 bucket 的 OSS policy/signature，向任意前缀写入或覆盖对象（当前上限 100MB），造成内容污染、存储/流量成本耗尽和后续恶意文件传播。" \
+    "修复建议：移除 /api/oss/** 与上传路径的粗粒度匿名白名单，只保留精确公开接口；要求 UserContext 用户身份和用途/扩展名白名单，生成绑定 userId、UUID、固定目录和精确 key/content-type/大小的 policy，并增加日配额/速率限制。" \
+    "验证方式：匿名请求、伪造/过期 Token 和跨用户 key 均应在签名生成前返回 401/403；有效用户只能获得绑定自身用途和目录的短时 policy，尝试替换 key、content-type、大小和 bucket 前缀均被 OSS 拒绝，并覆盖限流配额。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_url_prefix_whitelist_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -9946,6 +10035,7 @@ collect_publishing_mcp_job_scope_preflight "$chunk_input_file" "$build_preflight
 collect_publishing_evidence_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_review_issue_waiver_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_dict_global_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_bafan_oss_anonymous_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
