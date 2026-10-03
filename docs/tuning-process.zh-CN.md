@@ -6,6 +6,8 @@
 
 新增 `collect_publishing_external_ticket_token_preflight`：仅当 `PlatformFileWorkspaceClient` 的差异新增 `X-Gateway-Token`，且当前 `resolveTicketUri` 接受未做主机 allowlist 的绝对 HTTPS 地址时报告 P1；带主机校验的负例保持 clean。正负 fixture 与完整 `test-preflight.sh` 已通过。真实 `platform-publishing-service:0ae0ffb` 首轮 16 个分片完整结束并返回 clean，确认该根因是模型漏报；该提交参与规则设计，结果只作为 tuning-source 回归，不计入独立 holdout。后续优先使用窄化差异和确定性规则验证，减少重复跑完整长提交。
 
+同轮对 ERP `8a2c1e1` 做真实父子快照验证：通用 `collect_schema_snapshot_migration_preflight` 已在 `sql/platform_erp.sql:2407` 准确发现新增 `request_no` 只进入初始化快照、没有既有库版本化 migration。该样本按 schema-migration 机制族转为 tuning-source，没有再次启动昂贵的模型双跑；这验证了先做静态证据预筛可以直接淘汰一批同类候选。
+
 ## 当前进展：锁序候选与阶段一门禁（2026-09-27）
 
 运行器现在会对包含 `@Transactional`、`find*ForUpdate` 或 `FOR UPDATE` 的变更 Java 文件，受限列出变更文件及使用相同锁接收者的关联 Java 文件。证据包含源码行号、锁调用上下文窗口和完整调用顺序，但只作为 prompt 文本证据，不自动生成 finding，也不能单独证明同表、同事务或可达并发；文件/行数有上限，预算不足时可跳过。`test-sharding.sh` 已验证分片请求仍能看到变更文件、未变更关联文件和行锁调用。
