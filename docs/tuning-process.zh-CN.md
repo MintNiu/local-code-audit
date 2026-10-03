@@ -976,3 +976,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 随后补齐 `platform-system:e45a97f5` 应用详情密钥边界预检。规则要求 `ApplicationController` 的查询权限详情方法返回原始 `SysApplication`，应用层直接走 `ensureExists`，仓储层的 `findById` 使用 `selectById`，同时实体含 `clientSecret` 且仓储另有 `SysTenantApplication` 关系证据；脱敏 `ApplicationVO` 或按租户关系读取的安全夹具保持 clean。真实快照 smoke 稳定定位 `ApplicationController.java:66`，确定性 P1 与硬编码凭据等原有 P1 均可见。该样本参与规则设计，已转为 tuning-source，不计入独立召回率。
 
 加入该调优源后的私有表口径不变：仍为 17 个独立记录（严格排除 HR 条件样本为 16 个），命中仍为 6 个，严格召回约 37.5%；tuning-source 为 5 个。还需至少 4 个未参与调优的独立根因补足 20 个样本，再进入最终门禁。调优源只用于回归保护，不计入独立 holdout 分母。
+
+随后补齐 `platform-system:abfb9cc` 内部 API 资源同步边界预检。规则限定 `/api/v1/internal/api-resources/sync`，要求同步应用按请求体 `applicationCode` 选择目标并直接新增/更新资源，同时 README 只证明共享 `X-Gateway-Token`，而控制器和同步服务没有可见的调用方到应用绑定；带 `@InternalService`、服务身份或显式 application grant 的安全夹具保持 clean。真实归档 smoke 稳定定位 `ApiResourceSyncController.java:24`，确定性 P1 与硬编码凭据等原有 P1 均可见。该样本参与规则设计，已转为 tuning-source，不计入独立召回率；独立表仍为 17 个记录（严格 16 个、命中 6 个、37.5%），tuning-source 增为 6 个，仍需至少 4 个未参与调优根因补足 20 个样本。

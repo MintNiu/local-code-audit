@@ -6895,6 +6895,108 @@ collect_system_application_secret_scope_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_system_api_resource_sync_scope_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file application_file readme_file candidate_path candidate_line
+  local method_text sync_line sync_method locations first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # A gateway token authenticates the calling channel, but a shared token does
+  # not identify which application a caller is allowed to synchronize.  Keep
+  # this rule tied to the concrete internal API-resource sync contract and
+  # require visible applicationCode-driven writes.  Explicit caller identity
+  # or service-to-application binding remains a clean boundary.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-system-api-resource-sync-candidates.XXXXXX")"
+  awk '
+    function is_controller_path(value) {
+      return value == "src/main/java/com/bit/system/controller/ApiResourceSyncController.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_controller_path(path) &&
+          (text ~ /@PostMapping\("\/sync"\)/ || text ~ /ApiResourceSyncRequest/ || text ~ /\.synchronize\(/)) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+
+  controller_file="$source_root/src/main/java/com/bit/system/controller/ApiResourceSyncController.java"
+  application_file="$source_root/src/main/java/com/bit/system/application/ApiResourceSyncApplication.java"
+  readme_file="$source_root/README.md"
+  if [[ ! -f "$controller_file" || ! -f "$application_file" || ! -f "$readme_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/system/controller/ApiResourceSyncController.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/application/ApiResourceSyncApplication.java" ||
+     ! grep -Fq '@RequestMapping("/api/v1/internal/api-resources")' "$controller_file" ||
+     ! grep -Eqi 'X-Gateway-Token|gateway\.auth\.internal-token' "$readme_file" ||
+     ! grep -Fq 'request.applicationCode()' "$application_file" ||
+     ! grep -Fq 'applicationMapper.selectOne' "$application_file" ||
+     ! grep -Eq 'apiResourceMapper\.(insert|updateById)' "$application_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_root/$candidate_path" "$candidate_line" --masked-comments 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -F 'ApiResourceSyncRequest' >/dev/null || continue
+    printf '%s\n' "$method_text" | grep -F 'synchronize(' >/dev/null || continue
+    if printf '%s\n' "$method_text" | grep -Eqi '@RequestHeader[[:space:]]*\([[:space:]]*"X-Gateway-Token"|@PreAuthorize|AuthenticationPrincipal|InternalService|ServiceIdentity|clientCertificate|mTLS'; then
+      continue
+    fi
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+  [[ -n "$locations" ]] || { rm -f "$candidates"; return 0; }
+
+  sync_line="$(grep -nE '^[[:space:]]*public[[:space:]]+ApiResourceSyncResult[[:space:]]+synchronize[[:space:]]*\(' "$application_file" | head -n 1 | cut -d: -f1 || true)"
+  [[ "$sync_line" =~ ^[0-9]+$ ]] || { rm -f "$candidates"; return 0; }
+  sync_method="$(python3 "$java_method_window_script" "$application_file" "$sync_line" --masked-comments 2>/dev/null || true)"
+  printf '%s\n' "$sync_method" | grep -F 'request.applicationCode()' >/dev/null || { rm -f "$candidates"; return 0; }
+  printf '%s\n' "$sync_method" | grep -F 'applicationMapper.selectOne' >/dev/null || { rm -f "$candidates"; return 0; }
+  printf '%s\n' "$sync_method" | grep -Eq 'apiResourceMapper\.(insert|updateById)' || { rm -f "$candidates"; return 0; }
+  if printf '%s\n' "$sync_method" | grep -Eqi 'callerService|allowedApplication|serviceIdentity|assertService|clientCertificate|mTLS|trustedApplication|applicationGrant|sign(ed)?Grant'; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 内部 API 资源同步接口使用共享网关令牌但未把调用方绑定到 applicationCode，调用方可按请求体选择并改写其他应用的网关鉴权资源。" \
+    "影响：任何获得共享 X-Gateway-Token 的内部服务或被转发到该端点的调用方，都可伪造 applicationCode 和资源清单，新增、覆盖、下线其他应用的 API 权限与匿名放行规则，造成跨应用授权污染和持久化越权。" \
+    "修复建议：使用 mTLS/服务身份或短时签名 service grant，将调用方身份与允许的 applicationCode 白名单绑定；服务端从可信身份推导目标应用，拒绝使用请求体中的任意 applicationCode 选择目标，并对资源变更保留审计和回滚。" \
+    "验证方式：使用服务 A 的凭据提交服务 B 的 applicationCode，确认在写库和刷新网关规则前返回 403 且无变更；覆盖新增、更新、下线、report/sync 两种模式、重放和并发同步，并验证合法服务只能操作绑定应用。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_url_prefix_whitelist_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -10359,6 +10461,7 @@ collect_bafan_oss_anonymous_policy_preflight "$chunk_input_file" "$build_preflig
 collect_system_dept_tenant_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_bafan_admin_category_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_application_secret_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_system_api_resource_sync_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
