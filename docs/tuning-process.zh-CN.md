@@ -4,7 +4,7 @@
 
 ### 2026-10-04：发布服务外部票据令牌预检
 
-新增 `collect_publishing_external_ticket_token_preflight`：仅当 `PlatformFileWorkspaceClient` 的差异新增 `X-Gateway-Token`，且当前 `resolveTicketUri` 接受未做主机 allowlist 的绝对 HTTPS 地址时报告 P1；带主机校验的负例保持 clean。正负 fixture 与完整 `test-preflight.sh` 已通过。真实 `platform-publishing-service:0ae0ffb` 首轮 16 个分片完整结束且稳定 clean，确认该根因是模型稳定漏报；该提交参与规则设计，结果只作为 tuning-source 回归，不计入独立 holdout。后续优先使用窄化差异和确定性规则验证，减少重复跑完整长提交。
+新增 `collect_publishing_external_ticket_token_preflight`：仅当 `PlatformFileWorkspaceClient` 的差异新增 `X-Gateway-Token`，且当前 `resolveTicketUri` 接受未做主机 allowlist 的绝对 HTTPS 地址时报告 P1；带主机校验的负例保持 clean。正负 fixture 与完整 `test-preflight.sh` 已通过。真实 `platform-publishing-service:0ae0ffb` 首轮 16 个分片完整结束并返回 clean，确认该根因是模型漏报；该提交参与规则设计，结果只作为 tuning-source 回归，不计入独立 holdout。后续优先使用窄化差异和确定性规则验证，减少重复跑完整长提交。
 
 ## 当前进展：锁序候选与阶段一门禁（2026-09-27）
 

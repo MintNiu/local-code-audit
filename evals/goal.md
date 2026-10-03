@@ -8,7 +8,7 @@
 
 ### 2026-10-04：效率优先的发布票据泄露预检
 
-针对 `platform-publishing-service:0ae0ffb` 的稳定漏报，新增窄范围 `collect_publishing_external_ticket_token_preflight`：只有差异新增下载请求的 `X-Gateway-Token`，且当前票据解析接受未做主机 allowlist 的绝对 HTTPS 地址时才报告 P1；带主机校验的负例保持 clean。正负 fixture 和完整 `test-preflight.sh` 已通过。真实长提交首轮 16 个分片完整结束并返回 clean，确认该样本作为 tuning-source；后续优先使用静态证据预筛和窄化差异，减少重复长提交双跑。
+针对 `platform-publishing-service:0ae0ffb` 的漏报，新增窄范围 `collect_publishing_external_ticket_token_preflight`：只有差异新增下载请求的 `X-Gateway-Token`，且当前票据解析接受未做主机 allowlist 的绝对 HTTPS 地址时才报告 P1；带主机校验的负例保持 clean。正负 fixture 和完整 `test-preflight.sh` 已通过。真实长提交首轮 16 个分片完整结束并返回 clean，确认该样本作为 tuning-source；后续优先使用静态证据预筛和窄化差异，减少重复长提交双跑。
 
 ### 2026-10-01：真实冻结留出补强可空值与租户/仓库边界
 
