@@ -970,3 +970,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 针对 `platform-bafan:807b43b4` 的稳定漏报，新增 `collect_bafan_admin_category_authorization_preflight`。规则只匹配 `AdminCategoryController` 的 POST/PUT/状态变更/DELETE 方法，并要求当前 `/admin/**` 只注册 `AdminAuthInterceptor`、认证拦截器仅解析 JWT/保存 role 而没有按权限拒绝，同时具体方法直接写 `categoryMapper` 且没有 `@PreAuthorize` 或等效权限表达式。方法级权限守卫和真正的 `AdminPermissionInterceptor` 作为 clean 边界，日志注解不被视为授权。
 
 正负 fixture、完整确定性回归和真实 `807b43b4` 归档 smoke 通过；真实快照稳定输出四个分类写入口的聚合 P1。该样本参与了规则设计，已从私有盲测候选转为 `tuning-source`，不计入独立 holdout 召回率，后续必须用新的未见根因替补。
+
+截至本轮私有表审计，独立表保留 17 个 P0/P1 根因，其中 1 个是 HR 部署边界条件样本；严格口径为 16 个根因、命中 6 个，召回约 37.5%。部门和分类样本都已移入 tuning-source，不能把确定性预检命中回填到这个比例；后续仍需补充至少 4 个未参与调优的独立根因，才能达到 20 个样本的前置规模，然后再按 ≥90% 召回、≤10% 误报、定位准确、双轮稳定和输出完整门禁验收。

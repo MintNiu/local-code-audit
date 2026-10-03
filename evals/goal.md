@@ -455,3 +455,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 2026-10-03：补齐 `platform-system:797cd5b` 部门跨租户写入预检。规则限定 `DeptController`/`DeptServiceImpl`/`SysDept` 的方法级证据，只有请求体 `tenantId` 经 `buildDept` 进入部门创建/更新，且服务层直接执行 `insert`/`updateById`、没有 `TenantOperationGuard` 或当前租户归属断言时报告 P1；方法声明定位避免把 `buildDept(...)` 调用行误当成证据，服务层守卫和非部门接口为 clean 负例。完整确定性回归与真实 797cd5b 归档 smoke 通过，稳定定位 `DeptController.java:86`、`DeptServiceImpl.java:38`。该样本参与规则设计，已从独立表转为 tuning-source，不计入正式 holdout 召回率；独立表当前需用新的未见根因替补。
 
 2026-10-03：补齐 `platform-bafan:807b43b4` 后台分类写权限预检。规则限定 `AdminCategoryController` 的 POST/PUT/状态变更/DELETE 方法，要求 `/admin/**` 只注册认证拦截器、拦截器只解析 JWT/保存 role，且具体写方法直接操作 `categoryMapper`、没有方法级权限表达式；带权限守卫或真正权限拦截器的安全夹具保持 clean。完整回归与真实快照 smoke 通过，稳定聚合四个写入口为一条 P1；样本已转为 tuning-source，不计入独立 holdout，后续需补未见根因。
+
+本轮同步审计私有 scorecard：独立表当前为 17 个 P0/P1 根因（含 1 个 HR 条件样本），严格口径为 16 个、命中 6 个，召回约 37.5%；tuning-source 为 4 个。新增预检命中只证明已知漏报形成回归保护，不能回填独立召回率；还需至少 4 个未参与调优的独立根因补足样本规模，再执行最终召回、误报、定位、稳定性和完整性门禁。
