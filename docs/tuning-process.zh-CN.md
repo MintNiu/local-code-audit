@@ -958,3 +958,9 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 真实 `platform-system:a269a835` 快照随后完成一次 Ollama 实跑：分片全部结束且没有截断/超时，输出同时保留模型原生 P1 与确定性字典授权 P1。该提交已参与规则设计，私有 scorecard 将其从 `manual-confirmed` 转为 `tuning-source`，不再计入独立 holdout；这次运行只证明真实模型链路和“所有原始问题可见”契约正常。
 
 随后补充 Bafan OSS 匿名任意对象写入预检：只在具体 `OssPolicyController` 的 `/api/oss/policy` 同时出现 `/api/oss/**` 或 `/api/upload/**` 匿名排除、空 `$key` `starts-with`、100MB policy 和服务端签名字段时报告 P1；移除白名单、增加方法级身份校验、精确用户 key 或普通 SDK 上传均保持 clean。正负 fixture、完整预检回归和真实 `bfan-backend:ee1e73b4` 快照 smoke 均通过；真实输出保留默认凭据 P1 与新的匿名写入 P1。该提交参与规则设计，已转为 tuning-source，不计入独立 holdout。
+
+### 2026-10-03：补齐部门写接口的租户归属预检
+
+针对 `platform-system:797cd5b` 的稳定漏报，新增 `collect_system_dept_tenant_write_preflight`。规则只匹配具体的 `DeptController`/`DeptServiceImpl`/`SysDept` 路径，并要求控制器从请求体读取 `tenantId`、服务层在 `createDept` 或 `updateDept` 中把该值送入 `insert`/`updateById`，同时缺少 `TenantOperationGuard`、当前租户解析或归属断言。方法窗口会避开 `buildDept(...)` 调用行，只分析真实方法声明；带服务层租户守卫的创建/更新和不涉及部门写入的接口保持 clean。影响描述同时覆盖父部门跨租户树污染、绕过控制器直接调用 service，以及租户插件开启/关闭的验证边界。
+
+正负 fixture、完整 `test-preflight.sh`、分片、输出可见性、证据过滤、Java 方法窗口和 shell 语法回归均通过。对真实 `797cd5b` 快照的归档 smoke 能稳定输出 `DeptController.java:86` 和 `DeptServiceImpl.java:38` 的 P1；该样本参与了规则设计，已从私有独立 holdout 转为 `tuning-source`，不增加正式召回率分母，后续必须用新的未见根因替补。

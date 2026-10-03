@@ -6575,6 +6575,127 @@ collect_bafan_oss_anonymous_policy_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_system_dept_tenant_write_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file service_file domain_file candidate_path candidate_line
+  local method_text build_line create_line create_method update_line update_method
+  local vulnerable_create vulnerable_update locations first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # A tenantId in a request body is not itself a privilege.  This rule is
+  # limited to the concrete system department write path and requires the
+  # current service to copy that request value into insert/updateById without
+  # the later TenantOperationGuard/parent-tenant checks.  It does not flag
+  # read-only DTOs or generic cross-tenant platform-admin operations.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-system-dept-tenant-candidates.XXXXXX")"
+  awk '
+    function is_dept_path(value) {
+      return value == "src/main/java/com/bit/system/controller/DeptController.java" ||
+             value == "src/main/java/com/bit/system/service/impl/DeptServiceImpl.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_dept_path(path) &&
+          (text ~ /@(PostMapping|PutMapping)/ || text ~ /tenantId|createDept|updateDept/)) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+
+  controller_file="$source_root/src/main/java/com/bit/system/controller/DeptController.java"
+  service_file="$source_root/src/main/java/com/bit/system/service/impl/DeptServiceImpl.java"
+  domain_file="$source_root/src/main/java/com/bit/system/domain/SysDept.java"
+  if [[ ! -f "$controller_file" || ! -f "$service_file" || ! -f "$domain_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/system/controller/DeptController.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/service/impl/DeptServiceImpl.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/domain/SysDept.java" ||
+     ! grep -Fq '@RequestMapping("/api/v1/depts")' "$controller_file" ||
+     ! grep -Fq 'tenantId' "$controller_file" ||
+     ! grep -Fq 'tenantId' "$domain_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  vulnerable_create=false
+  vulnerable_update=false
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_root/$candidate_path" "$candidate_line" --masked-comments 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    if printf '%s\n' "$method_text" | grep -Eqi '@PostMapping|@PutMapping|tenantId'; then
+      if [[ -z "$locations" ]]; then
+        first_path="$candidate_path"
+        first_line="$candidate_line"
+      fi
+      locations="${locations:+$locations, }$candidate_path:$candidate_line"
+    fi
+  done <"$candidates"
+  [[ -n "$locations" ]] || { rm -f "$candidates"; return 0; }
+
+  # Match the declaration (including its opening brace), not a controller call
+  # such as deptService.createDept(buildDept(body)).
+  build_line="$(grep -nE 'buildDept[[:space:]]*\([^)]*\)[[:space:]]*\{' "$controller_file" | head -n 1 | cut -d: -f1 || true)"
+  [[ "$build_line" =~ ^[0-9]+$ ]] || { rm -f "$candidates"; return 0; }
+  method_text="$(python3 "$java_method_window_script" "$controller_file" "$build_line" --masked-comments 2>/dev/null || true)"
+  printf '%s\n' "$method_text" | grep -F 'tenantId' >/dev/null || { rm -f "$candidates"; return 0; }
+
+  create_line="$(grep -nE '^[[:space:]]*[^/].*createDept[[:space:]]*\(' "$service_file" | head -n 1 | cut -d: -f1 || true)"
+  update_line="$(grep -nE '^[[:space:]]*[^/].*updateDept[[:space:]]*\(' "$service_file" | head -n 1 | cut -d: -f1 || true)"
+  if [[ "$create_line" =~ ^[0-9]+$ ]]; then
+    create_method="$(python3 "$java_method_window_script" "$service_file" "$create_line" --masked-comments 2>/dev/null || true)"
+    if printf '%s\n' "$create_method" | grep -Eq 'dept\.getTenantId\(\)[[:space:]]*!=[[:space:]]*null|dept\.getTenantId\(\)[[:space:]]*\?' &&
+       printf '%s\n' "$create_method" | grep -F 'sysDeptMapper.insert' >/dev/null &&
+       ! printf '%s\n' "$create_method" | grep -Eqi 'TenantOperationGuard|resolveTenantId|assertCurrentTenant|tenantId.*currentTenant|currentTenant.*tenantId'; then
+      vulnerable_create=true
+    fi
+  fi
+  if [[ "$update_line" =~ ^[0-9]+$ ]]; then
+    update_method="$(python3 "$java_method_window_script" "$service_file" "$update_line" --masked-comments 2>/dev/null || true)"
+    if printf '%s\n' "$update_method" | grep -F 'dept.setTenantId(dept.getTenantId' >/dev/null &&
+       printf '%s\n' "$update_method" | grep -F 'sysDeptMapper.updateById' >/dev/null &&
+       ! printf '%s\n' "$update_method" | grep -Eqi 'TenantOperationGuard|resolveTenantId|assertCurrentTenant|tenantId.*currentTenant|currentTenant.*tenantId'; then
+      vulnerable_update=true
+    fi
+  fi
+  [[ "$vulnerable_create" == true || "$vulnerable_update" == true ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 部门写接口接受请求体 tenantId，并在服务层直接用于 insert/updateById，缺少当前租户与目标归属校验。" \
+    "影响：具备部门写权限的租户用户可创建带任意 tenant_id 的部门，或把自身可见部门的归属改写到另一租户；父部门只按 ID 查询时还可能建立跨租户部门树，形成租户边界污染和后续权限继承风险。" \
+    "修复建议：创建时只允许 ROOT/平台迁移显式指定租户，普通租户强制使用 TenantContextHolder；更新禁止改变既有 tenant_id，并在锁定资源后校验当前租户和父部门 tenant_id 相同；将 TenantOperationGuard 下沉到服务层，不能只依赖控制器权限或 MyBatis 租户拦截器。" \
+    "验证方式：普通租户分别提交其他 tenantId、跨租户 parentId 和更新归属请求，确认全部 403/业务拒绝且数据库 tenant_id/tree_path 不变；ROOT/受控迁移验证允许路径，并覆盖绕过控制器直接调用 service、并发更新和租户插件开启/关闭两种配置。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_url_prefix_whitelist_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -10036,6 +10157,7 @@ collect_publishing_evidence_write_preflight "$chunk_input_file" "$build_prefligh
 collect_publishing_review_issue_waiver_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_dict_global_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_bafan_oss_anonymous_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_system_dept_tenant_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

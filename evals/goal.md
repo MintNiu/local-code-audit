@@ -451,3 +451,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 真实 `platform-system:a269a835` 快照的一次 Ollama 实跑全部分片正常结束，模型原生 P1 与确定性字典授权 P1 均可见且没有截断/超时；该样本已转为 tuning-source，不回填独立 holdout 召回率。
 
 随后新增 Bafan OSS 匿名任意对象写入预检，要求具体 policy 方法、匿名路径排除、空 `$key` 前缀和 100MB policy 同时成立；正负 fixture 与真实 `bfan-backend:ee1e73b4` snapshot smoke 通过，确定性 P1 与原有默认凭据 P1 均可见。该提交已移出独立 holdout，后续需用新的未见根因替补。
+
+2026-10-03：补齐 `platform-system:797cd5b` 部门跨租户写入预检。规则限定 `DeptController`/`DeptServiceImpl`/`SysDept` 的方法级证据，只有请求体 `tenantId` 经 `buildDept` 进入部门创建/更新，且服务层直接执行 `insert`/`updateById`、没有 `TenantOperationGuard` 或当前租户归属断言时报告 P1；方法声明定位避免把 `buildDept(...)` 调用行误当成证据，服务层守卫和非部门接口为 clean 负例。完整确定性回归与真实 797cd5b 归档 smoke 通过，稳定定位 `DeptController.java:86`、`DeptServiceImpl.java:38`。该样本参与规则设计，已从独立表转为 tuning-source，不计入正式 holdout 召回率；独立表当前需用新的未见根因替补。
