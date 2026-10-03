@@ -6,6 +6,10 @@
 
 ### 当前进展（2026-09-27）
 
+### 2026-10-04：效率优先的发布票据泄露预检
+
+针对 `platform-publishing-service:0ae0ffb` 的稳定漏报，新增窄范围 `collect_publishing_external_ticket_token_preflight`：只有差异新增下载请求的 `X-Gateway-Token`，且当前票据解析接受未做主机 allowlist 的绝对 HTTPS 地址时才报告 P1；带主机校验的负例保持 clean。正负 fixture 和完整 `test-preflight.sh` 已通过。真实长提交首轮 16 个分片完整结束并返回 clean，确认该样本作为 tuning-source；后续优先使用静态证据预筛和窄化差异，减少重复长提交双跑。
+
 ### 2026-10-01：真实冻结留出补强可空值与租户/仓库边界
 
 阶段一冻结留出新增并完成双跑：`platform-auth:9dbcc0c` 模型命中查询参数令牌 P1、漏掉在线会话对象中的原始 token；`platform-job:5dfc6a1` 与 `c071a63` 分别漏掉可空 `XxlJobHelper.getJobParam()` 和可空 `ReturnT.msg.length()`；`platform-system:ecc8d75` 漏掉角色 API 绑定未按租户应用范围校验；`platform-erp-service:5592758` 漏掉寻货入库绕过仓库/供方归属检查。五个样本的重复 finding signature 均稳定，job/system/ERP 原模型均返回 clean，不能把合成 100% 结果外推为真实召回率。

@@ -5957,6 +5957,93 @@ collect_xxl_job_empty_token_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_publishing_external_ticket_token_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates source_file locations first_path first_line
+  local candidate_path candidate_line
+  [[ -n "$source_root" ]] || return 0
+
+  # File-center download tickets may be presigned HTTPS URLs (for example an
+  # OSS URL).  A gateway token authenticates the internal ticket endpoint; it
+  # must never be copied to an arbitrary external download host.  Keep this
+  # rule narrow to the concrete workspace client and require both sides of the
+  # data flow: the changed download request adds the token, while the current
+  # resolver accepts absolute HTTPS URLs without an allowlist.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-publishing-ticket-token-candidates.XXXXXX")"
+  awk '
+    function is_workspace_client(value) {
+      return value == "src/main/java/com/bit/publishing/infrastructure/file/PlatformFileWorkspaceClient.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_workspace_client(path) &&
+          text ~ /X-Gateway-Token/ && text ~ /header[[:space:]]*\(/) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  source_file="$source_root/src/main/java/com/bit/publishing/infrastructure/file/PlatformFileWorkspaceClient.java"
+  if [[ ! -f "$source_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/infrastructure/file/PlatformFileWorkspaceClient.java"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    grep -F 'resolveTicketUri' "$source_file" >/dev/null || continue
+    grep -Eq 'https.*candidate\.getScheme|candidate\.getScheme.*https' "$source_file" || continue
+    grep -Eq 'https.*return[[:space:]]+candidate|return[[:space:]]+candidate.*https' "$source_file" || continue
+    # Host checks, allowlists, or an explicit internal-URL branch are
+    # counter-evidence that the external credential sink was fenced.
+    if grep -Eqi 'getHost|allow(list|ed)?|trustedHost|isTrusted|白名单|same.?host|internal.?url' "$source_file"; then
+      continue
+    fi
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+
+  [[ -n "$locations" ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 文件中心下载票据允许绝对 HTTPS 地址时，客户端无条件把内部 X-Gateway-Token 发往票据返回的主机。" \
+    "影响：内部网关令牌可能泄露给 OSS 预签名 URL 或被污染的外部 HTTPS 主机；令牌持有者可进一步调用受保护的内部接口，扩大为服务间身份冒用。" \
+    "修复建议：外部预签名下载请求不要携带内部令牌；内部相对 URL 才允许使用该 Header，或对外部主机执行严格 allowlist、端口和协议校验，并拒绝重定向转发令牌。" \
+    "验证方式：用外部 HTTPS 票据和内部相对票据分别捕获请求头，确认外部请求没有 X-Gateway-Token、内部请求仍能认证；覆盖 OSS 域名、非 allowlist 域名、重定向和恶意票据 URL。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_publishing_workspace_symlink_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -10749,6 +10836,7 @@ collect_partial_side_effect_preflight "$chunk_input_file" "$build_preflight_file
 collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_reactive_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxl_job_empty_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_publishing_external_ticket_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_workspace_symlink_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_mcp_job_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_evidence_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
