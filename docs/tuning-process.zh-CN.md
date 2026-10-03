@@ -987,4 +987,6 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 
 同日对 `platform-system`、`platform-gateway`、`platform-hr-service`、`platform-auth` 和 `platform-common` 的 11 个近期提交做并行只读审计。HR 目录、移动端登录、网关 publishing 路由、系统账号 provisioning 和迁移加固均未发现由提交直接引入且未见过的 P0/P1；`platform-auth:cb2dcb6` 的 Sentinel 默认 Nacos 凭据属于已有 `config-prod-nacos-default` 根因族，只能标为 recurrence/tuning-source，不能扩大独立分母。该批次全部在模型双跑前淘汰，验证了“先根因去重、后模型复测”可以避免重复消耗本地推理时间。
 
+随后对冻结池中的 14 个 pending 候选做第二轮并行源码审计：认证/网关 2 个、ERP 7 个、AI/出版 5 个。结果全部不进入独立 holdout：有的父提交已经存在风险，有的是安全修复或 clean 变更，有的只有 P2 隐私/DoS 或条件性 URL host allowlist 加固证据。该批次同样未启动 Ollama 双跑；当前缺口不是“多跑旧样本”，而是必须从尚未扫描的功能簇中找到真正未见的 P0/P1 根因。
+
 随后完成独立替补与角色权限边界批次：`platform-auth:3d1eaac` 双轮完整稳定，新增 localhost 配置中的固定数据库/Redis/Nacos 凭据，按一个独立 P1 根因计入 holdout；`platform-system:ecc8d75` 的 `RolePermissionApplication` 菜单/部门跨租户绑定预检在真实快照稳定命中，转为 tuning-source。当前私有表为 17 个独立记录（严格排除 HR 条件样本为 16 个），严格 gold P0/P1 为 16 个、命中 7 个，严格召回约 43.8%；tuning-source 为 7 个。按阶段一门禁，仍需至少 4 个未参与调优的新 P0/P1 根因，并至少补足 3 个独立提交记录，同时完成 train/dev/holdout split；调优源继续只用于回归保护，不计入独立 holdout 分母。

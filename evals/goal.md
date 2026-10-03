@@ -469,3 +469,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 为提高效率，后续流程固定为“静态证据预筛 → 多角色并行根因审计 → 只对通过审计的少量样本双跑 → 发现规则后立即移出 holdout 并补新样本”。静态预筛先排除冻结表已有样本、修复提交派生、同一凭据族和纯功能改动；模型双跑只用于未见根因的真值、定位与稳定性确认。任何新增预检命中的样本立即标记为 `tuning-source`，由下一批未参与设计的样本补回分母。当前仍需至少 11 个新的独立根因达到 20 个样本，并在最终冻结后重跑召回、误报、定位、稳定性与输出完整性门禁。
 
 同日对 `platform-system`、`platform-gateway`、`platform-hr-service`、`platform-auth` 和 `platform-common` 的 11 个近期提交做并行只读审计。HR 目录、移动端登录、网关 publishing 路由、系统账号 provisioning 和迁移加固均未发现由提交直接引入且未见过的 P0/P1；`platform-auth:cb2dcb6` 的 Sentinel 默认 Nacos 凭据属于已有 `config-prod-nacos-default` 根因族，只能标为 recurrence/tuning-source，不能扩大独立分母。该批次全部在模型双跑前淘汰，验证了“先根因去重、后模型复测”可以避免重复消耗本地推理时间。
+
+随后对冻结池中的 14 个 pending 候选做第二轮并行源码审计：认证/网关 2 个、ERP 7 个、AI/出版 5 个。结果全部不进入独立 holdout：有的父提交已有风险，有的是安全修复或 clean 变更，有的只有 P2 隐私/DoS 或条件性 URL host allowlist 加固证据。该批次没有启动 Ollama 双跑；当前缺口不是多跑旧样本，而是从尚未扫描的功能簇中找到真正未见的 P0/P1 根因。
