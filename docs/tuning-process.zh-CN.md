@@ -978,3 +978,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 加入该调优源后的私有表口径不变：仍为 17 个独立记录（严格排除 HR 条件样本为 16 个），命中仍为 6 个，严格召回约 37.5%；tuning-source 为 5 个。还需至少 4 个未参与调优的独立根因补足 20 个样本，再进入最终门禁。调优源只用于回归保护，不计入独立 holdout 分母。
 
 随后补齐 `platform-system:abfb9cc` 内部 API 资源同步边界预检。规则限定 `/api/v1/internal/api-resources/sync`，要求同步应用按请求体 `applicationCode` 选择目标并直接新增/更新资源，同时 README 只证明共享 `X-Gateway-Token`，而控制器和同步服务没有可见的调用方到应用绑定；带 `@InternalService`、服务身份或显式 application grant 的安全夹具保持 clean。真实归档 smoke 稳定定位 `ApiResourceSyncController.java:24`，确定性 P1 与硬编码凭据等原有 P1 均可见。该样本参与规则设计，已转为 tuning-source，不计入独立召回率；独立表仍为 17 个记录（严格 16 个、命中 6 个、37.5%），tuning-source 增为 6 个，仍需至少 4 个未参与调优根因补足 20 个样本。
+
+随后完成独立替补与角色权限边界批次：`platform-auth:3d1eaac` 双轮完整稳定，新增 localhost 配置中的固定数据库/Redis/Nacos 凭据，按一个独立 P1 根因计入 holdout；`platform-system:ecc8d75` 的 `RolePermissionApplication` 菜单/部门跨租户绑定预检在真实快照稳定命中，转为 tuning-source。当前私有表为 17 个独立记录（严格排除 HR 条件样本为 16 个），命中 7 个，严格召回约 43.8%；tuning-source 为 7 个，仍需至少 3 个未参与调优的独立根因补足 20 个样本。调优源继续只用于回归保护，不计入独立 holdout 分母。

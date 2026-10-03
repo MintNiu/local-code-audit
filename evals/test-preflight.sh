@@ -5466,6 +5466,7 @@ bash "$repo_root/evals/test-system-dept-tenant-write-preflight.sh"
 bash "$repo_root/evals/test-bafan-admin-category-authorization-preflight.sh"
 bash "$repo_root/evals/test-system-application-secret-scope-preflight.sh"
 bash "$repo_root/evals/test-system-api-resource-sync-scope-preflight.sh"
+bash "$repo_root/evals/test-system-role-permission-resource-scope-preflight.sh"
 
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed

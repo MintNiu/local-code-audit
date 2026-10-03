@@ -142,6 +142,17 @@ manifest SHA-256、commit 和 parent，防止清单漂移后把旧结果绑定�
 ./evals/test-preflight.sh
 ```
 
+无模型回归较多时，可用并行编排器缩短反馈回路；每个套件拥有独立的临时目录和 Ollama 锁路径，真实模型审查仍应串行执行：
+
+```bash
+python3 scripts/run-regression.py fast --jobs 2 \
+  --test evals/test-preflight.sh \
+  --test evals/test-system-role-permission-resource-scope-preflight.sh
+python3 scripts/run-regression.py full --jobs 2
+```
+
+`fast` 只接受仓库 `evals/test-*.sh` 顶层套件，`full` 会排除编排器自身；失败套件会保留退出码并以非零状态结束。不要把 `run-synthetic.sh`、`run-history.sh` 或真实 Ollama 审查放入并行队列。
+
 该入口同时运行独立的配置报告保留测试 `bash evals/test-config-findings.sh`。
 证据相关输出过滤另有独立回归 `bash evals/test-filter-evidence.sh`，覆盖同一 Mapper 中不同查询、已删除租户条件、别名错误以及真实 token 日志写入，防止降噪规则把独立安全问题静默成 clean。`bash evals/test-concurrency-lock.sh` 验证同一台机器上的 Ollama 审查并发会 fail-closed，避免多个终端争用模型资源。
 `bash evals/test-rename-evidence.sh` 验证 Git `R100` 精确重命名证据进入模型请求，内容不变的路径移动不会被误报为旧文件删除；它不豁免内容发生变化的改写型重命名。涉及 Ollama 的测试必须串行执行，否则并发锁会按设计拒绝后启动的请求。

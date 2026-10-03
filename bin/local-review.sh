@@ -6997,6 +6997,168 @@ collect_system_api_resource_sync_scope_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_system_role_permission_resource_scope_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates application_file controller_file service_file candidate_path candidate_line
+  local method_text assign_line assign_method menu_line menu_method dept_line dept_method
+  local service_menu_line service_menu_method service_dept_line service_dept_method
+  local assign_menu_line assign_menu_method assign_dept_line assign_dept_method
+  local locations first_path first_line vulnerable_menu vulnerable_dept
+  local menu_validation_text dept_validation_text
+  [[ -n "$source_root" ]] || return 0
+  vulnerable_menu=false
+  vulnerable_dept=false
+
+  # Role ownership alone does not authorize arbitrary menu/department IDs.
+  # Cover both the newer aggregate endpoint and the older separate /menus and
+  # /depts endpoints.  The write is only safe when the code contains concrete
+  # tenant-scoped resource-query evidence; a helper name by itself is not a
+  # proof of validation.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-system-role-resource-scope-candidates.XXXXXX")"
+  awk '
+    function is_role_path(value) {
+      return value == "src/main/java/com/bit/system/controller/RoleController.java" ||
+             value == "src/main/java/com/bit/system/application/RolePermissionApplication.java" ||
+             value == "src/main/java/com/bit/system/service/impl/RoleServiceImpl.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_role_path(path) &&
+          (text ~ /assignPermissions|replaceRoleMenus|replaceRoleDepts|assignRoleMenus|assignRoleDepts|saveRoleMenus|saveRoleDepts|runWithIgnoreTenant|batchInsert|@PutMapping\("\/\{id\}\/(permissions|menus|depts)"\)/)) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+
+  application_file="$source_root/src/main/java/com/bit/system/application/RolePermissionApplication.java"
+  controller_file="$source_root/src/main/java/com/bit/system/controller/RoleController.java"
+  service_file="$source_root/src/main/java/com/bit/system/service/impl/RoleServiceImpl.java"
+  if [[ ! -f "$application_file" || ! -f "$controller_file" || ! -f "$service_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/system/application/RolePermissionApplication.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/controller/RoleController.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/service/impl/RoleServiceImpl.java" ||
+     ! grep -Eq '@PutMapping\("/\{id\}/(permissions|menus|depts)"\)' "$controller_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+  if ! grep -Eq 'assignPermissions|replaceRoleMenus|replaceRoleDepts' "$application_file" &&
+     ! grep -Eq 'assignRoleMenus|assignRoleDepts|saveRoleMenus|saveRoleDepts' "$service_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_root/$candidate_path" "$candidate_line" --masked-comments 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -Eq 'assignPermissions|assignRoleMenus|assignRoleDepts|saveRoleMenus|saveRoleDepts|replaceRoleMenus|replaceRoleDepts|runWithIgnoreTenant|batchInsert' >/dev/null || continue
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+  [[ -n "$locations" ]] || { rm -f "$candidates"; return 0; }
+
+  assign_line="$(grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]]assignPermissions[[:space:]]*\(' "$application_file" | head -n 1 | cut -d: -f1 || true)"
+  assign_method=""
+  [[ "$assign_line" =~ ^[0-9]+$ ]] && assign_method="$(python3 "$java_method_window_script" "$application_file" "$assign_line" --masked-comments 2>/dev/null || true)"
+  menu_line="$(grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]]replaceRoleMenus[[:space:]]*\(' "$application_file" | head -n 1 | cut -d: -f1 || true)"
+  dept_line="$(grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]]replaceRoleDepts[[:space:]]*\(' "$application_file" | head -n 1 | cut -d: -f1 || true)"
+  service_menu_line="$(grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]]saveRoleMenus[[:space:]]*\(' "$service_file" | head -n 1 | cut -d: -f1 || true)"
+  service_dept_line="$(grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]]saveRoleDepts[[:space:]]*\(' "$service_file" | head -n 1 | cut -d: -f1 || true)"
+  menu_method=""
+  dept_method=""
+  service_menu_method=""
+  service_dept_method=""
+  [[ "$menu_line" =~ ^[0-9]+$ ]] && menu_method="$(python3 "$java_method_window_script" "$application_file" "$menu_line" --masked-comments 2>/dev/null || true)"
+  [[ "$dept_line" =~ ^[0-9]+$ ]] && dept_method="$(python3 "$java_method_window_script" "$application_file" "$dept_line" --masked-comments 2>/dev/null || true)"
+  [[ "$service_menu_line" =~ ^[0-9]+$ ]] && service_menu_method="$(python3 "$java_method_window_script" "$service_file" "$service_menu_line" --masked-comments 2>/dev/null || true)"
+  [[ "$service_dept_line" =~ ^[0-9]+$ ]] && service_dept_method="$(python3 "$java_method_window_script" "$service_file" "$service_dept_line" --masked-comments 2>/dev/null || true)"
+
+  assign_menu_line="$(grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]]assignRoleMenus[[:space:]]*\(' "$service_file" | head -n 1 | cut -d: -f1 || true)"
+  assign_dept_line="$(grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]]assignRoleDepts[[:space:]]*\(' "$service_file" | head -n 1 | cut -d: -f1 || true)"
+  assign_menu_method=""
+  assign_dept_method=""
+  [[ "$assign_menu_line" =~ ^[0-9]+$ ]] && assign_menu_method="$(python3 "$java_method_window_script" "$service_file" "$assign_menu_line" --masked-comments 2>/dev/null || true)"
+  [[ "$assign_dept_line" =~ ^[0-9]+$ ]] && assign_dept_method="$(python3 "$java_method_window_script" "$service_file" "$assign_dept_line" --masked-comments 2>/dev/null || true)"
+
+  # Include concrete validation helpers called by the assignment methods. We
+  # deliberately require query/resource/tenant evidence in the helper body;
+  # names such as validateAssignableMenus alone do not suppress a finding.
+  menu_validation_text="$assign_method$menu_method$assign_menu_method$service_menu_method"
+  dept_validation_text="$assign_method$dept_method$assign_dept_method$service_dept_method"
+  while IFS=$'\t' read -r helper_file helper_line helper_name; do
+    [[ -f "$helper_file" && "$helper_line" =~ ^[0-9]+$ && -n "$helper_name" ]] || continue
+    if printf '%s\n' "$menu_validation_text" | grep -Eq "(^|[^A-Za-z0-9_$])${helper_name}[[:space:]]*\("; then
+      menu_validation_text+="$(python3 "$java_method_window_script" "$helper_file" "$helper_line" --masked-comments 2>/dev/null || true)"
+    fi
+    if printf '%s\n' "$dept_validation_text" | grep -Eq "(^|[^A-Za-z0-9_$])${helper_name}[[:space:]]*\("; then
+      dept_validation_text+="$(python3 "$java_method_window_script" "$helper_file" "$helper_line" --masked-comments 2>/dev/null || true)"
+    fi
+  done < <(
+    {
+      grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]](validate|ensure|check|assert|verify|authorize)[A-Za-z0-9_$]*[[:space:]]*\(' "$application_file" | sed "s#^#$application_file\t#" || true
+      grep -nE '^[[:space:]]*(public|protected|private)[[:space:]]+.*[[:space:]](validate|ensure|check|assert|verify|authorize)[A-Za-z0-9_$]*[[:space:]]*\(' "$service_file" | sed "s#^#$service_file\t#" || true
+    } | sed -nE 's#^([^\t]+)\t([0-9]+):.*[[:space:]]((validate|ensure|check|assert|verify|authorize)[A-Za-z0-9_$]*)[[:space:]]*\(.*#\1\t\2\t\3#p' | LC_ALL=C sort -u
+  )
+
+  if printf '%s\n' "$menu_method$service_menu_method" | grep -F 'batchInsert' >/dev/null &&
+     printf '%s\n' "$menu_method$service_menu_method" | grep -F 'menuId' >/dev/null &&
+     printf '%s\n' "$menu_method$service_menu_method" | grep -F 'runWithIgnoreTenant' >/dev/null &&
+     ! {
+       printf '%s\n' "$menu_validation_text" | grep -Eqi '(tenantMenuMapper|sysTenantMenuMapper|sys_tenant_menu)' &&
+       printf '%s\n' "$menu_validation_text" | grep -Eqi '(tenantId|tenant_id|roleTenant)' &&
+       printf '%s\n' "$menu_validation_text" | grep -Eqi '(select|exists|count|query|find|list)';
+     }; then
+    vulnerable_menu=true
+  fi
+  if printf '%s\n' "$dept_method$service_dept_method" | grep -F 'batchInsert' >/dev/null &&
+     printf '%s\n' "$dept_method$service_dept_method" | grep -F 'deptId' >/dev/null &&
+     printf '%s\n' "$dept_method$service_dept_method" | grep -F 'runWithIgnoreTenant' >/dev/null &&
+     ! {
+       printf '%s\n' "$dept_validation_text" | grep -Eqi '(sysDeptMapper|deptMapper|sys_dept)' &&
+       printf '%s\n' "$dept_validation_text" | grep -Eqi '(tenantId|tenant_id|roleTenant)' &&
+       printf '%s\n' "$dept_validation_text" | grep -Eqi '(select|exists|count|query|find|list)';
+     }; then
+    vulnerable_dept=true
+  fi
+  [[ "$vulnerable_menu" == true || "$vulnerable_dept" == true ]] || { rm -f "$candidates"; return 0; }
+
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 角色权限写接口直接信任请求中的菜单/部门 ID，并在忽略租户过滤的上下文中写入关联，未校验被绑定资源属于角色租户。" \
+    "影响：具备角色更新权限的租户用户可把其他租户的菜单或部门 ID 绑定到本租户角色，造成跨租户授权污染；菜单关联会污染可见权限，部门关联会污染持久化数据范围边界，当前调用链是否立即扩大查询结果取决于后续数据范围加载。" \
+    "修复建议：菜单是平台级资源，写入前应校验菜单存在、未删除、所属应用有效，并校验当前租户的 sys_tenant_menu 或等价应用授权关系；部门应显式按 sys_dept.id IN (...)、tenant_id = 角色租户且未删除/有效状态批量校验。禁止用忽略租户插件的批量插入替代资源归属校验，并对空列表、重复 ID 和删除并发做事务校验。" \
+    "验证方式：租户 A 角色分别提交租户 B 的菜单/部门 ID，确认事务在写入前返回 403/业务拒绝且关联表不变；覆盖混合 ID、已删除资源、并发删除、平台 ROOT 受控路径以及直接调用 application/service 的绕过场景。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_url_prefix_whitelist_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -10462,6 +10624,7 @@ collect_system_dept_tenant_write_preflight "$chunk_input_file" "$build_preflight
 collect_bafan_admin_category_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_application_secret_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_api_resource_sync_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_system_role_permission_resource_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
