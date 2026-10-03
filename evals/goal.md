@@ -471,3 +471,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 同日对 `platform-system`、`platform-gateway`、`platform-hr-service`、`platform-auth` 和 `platform-common` 的 11 个近期提交做并行只读审计。HR 目录、移动端登录、网关 publishing 路由、系统账号 provisioning 和迁移加固均未发现由提交直接引入且未见过的 P0/P1；`platform-auth:cb2dcb6` 的 Sentinel 默认 Nacos 凭据属于已有 `config-prod-nacos-default` 根因族，只能标为 recurrence/tuning-source，不能扩大独立分母。该批次全部在模型双跑前淘汰，验证了“先根因去重、后模型复测”可以避免重复消耗本地推理时间。
 
 随后对冻结池中的 14 个 pending 候选做第二轮并行源码审计：认证/网关 2 个、ERP 7 个、AI/出版 5 个。结果全部不进入独立 holdout：有的父提交已有风险，有的是安全修复或 clean 变更，有的只有 P2 隐私/DoS 或条件性 URL host allowlist 加固证据。该批次没有启动 Ollama 双跑；当前缺口不是多跑旧样本，而是从尚未扫描的功能簇中找到真正未见的 P0/P1 根因。
+
+随后从未扫描的文件配置回归族中补入 `platform-file:7eb92a127ff3a52a6dc2bbc4549f91c55fe8ceb3`。父版本使用 `ALIYUN_OSS_*` 环境变量，目标提交将 OSS access key/secret 改为明文且当前 HEAD 仍保留；两轮个人 profile 均 1/1 分片完整，结果哈希和 finding signature 一致，模型原生 P1 稳定定位 `nacos-config/platform-file-localhost.yml:98-99`，确定性凭据预检同时保留两行。该样本未参与规则设计，计入严格独立 holdout；当前严格表为 10 个 P0/P1、命中 5 个、召回 50.0%，双轮完整稳定 10/10，命中定位准确 5/5。达到 20 个样本前仍需至少 10 个未见根因。
