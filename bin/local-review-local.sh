@@ -10,7 +10,11 @@ set -euo pipefail
 # default must favor complete review output over a smaller context footprint.
 export OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-32768}"
 export OLLAMA_REVIEW_NUM_PREDICT="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
-export OLLAMA_REVIEW_MAX_DIFF_BYTES="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
+# 6KB is the personal default: it halves the shard count on large commits
+# while keeping each request well below the 32K input window.  Override it
+# for exceptionally long-tail repositories; the budget guard still shrinks
+# it when fixed rules/context leave less room.
+export OLLAMA_REVIEW_MAX_DIFF_BYTES="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-6000}"
 export OLLAMA_REVIEW_TIMEOUT_SECONDS="${OLLAMA_REVIEW_TIMEOUT_SECONDS:-600}"
 # Large diffs may produce many model shards.  Keep enough wall-clock budget
 # for the personal high-performance path by default; callers can still set an

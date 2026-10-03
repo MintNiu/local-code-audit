@@ -934,3 +934,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 针对 `platform-job:4a0850b` 的稳定漏报，新增 `collect_xxl_job_empty_token_preflight`。规则只接受 `xxl-job-admin/src/main/resources/application.yml` 或 `nacos-config/platform-job*.yml` 中新增的 `xxl.job.accessToken` 空最终回退，并要求当前 `OpenApiController` 的同一方法同时出现 `/api/{uri}`、`@XxlSso(login = false)`、`XXL-JOB-ACCESS-TOKEN` 以及“仅在配置非空时比较”的逻辑；同时要求 `PlatformJobSecurityConfig` 将 `/api/**` 置为 `permitAll`。多 profile 的空配置聚合成一个 P1，非空 dev 回退、其他 key、缺少运行时端点或已经默认拒绝的实现均不触发。
 
 新增正负 fixture 已通过：正例只输出一条 P1 并列出多个配置位置，开发环境非空回退不会混入；`test-preflight.sh`、分片预检、分片、输出可见性、证据过滤和 HTTP SSRF 回归全部通过。该规则针对的 `4a0850b` 已参与调优，后续复跑结果只作为 tuning-source/工程稳定性证据，不回填正式 holdout；仍需由未参与规则设计的新根因替补，并完成双跑、定位和误报标签。
+
+同一提交的真实长尾复测也完成了分片预算对照：个人 profile 默认 3KB 时产生 140 个分片并在 2400 秒总预算内 fail-closed；受控 12KB 配置降为 35 个分片，两轮分别 1127/1105 秒完整结束，finding signature 稳定且空令牌 P1 可见。基于该结果与此前 6KB 大提交双跑证据，个人 wrapper 默认调整为 6KB；12KB 只保留为超大提交的受控复测参数，通用 core 仍保持 3KB。任何分片超时、截断或不完整响应仍按失败处理，不用提高总超时掩盖容量问题。

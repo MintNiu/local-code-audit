@@ -291,7 +291,7 @@ if [[ "$profile" == "personal" ]]; then
   review_script="$review_snapshot/bin/local-review-local.sh"
   profile_num_ctx="${OLLAMA_REVIEW_NUM_CTX:-32768}"
   profile_num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
-  profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-3000}"
+  profile_max_diff_bytes="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-6000}"
   profile_chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-4096}"
   profile_keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-5m}"
 else
