@@ -942,3 +942,11 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 对 `platform-publishing-mcp-service:6cb134b` 的路径边界进行源码复核后，新增 `collect_publishing_workspace_symlink_preflight`。规则只匹配两个具体出版 MCP 工具类：当前差异新增 `workspaceRoot.resolve(...).normalize()`，同一快照中确实存在 DOCX 文件读写、目录创建或 LibreOffice 进程启动，同时没有 `toRealPath`、`isSymbolicLink`、`NOFOLLOW_LINKS` 或属性级链接防护。普通 Java 路径拼接、已有真实路径校验和不涉及文件/进程操作的工具均保持 clean；多个工具位置聚合成一个 P1。
 
 正负 fixture 已通过，下一步将对该提交做真实双轮复测。由于该提交会参与规则设计，真实结果只进入 tuning-source 回归，不增加正式 holdout；若规则在真实大差异中稳定可见，再用新的未参与规则设计根因替补盲测分母。
+
+### 2026-10-03：补齐出版任务证据写入信任边界预检
+
+针对 `platform-publishing-service:e41c1c3` 的真实漏报，新增 `collect_publishing_evidence_write_preflight`。规则只匹配 `TypesetEvidenceController` 中由 `publishing:job:execute` 保护的 `/artifacts`、`/issues`、`/tool-invocations` POST 端点，并要求当前 `TypesetEvidenceApplication` 将 DTO 字段直接写入 `READY`/`OPEN` 证据、调用保存 sink、复核只按交付产物和阻塞问题计数，同时没有 `ExecutionRef`、租约/grant 围栏或实际内容/哈希校验。它聚合为一条 P1，说明普通 execute 用户可伪造交付和审计证据；后续 worker-only `ExecutionRef`/lease 实现保持 clean。
+
+正负 fixture 与完整 `test-preflight.sh` 已通过。该提交参与规则设计，真实运行结果不计入独立 holdout，必须由新的未见根因替补；规则刻意不扩展到普通 CRUD 或无法证明执行上下文的通用 DTO 写入，以控制误报。
+
+同一提交还新增 `collect_publishing_review_issue_waiver_preflight`：当质量问题决策允许把任意状态写成 `RESOLVED/ACCEPTED/IGNORED`，而复核只统计 `status=OPEN` 的 `ERROR/BLOCKER` 时，聚合报告一条 P1。该规则对应可复现的两步路径（同租户 `publishing:job:review` 用户先豁免阻塞问题，再提交 APPROVED），并以 `NON_WAIVABLE_SEVERITIES`、执行实例锁和历史豁免复核作为 clean 边界；正负 fixture、聚合预检和证据过滤回归均通过。

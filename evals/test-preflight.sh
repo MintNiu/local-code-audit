@@ -5438,6 +5438,11 @@ bash "$repo_root/evals/test-xxl-job-empty-token-preflight.sh"
 # Publishing MCP workspace path containment keeps symlink escapes covered by
 # the same aggregate deterministic suite.
 bash "$repo_root/evals/test-publishing-workspace-symlink-preflight.sh"
+# Publishing evidence writes must be fenced by a worker execution grant and
+# actual content verification; keep the user-facing DTO trust boundary covered.
+bash "$repo_root/evals/test-publishing-evidence-write-preflight.sh"
+# The review gate must not be bypassable by waiving ERROR/BLOCKER issues.
+bash "$repo_root/evals/test-publishing-review-issue-waiver-preflight.sh"
 
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed

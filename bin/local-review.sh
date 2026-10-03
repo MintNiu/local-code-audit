@@ -3569,7 +3569,9 @@ $(cat "$changed_paths_file")
   budget_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-preflight.XXXXXX")"
   awk 'BEGIN { RS = ""; ORS = "\n\n" }
     index($0, "声明式权限注解被注释/删除") == 0 &&
-    index($0, "第三方登录绑定按外部身份查询未带租户边界") == 0 { print }
+    index($0, "第三方登录绑定按外部身份查询未带租户边界") == 0 &&
+    index($0, "排版任务证据写入端点仅受普通 execute 权限保护") == 0 &&
+    index($0, "排版质量门禁允许人工把 ERROR/BLOCKER") == 0 { print }
   ' \
     "$build_preflight_file" >"$budget_preflight_file"
   probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$budget_preflight_file")"
@@ -6024,6 +6026,156 @@ collect_publishing_workspace_symlink_preflight() {
     "修复建议：对每个输入、输出和任务目录执行 realpath/规范化后的祖先校验，并拒绝符号链接或使用 NOFOLLOW_LINKS；创建目录后再次校验真实路径，渲染进程只接收已验证的真实路径。" \
     "验证方式：在 input/work/output 下分别放置指向根目录外文件和目录的符号链接，覆盖 inspect、profile、render 和 create workspace，确认所有调用在打开/创建/启动进程前拒绝，普通目录仍可用。" \
     "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_publishing_evidence_write_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file application_file locations first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # A human-facing execute permission is not an execution grant.  In the
+  # initial publishing workflow, artifact/issue/tool-invocation DTOs were
+  # accepted directly from HTTP and persisted as evidence; review then only
+  # counted READY artifacts and open issues.  Keep this preflight narrow to
+  # the concrete controller/application contract and require the visible
+  # absence of worker execution fencing.  Later WorkerEvidenceApplication
+  # implementations use ExecutionRef/lease checks and therefore stay clean.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-publishing-evidence-candidates.XXXXXX")"
+  awk '
+    function is_controller_path(value) {
+      return value == "src/main/java/com/bit/publishing/controller/job/TypesetEvidenceController.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_controller_path(path) &&
+          text ~ /@PostMapping\("\/(artifacts|issues|tool-invocations)"\)/) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  controller_file="$source_root/src/main/java/com/bit/publishing/controller/job/TypesetEvidenceController.java"
+  application_file="$source_root/src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java"
+  if [[ ! -f "$controller_file" || ! -f "$application_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/controller/job/TypesetEvidenceController.java" ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java" ||
+     ! grep -Fq '@PreAuthorize("@perm.has('\''publishing:job:execute'\'')")' "$controller_file" ||
+     ! grep -Fq '@PostMapping("/artifacts")' "$controller_file" ||
+     ! grep -Fq '@PostMapping("/issues")' "$controller_file" ||
+     ! grep -Fq '@PostMapping("/tool-invocations")' "$controller_file" ||
+     ! grep -Eq 'setStatus\("READY"\)|setStatus\("OPEN"\)' "$application_file" ||
+     ! grep -Eq 'saveArtifact|saveIssue|saveInvocation' "$application_file" ||
+     ! grep -Eq 'countDeliverableArtifacts|countOpenBlockingIssues' "$application_file" ||
+     grep -Eqi 'ExecutionRef|requireExecution|lockActiveExecution|worker.*lease|lease.*worker|evidence.?grant' "$controller_file" "$application_file" ||
+     grep -Eqi 'MessageDigest|Files\.readAllBytes|contentInspector|verify.*sha256|sha256.*verify|toRealPath' "$application_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations="$(awk -F '\t' '{ printf "%s%s:%s", (seen++ ? ", " : ""), $1, $2 }' "$candidates")"
+  IFS=$'\t' read -r first_path first_line <"$candidates"
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 排版任务证据写入端点仅受普通 execute 权限保护，未绑定执行实例/租约，也未验证实际产物内容与哈希。" \
+    "影响：具备 publishing:job:execute 权限的用户可伪造 DOCX/PDF 产物、质量问题和工具调用审计记录；复核流程只按数据库中的 READY 产物和未处理问题计数，可能错误批准交付并污染审计证据。" \
+    "修复建议：删除用户侧证据写入端点，改由携带 ExecutionRef 的 worker 专用接口写入；锁定并校验当前执行租约、租户和任务归属，读取实际文件计算 SHA-256/内容类型后再登记，复核时检查执行血缘和成功状态。" \
+    "验证方式：使用普通 execute 用户提交伪造 fileId、sha256、质量问题和工具调用，确认全部被拒绝；使用有效 worker 租约写入真实文件并核对哈希、租户、执行实例，随后验证复核只能批准当前执行产生的有效产物。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_publishing_review_issue_waiver_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates application_file repository_file first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # The initial publishing review gate counted only OPEN ERROR/BLOCKER rows,
+  # while the same authenticated reviewer could change any issue status to
+  # IGNORED/RESOLVED.  This is a narrow, directly reproducible approval
+  # bypass; later versions add NON_WAIVABLE_SEVERITIES and execution fencing.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-publishing-issue-waiver-candidates.XXXXXX")"
+  awk '
+    function is_application_path(value) {
+      return value == "src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_application_path(path) &&
+          (text ~ /setStatus\(status\)/ || text ~ /countOpenBlockingIssues/ ||
+           text ~ /ISSUE_DECISIONS/)) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  application_file="$source_root/src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java"
+  repository_file="$source_root/src/main/java/com/bit/publishing/repository/job/TypesetEvidenceRepository.java"
+  if [[ ! -f "$application_file" || ! -f "$repository_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/application/job/TypesetEvidenceApplication.java" ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/repository/job/TypesetEvidenceRepository.java" ||
+     ! grep -Eq 'ISSUE_DECISIONS.*(RESOLVED|IGNORED)|(RESOLVED|IGNORED).*ISSUE_DECISIONS' "$application_file" ||
+     ! grep -Fq 'entity.setStatus(status)' "$application_file" ||
+     ! grep -Fq 'countOpenBlockingIssues' "$application_file" ||
+     ! grep -Fq 'countOpenBlockingIssues' "$repository_file" ||
+     ! grep -Fq 'getStatus, "OPEN"' "$repository_file" ||
+     ! grep -Eq 'ERROR|BLOCKER' "$repository_file" ||
+     grep -Eqi 'NON_WAIVABLE_SEVERITIES|nonWaivable|cannot.*(waiv|豁免)|不能人工豁免|AUTO_RESOLVED|status[[:space:]]*!=[[:space:]]*"AUTO_RESOLVED"' "$application_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  IFS=$'\t' read -r first_path first_line <"$candidates"
+  printf '%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 排版质量门禁允许人工把 ERROR/BLOCKER 问题改为已接受/已忽略，复核只统计 OPEN 阻塞项，形成可绕过的批准路径。" \
+    "影响：具备 publishing:job:review 权限的同租户用户可先将 ERROR/BLOCKER 质量问题状态改为 IGNORED/RESOLVED，再提交 APPROVED 复核；数据库中不再有 OPEN 阻塞项时，任务可能在严重问题未解决的情况下被批准交付。" \
+    "修复建议：ERROR/BLOCKER 不允许人工豁免，状态决策必须拒绝这些严重级别；复核门禁应按当前执行实例和非自动解决状态检查，并在事务内锁定任务与问题，不能只依赖 OPEN 状态计数。" \
+    "验证方式：对 ERROR、BLOCKER 分别提交 IGNORED/RESOLVED 决策并立即 APPROVED，确认请求被拒绝且任务不变；对 INFO/WARNING 验证允许的人工决策仍可用，并覆盖已持久化的历史豁免记录。" >>"$output_file"
   rm -f "$candidates"
   dedup_preflight_blocks "$output_file"
 }
@@ -9484,6 +9636,8 @@ collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$prefli
 collect_reactive_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxl_job_empty_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_workspace_symlink_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_publishing_evidence_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_publishing_review_issue_waiver_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
@@ -9703,6 +9857,14 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
       if (index(header, "第三方登录绑定按外部身份查询未带租户边界") > 0) {
         next
       }
+      # Publishing evidence/review-gate findings are deterministic whole-flow
+      # evidence. Keep their complete paragraphs for final merge, but do not
+      # repeat them in every model shard; large publishing commits otherwise
+      # spend the fixed context budget before the model sees code.
+      if (index(header, "排版任务证据写入端点仅受普通 execute 权限保护") > 0 ||
+          index(header, "排版质量门禁允许人工把 ERROR/BLOCKER") > 0) {
+        next
+      }
       sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
       # Keep comma-separated locations (for example `:3,4,5`) attached to
       # the same path when routing aggregated deterministic findings.
@@ -9724,6 +9886,10 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "声明式权限注解被注释/删除") > 0 { print }' \
     "$build_preflight_file" >>"$chunk_merge_preflight_file"
   awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "第三方登录绑定按外部身份查询未带租户边界") > 0 { print }' \
+    "$build_preflight_file" >>"$chunk_merge_preflight_file"
+  awk 'BEGIN { RS = ""; ORS = "\n\n" }
+       index($0, "排版任务证据写入端点仅受普通 execute 权限保护") > 0 ||
+       index($0, "排版质量门禁允许人工把 ERROR/BLOCKER") > 0 { print }' \
     "$build_preflight_file" >>"$chunk_merge_preflight_file"
   chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_preflight_file")"
   # Give each shard the complete changed-path inventory as scope metadata.

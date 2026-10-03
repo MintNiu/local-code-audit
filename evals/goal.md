@@ -441,3 +441,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 同一 `platform-job:4a0850b` 长提交在个人 profile 默认 3KB 下被拆为 140 片并因总超时 fail-closed；受控 12KB 配置下为 35 片，两轮均完整稳定（1127/1105 秒），空令牌 P1 在真实差异中可见。结合既有 6KB 大提交稳定证据，个人 wrapper 默认分片预算调整为 6000 字节；12KB 仅作为受控复测参数，通用 core 仍为 3000 字节。该 tuning-source 结果不进入独立召回分母。
 
 2026-10-03：对 `platform-publishing-mcp-service:6cb134b` 的工作区边界新增窄范围符号链接逃逸预检。仅当两个具体 MCP 工具类新增 `workspaceRoot.resolve(...).normalize()`、实际执行 DOCX 读写/目录创建/LibreOffice 进程操作，且当前快照没有 realpath 或 `NOFOLLOW_LINKS` 等链接防护时报告聚合 P1；已有真实路径校验和普通路径工具不触发。正负 fixture 已通过，真实双轮复测待完成；该提交参与规则设计，不能计入独立 holdout，后续需用未见根因替补。
+
+2026-10-03：补齐出版任务证据边界与复核门禁预检。`platform-publishing-service:e41c1c3` 的 `/artifacts`、`/issues`、`/tool-invocations` 写入在普通 execute 权限下直接接受 DTO 并保存 READY/OPEN 证据，新增聚合 P1；同提交的复核流程还允许把 ERROR/BLOCKER 改为 IGNORED/RESOLVED，而批准只统计 OPEN 阻塞项，新增第二条聚合 P1。两条规则均要求可见的保存/计数/状态证据，并以 ExecutionRef/租约、实际内容校验和 NON_WAIVABLE_SEVERITIES 作为安全负例；独立 fixture、完整预检、输出与证据过滤回归均通过。该提交参与规则设计，不计入正式 holdout。
