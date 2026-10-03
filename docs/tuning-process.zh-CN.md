@@ -14,6 +14,8 @@
 
 随后对 Bafan workflow 凭据样本 `7acb085d` 做两轮个人 profile 复测：两轮均为单分片、完整结束，模型与确定性凭据预检都定位 `.github/workflows/deploy.yml:14` 的 DingTalk `access_token`。只读 scorecard 审计确认该提交已计入严格独立表，故本轮只更新稳定性证据，不新增分母；这验证了运行前按 `commit + feature_cluster` 去重可以避免重复消耗推理时间和重复计分。
 
+随后复核 ERP 寻货状态提交 `555758b3`：它只有 1 个 Java 文件、9 行变更，个人 profile 两轮均单分片完整结束但都返回 clean。人工核验确认 `confirmInbound` 已完成入库单和库存更新后，新增 `ensureFinishable` 只拒绝 CANCELLED，仍允许 INBOUNDED/CLOSED 记录被 close/cancel，形成寻货状态与库存事实矛盾的独立 P1。该提交原本已在私有 pending 队列，本轮只完成双跑和人工标注，计入严格 scorecard；没有立即把单提交模式泛化成确定性规则，以免把合法“关闭寻货单但保留入库事实”的业务契约误报为缺陷。
+
 ## 当前进展：锁序候选与阶段一门禁（2026-09-27）
 
 运行器现在会对包含 `@Transactional`、`find*ForUpdate` 或 `FOR UPDATE` 的变更 Java 文件，受限列出变更文件及使用相同锁接收者的关联 Java 文件。证据包含源码行号、锁调用上下文窗口和完整调用顺序，但只作为 prompt 文本证据，不自动生成 finding，也不能单独证明同表、同事务或可达并发；文件/行数有上限，预算不足时可跳过。`test-sharding.sh` 已验证分片请求仍能看到变更文件、未变更关联文件和行锁调用。
