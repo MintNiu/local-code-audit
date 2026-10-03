@@ -928,3 +928,9 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 截至本条记录，私有正式表为 21 个 P0/P1 根因，21/21 次双跑完整且稳定，合并后命中 6 个；排除 HR 条件样本后的严格口径为 6/20，即 30.0% 召回。当前仍未达到个人版高可用门禁（至少 20 个独立未见根因、召回率 ≥90%、定位准确率和误报率达标、双跑稳定且输出完整）。下一步优先补充未参与规则设计的新根因，并单独处理长提交的自适应分片/长尾策略；任何用于改规则的样本都必须移出 holdout，由新样本替补。
 
 随后为 `platform-job:a1755156` 增加 HTTP 任务参数 SSRF 窄预检（`e811433`）：只匹配 `HttpJobHandler.execute(String param)` 直接构造 `HttpGet(param)` 并执行、且当前文件没有 URL/主机/IP 防护的证据；静态 URL 和 allowlist 负例保持 clean。冻结 runner 后双跑均 7/7 分片完整，结果 finding signature 与 SHA-256 一致，四个变体文件的位置全部可见。该提交参与了规则设计，已转为 tuning-source 回归，不增加最终 holdout 分母；整文件 guard 的后续方法级收窄和 HttpPost 形状仍待独立负例验证。
+
+### 2026-10-03：补齐 XXL-JOB 空令牌 fail-open 预检
+
+针对 `platform-job:4a0850b` 的稳定漏报，新增 `collect_xxl_job_empty_token_preflight`。规则只接受 `xxl-job-admin/src/main/resources/application.yml` 或 `nacos-config/platform-job*.yml` 中新增的 `xxl.job.accessToken` 空最终回退，并要求当前 `OpenApiController` 的同一方法同时出现 `/api/{uri}`、`@XxlSso(login = false)`、`XXL-JOB-ACCESS-TOKEN` 以及“仅在配置非空时比较”的逻辑；同时要求 `PlatformJobSecurityConfig` 将 `/api/**` 置为 `permitAll`。多 profile 的空配置聚合成一个 P1，非空 dev 回退、其他 key、缺少运行时端点或已经默认拒绝的实现均不触发。
+
+新增正负 fixture 已通过：正例只输出一条 P1 并列出多个配置位置，开发环境非空回退不会混入；`test-preflight.sh`、分片预检、分片、输出可见性、证据过滤和 HTTP SSRF 回归全部通过。该规则针对的 `4a0850b` 已参与调优，后续复跑结果只作为 tuning-source/工程稳定性证据，不回填正式 holdout；仍需由未参与规则设计的新根因替补，并完成双跑、定位和误报标签。

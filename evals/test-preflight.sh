@@ -5432,6 +5432,10 @@ if printf '%s\n' "$online_scope_root_output" | grep -F "$online_read_marker" >/d
   exit 1
 fi
 
+# XXL-JOB empty accessToken fail-open uses a path-accurate fixture so the
+# business preflight remains covered by the aggregate deterministic suite.
+bash "$repo_root/evals/test-xxl-job-empty-token-preflight.sh"
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.

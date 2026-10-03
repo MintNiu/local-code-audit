@@ -5865,6 +5865,94 @@ collect_reactive_fail_open_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_xxl_job_empty_token_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line api_file security_file locations first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # XXL-JOB's OpenAPI endpoint is intentionally permitted through Spring
+  # Security because the controller is expected to enforce
+  # XXL-JOB-ACCESS-TOKEN itself.  If a change makes the configured token
+  # default to empty, the controller's "only compare when configured" branch
+  # becomes an unauthenticated registry/callback surface.  Keep this rule
+  # narrow to added application/platform-job YAML accessToken defaults and
+  # require both sides of the current source contract before reporting.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-xxl-empty-token-candidates.XXXXXX")"
+  awk '
+    function is_config_path(value) {
+      return value ~ /^xxl-job-admin\/src\/main\/resources\/application\.(yaml|yml)$/ ||
+             value ~ /^xxl-job-admin\/nacos-config\/platform-job(-[^\/]*)?\.(yaml|yml)$/
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_config_path(path) &&
+          text ~ /(accessToken|access-token)[[:space:]]*:/ &&
+          text ~ /\$\{.*:[[:space:]]*\}+[[:space:]]*(#.*)?$/) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  api_file="$source_root/xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/openapi/OpenApiController.java"
+  security_file="$source_root/xxl-job-admin/src/main/java/com/bit/job/config/PlatformJobSecurityConfig.java"
+  api_method_text=""
+  security_ok=false
+  if [[ -f "$api_file" && -f "$security_file" ]] &&
+     ! path_has_symlink_component "xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/openapi/OpenApiController.java" &&
+     ! path_has_symlink_component "xxl-job-admin/src/main/java/com/bit/job/config/PlatformJobSecurityConfig.java"; then
+    api_line="$(grep -nF '@RequestMapping("/api/{uri}")' "$api_file" | head -1 | cut -d: -f1)"
+    if [[ "$api_line" =~ ^[0-9]+$ ]]; then
+      api_method_text="$(python3 "$java_method_window_script" "$api_file" "$api_line" 2>/dev/null || true)"
+    fi
+  fi
+  if grep -Fq '"/api/**"' "$security_file" &&
+     grep -Eq 'requestMatchers[[:space:]]*\(' "$security_file" &&
+     grep -Fq '.permitAll()' "$security_file"; then
+    security_ok=true
+  fi
+  if [[ -z "$api_method_text" ||
+        -z "$(printf '%s\n' "$api_method_text" | grep -F '@XxlSso(login = false)' || true)" ||
+        -z "$(printf '%s\n' "$api_method_text" | grep -F '@RequestHeader(Const.XXL_JOB_ACCESS_TOKEN)' || true)" ||
+        -z "$(printf '%s\n' "$api_method_text" | grep -Eq 'StringTool\.isNotBlank\(XxlJobAdminBootstrap\.getInstance\(\)\.getAccessToken\(\)\)' && printf ok || true)" ||
+        "$security_ok" != true ]]; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations="$(awk -F '\t' '{ printf "%s%s:%s", (seen++ ? ", " : ""), $1, $2 }' "$candidates")"
+  IFS=$'\t' read -r first_path first_line <"$candidates"
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - XXL-JOB OpenAPI 令牌允许空默认值，且 /api/** 放行后由控制器在令牌非空时才校验，形成认证 fail-open。" \
+    "影响：部署环境未提供 XXL_JOB_ACCESS_TOKEN 或网关令牌时，攻击者可携带任意或空请求头调用 registry、registryRemove、callback 等执行器管理接口，伪造注册、移除执行器或注入回调。" \
+    "修复建议：令牌缺失时启动失败或拒绝所有 /api/** 请求；不要用空默认值，生产配置必须显式提供高熵令牌，并让控制器对缺失配置采用默认拒绝。" \
+    "验证方式：分别清空环境变量、缺失请求头、发送错误令牌和发送正确令牌，确认前三者均返回拒绝且不进入 adminBiz，最后一种才成功；同时检查所有 Nacos/profile 配置没有空回退。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_url_prefix_whitelist_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -9319,6 +9407,7 @@ collect_check_then_act_preflight "$chunk_input_file" "$build_preflight_file" "$p
 collect_partial_side_effect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_reactive_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_xxl_job_empty_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

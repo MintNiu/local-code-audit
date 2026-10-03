@@ -435,3 +435,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 最新私有正式表为 21 个 P0/P1 根因，21/21 次双跑完整且稳定，合并后命中 6 个；排除 HR 条件样本后的严格口径是 6/20（30.0%）。这仍远未达到个人版高可用门禁。后续必须继续补充未参与规则设计的新根因，并把长提交自适应分片/长尾策略作为独立工程问题处理；用于新增规则的样本要移出 holdout，由新的未见样本替补。
 
 随后为 `platform-job:a1755156` 增加 HTTP 任务参数 SSRF 窄预检（`e811433`）：仅匹配 `HttpJobHandler.execute(String param)` 直接构造 `HttpGet(param)` 并执行、且当前文件没有 URL/主机/IP 防护；静态 URL 和 allowlist 负例保持 clean。冻结 runner 后双跑均 7/7 分片完整，finding signature 与 SHA-256 一致，四个变体文件的位置全部可见。该提交参与规则设计，已转为 tuning-source 回归，不增加最终 holdout 分母；整文件 guard 的方法级收窄和 HttpPost 形状仍需独立负例验证。
+
+2026-10-03：针对 `platform-job:4a0850b` 的稳定漏报新增 XXL-JOB 空 `accessToken` fail-open 预检。仅当 `xxl-job-admin` 运行配置新增空最终回退、当前 `OpenApiController` 方法在 token 非空时才比较、且 `PlatformJobSecurityConfig` 对 `/api/**` 使用 `permitAll` 时报告一个聚合 P1；非空 dev 回退、普通配置 key、缺少端点证据或默认拒绝实现均保持 clean。正负 fixture 与完整确定性回归通过。该提交已经参与规则调优，后续结果只能作为 tuning-source/稳定性证据，不能计入独立 holdout；正式门禁仍需要新的未见根因、双跑、定位准确率和误报标签。
