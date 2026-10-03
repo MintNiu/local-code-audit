@@ -4731,6 +4731,117 @@ collect_raw_session_token_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_online_session_tenant_scope_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file application_file repository_file mapper_file
+  local query_path="" query_line="" kick_path="" kick_line=""
+  [[ -n "$source_root" ]] || return 0
+
+  # Keep this separate from raw-token disclosure.  The tenant rule only
+  # applies to an explicitly changed online-session surface and requires an
+  # online endpoint/target plus an unscoped search or kick operation.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-online-session-scope-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ / &&
+          path ~ /(SsoOnlineController|OnlineSessionApplication|OnlineSessionRepository|SysUserMapper)\.(java|xml)$/) {
+        added = substr($0, 2)
+        if (added ~ /\/sso\/online|OnlineUserQuery|searchTokenValue|selectOnlineUserById|findByUserId|@GetMapping|users[[:space:]]*\(/)
+          printf "query\t%s\t%d\n", path, new_line
+        if (added ~ /@DeleteMapping|kickout|forceLogout|revoke|targetToken|targetSession|kickoutByTokenValue|deleteSession/)
+          printf "kick\t%s\t%d\n", path, new_line
+      }
+      if (prefix == "+" || prefix == " ") new_line++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+  controller_file="$(find "$source_root" -type f -name 'SsoOnlineController.java' -print -quit 2>/dev/null || true)"
+  application_file="$(find "$source_root" -type f -name 'OnlineSessionApplication.java' -print -quit 2>/dev/null || true)"
+  repository_file="$(find "$source_root" -type f -name 'OnlineSessionRepository.java' -print -quit 2>/dev/null || true)"
+  mapper_file="$(find "$source_root" -type f -name 'SysUserMapper.xml' -print -quit 2>/dev/null || true)"
+
+  while IFS=$'\t' read -r kind candidate_path candidate_line; do
+    [[ "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    if [[ "$kind" == query && -z "$query_path" ]]; then
+      query_path="$candidate_path"
+      query_line="$candidate_line"
+    elif [[ "$kind" == kick && -z "$kick_path" ]]; then
+      kick_path="$candidate_path"
+      kick_line="$candidate_line"
+    fi
+  done <"$candidates"
+  rm -f "$candidates"
+
+  # The controller must expose the online surface and a caller-controlled
+  # query/target.  A normal current-user logout has neither and stays clean.
+  online_controller=false
+  if [[ -n "$controller_file" && -f "$controller_file" ]] &&
+     grep -Eiq '/sso/online|@RequestMapping[^\n]*/online' "$controller_file" &&
+     grep -Eiq 'OnlineUserQuery|@RequestParam|@PathVariable|target(Token|Session)|sessionId|userId' "$controller_file"; then
+    online_controller=true
+  fi
+
+  # Explicit tenant-scoped repositories, target-session tenant comparisons,
+  # and platform-ROOT-only global endpoints are intentional boundaries.  Do
+  # not infer safety from a generic tenantId field in an unrelated mapper.
+  query_safe_scope=false
+  kick_safe_scope=false
+  for scope_file in "$controller_file" "$application_file" "$repository_file" "$mapper_file"; do
+    [[ -n "$scope_file" && -f "$scope_file" ]] || continue
+    grep -Eiq 'findByTenantId|select[^[:space:]]*ByTenant(Id|And)|search[^[:space:]]*ByTenant|currentTenant[^\n]*tenantId|tenantId[^\n]*currentTenant|assert[^[:space:]]*Tenant|ensure[^[:space:]]*Tenant|isPlatformRoot|isPlatformTenant|platformRoot|superadmin' "$scope_file" && query_safe_scope=true
+    grep -Eiq 'targetSession[^\n]*tenantId|tenantId[^\n]*targetSession|findByTenantId|select[^[:space:]]*ByTenant(Id|And)|assert[^[:space:]]*Tenant|ensure[^[:space:]]*Tenant|isPlatformRoot|isPlatformTenant|platformRoot|superadmin' "$scope_file" && kick_safe_scope=true
+  done
+
+  if [[ -n "$query_path" && "$online_controller" == true && -n "$repository_file" && -f "$repository_file" && "$query_safe_scope" != true ]]; then
+    query_evidence=false
+    if grep -Eiq 'searchTokenValue[[:space:]]*\(|findByUserId[[:space:]]*\(|selectOnlineUserById[[:space:]]*\(' "$repository_file"; then
+      query_evidence=true
+    fi
+    if [[ "$query_evidence" == true ]]; then
+      printf '%s\n%s\n%s\n%s\n%s\n\n' \
+        "P1 $query_path:$query_line - 在线会话读取缺少租户边界，在线用户查询可跨租户枚举会话或用户信息。" \
+        '影响：具备在线会话查询权限的调用方可能读取其他租户的在线用户、会话元数据或登录状态，造成跨租户信息泄露。' \
+        '修复建议：查询会话时绑定当前租户或已验证的目标租户，并在仓储/SQL 层使用 tenant_id 条件；仅平台 ROOT 的全局接口才允许跨租户读取且必须显式校验身份。' \
+        '验证方式：使用两个租户分别创建在线会话，交叉调用 /sso/online 查询并断言只能返回当前租户；再用平台 ROOT 全局接口验证授权边界。' \
+        "证据行：${controller_file##*/} 在线入口/目标参数；${repository_file##*/} 全局会话搜索或未按租户查询。" >>"$output_file"
+    fi
+  fi
+
+  if [[ -n "$kick_path" && "$online_controller" == true && -n "$repository_file" && -f "$repository_file" && "$kick_safe_scope" != true ]]; then
+    kick_evidence=false
+    if grep -Eiq 'kickoutByTokenValue[[:space:]]*\(|forceLogout[[:space:]]*\(|revokeSession[[:space:]]*\(|deleteSession[[:space:]]*\(' "$repository_file" "$application_file" 2>/dev/null; then
+      kick_evidence=true
+    fi
+    if [[ "$kick_evidence" == true ]]; then
+      printf '%s\n%s\n%s\n%s\n%s\n\n' \
+        "P1 $kick_path:$kick_line - 在线会话踢下线缺少租户边界，目标 token/session 可跨租户撤销。" \
+        '影响：调用方可指定其他租户的 token 或 session 并强制其下线，造成跨租户会话控制和拒绝服务。' \
+        '修复建议：先解析目标会话所属租户并校验当前管理员的数据范围，再执行撤销；仓储删除条件必须包含 tenant_id，平台 ROOT 全局接口需显式身份校验。' \
+        '验证方式：使用两个租户的会话交叉执行踢下线，断言非本租户目标被拒绝且本租户目标仍可按权限撤销；单独验证 ROOT 全局接口。' \
+        "证据行：${controller_file##*/} DELETE/kick 目标参数；${repository_file##*/} kickout/delete/revoke 未见目标租户校验。" >>"$output_file"
+    fi
+  fi
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_non_atomic_authorization_code_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -9137,6 +9248,7 @@ collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_raw_session_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_online_session_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_non_atomic_authorization_code_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_unsafe_deserialization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxe_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

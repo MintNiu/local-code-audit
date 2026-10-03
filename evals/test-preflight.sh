@@ -5284,6 +5284,154 @@ if printf '%s\n' "$sso_scope_safe_output" | grep -F "$sso_scope_marker" >/dev/nu
   exit 1
 fi
 
+# Online-session reads and forced logout must not use a global token/session
+# index for an arbitrary target without a tenant boundary.  Keep this separate
+# from the raw-token response rule: this fixture contains no OnlineUserVO token.
+online_scope_repo="$fixture_root/online-session-scope-repo"
+mkdir -p "$online_scope_repo/src/main/java/example/auth"
+git -C "$online_scope_repo" init -q
+git -C "$online_scope_repo" config user.email test@example.invalid
+git -C "$online_scope_repo" config user.name preflight-online-session-scope
+cat >"$online_scope_repo/src/main/java/example/auth/SsoOnlineController.java" <<'EOF'
+package example.auth;
+final class SsoOnlineController {
+    Object users(Object query) { return null; }
+    Object kickout(String targetToken) { return null; }
+}
+EOF
+cat >"$online_scope_repo/src/main/java/example/auth/OnlineSessionApplication.java" <<'EOF'
+package example.auth;
+final class OnlineSessionApplication {
+    Object list(Object query) { return null; }
+    void kickout(String targetToken) {}
+}
+EOF
+cat >"$online_scope_repo/src/main/java/example/auth/OnlineSessionRepository.java" <<'EOF'
+package example.auth;
+final class OnlineSessionRepository {
+    Object search(Object query) { return null; }
+    void kickout(String token) {}
+}
+EOF
+git -C "$online_scope_repo" add .
+git -C "$online_scope_repo" commit -qm online-session-scope-base
+cat >"$online_scope_repo/src/main/java/example/auth/SsoOnlineController.java" <<'EOF'
+package example.auth;
+@RequestMapping("/sso/online")
+final class SsoOnlineController {
+    @GetMapping("/users")
+    Object users(OnlineUserQuery query) { return application.list(query); }
+    @DeleteMapping("/users/{token}")
+    Object kickout(@PathVariable String token) { application.kickout(token); return null; }
+    private final OnlineSessionApplication application = null;
+}
+EOF
+cat >"$online_scope_repo/src/main/java/example/auth/OnlineSessionApplication.java" <<'EOF'
+package example.auth;
+final class OnlineSessionApplication {
+    Object list(OnlineUserQuery query) { return repository.search(query); }
+    void kickout(String targetToken) { repository.kickout(targetToken); }
+    private final OnlineSessionRepository repository = null;
+}
+EOF
+cat >"$online_scope_repo/src/main/java/example/auth/OnlineSessionRepository.java" <<'EOF'
+package example.auth;
+final class OnlineSessionRepository {
+    Object search(OnlineUserQuery query) {
+        String keyword = query.keyword();
+        return StpUtil.searchTokenValue("", 0, 1000, false, keyword);
+    }
+    void kickout(String token) { StpUtil.kickoutByTokenValue(token); }
+}
+EOF
+online_scope_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$online_scope_repo")"
+online_read_marker='在线会话读取缺少租户边界'
+online_kick_marker='在线会话踢下线缺少租户边界'
+printf '%s\n' "$online_scope_output" | grep -F "$online_read_marker" >/dev/null || {
+  echo 'online-session scope preflight missed the unscoped read fixture' >&2
+  printf '%s\n' "$online_scope_output" >&2
+  exit 1
+}
+printf '%s\n' "$online_scope_output" | grep -F "$online_kick_marker" >/dev/null || {
+  echo 'online-session scope preflight missed the unscoped kick fixture' >&2
+  printf '%s\n' "$online_scope_output" >&2
+  exit 1
+}
+for online_scope_marker in "$online_read_marker" "$online_kick_marker"; do
+  online_scope_count="$(printf '%s\n' "$online_scope_output" | grep -cF "$online_scope_marker" || true)"
+  [[ "$online_scope_count" -eq 1 ]] || {
+    echo "online-session scope preflight emitted duplicate blocks for $online_scope_marker: $online_scope_count" >&2
+    printf '%s\n' "$online_scope_output" >&2
+    exit 1
+  }
+done
+
+online_scope_safe_repo="$fixture_root/online-session-scope-safe-repo"
+cp -R "$online_scope_repo" "$online_scope_safe_repo"
+cat >"$online_scope_safe_repo/src/main/java/example/auth/OnlineSessionRepository.java" <<'EOF'
+package example.auth;
+final class OnlineSessionRepository {
+    Object search(OnlineUserQuery query) {
+        Long tenantId = currentTenantId();
+        return sessionStore.findByTenantId(tenantId, query);
+    }
+    void kickout(String targetToken) {
+        TargetSession targetSession = sessionStore.findById(targetToken);
+        if (!targetSession.getTenantId().equals(currentTenantId())) throw new SecurityException();
+        sessionStore.delete(targetToken);
+    }
+}
+EOF
+online_scope_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$online_scope_safe_repo")"
+if printf '%s\n' "$online_scope_safe_output" | grep -F "$online_read_marker" >/dev/null || \
+   printf '%s\n' "$online_scope_safe_output" | grep -F "$online_kick_marker" >/dev/null; then
+  echo 'online-session scope preflight reported the tenant-scoped safe fixture' >&2
+  printf '%s\n' "$online_scope_safe_output" >&2
+  exit 1
+fi
+
+online_scope_logout_repo="$fixture_root/online-session-current-logout-repo"
+mkdir -p "$online_scope_logout_repo/src/main/java/example/auth"
+git -C "$online_scope_logout_repo" init -q
+git -C "$online_scope_logout_repo" config user.email test@example.invalid
+git -C "$online_scope_logout_repo" config user.name preflight-online-current-logout
+cat >"$online_scope_logout_repo/src/main/java/example/auth/SsoOnlineController.java" <<'EOF'
+package example.auth;
+final class SsoOnlineController {
+    void logout() { sessionStore.delete(currentToken()); }
+}
+EOF
+git -C "$online_scope_logout_repo" add .
+git -C "$online_scope_logout_repo" commit -qm online-current-logout-base
+sed -i '' 's/sessionStore.delete(currentToken());/sessionStore.delete(currentToken()); \/\/ current session only/' \
+  "$online_scope_logout_repo/src/main/java/example/auth/SsoOnlineController.java"
+online_scope_logout_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$online_scope_logout_repo")"
+if printf '%s\n' "$online_scope_logout_output" | grep -F "$online_read_marker" >/dev/null || \
+   printf '%s\n' "$online_scope_logout_output" | grep -F "$online_kick_marker" >/dev/null; then
+  echo 'online-session scope preflight reported current-user logout' >&2
+  printf '%s\n' "$online_scope_logout_output" >&2
+  exit 1
+fi
+
+online_scope_root_repo="$fixture_root/online-session-root-repo"
+cp -R "$online_scope_repo" "$online_scope_root_repo"
+cat >>"$online_scope_root_repo/src/main/java/example/auth/OnlineSessionApplication.java" <<'EOF'
+
+// The endpoint is intentionally global and guarded by the platform ROOT role.
+boolean isPlatformRoot(Object currentUser) { return true; }
+EOF
+online_scope_root_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$online_scope_root_repo")"
+if printf '%s\n' "$online_scope_root_output" | grep -F "$online_read_marker" >/dev/null || \
+   printf '%s\n' "$online_scope_root_output" | grep -F "$online_kick_marker" >/dev/null; then
+  echo 'online-session scope preflight reported the ROOT global fixture' >&2
+  printf '%s\n' "$online_scope_root_output" >&2
+  exit 1
+fi
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.
