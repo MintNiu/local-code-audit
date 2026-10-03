@@ -6696,6 +6696,97 @@ collect_system_dept_tenant_write_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_bafan_admin_category_authorization_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file web_config interceptor_file candidate_path candidate_line
+  local method_text locations first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # This rule is limited to Bafan's concrete admin category write endpoints.
+  # A valid admin JWT only proves authentication; without a permission
+  # interceptor or method-level permission expression, a low-privilege admin
+  # can mutate the shared category table.  Ordinary reads and controllers with
+  # an explicit guard remain outside the rule.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-bafan-category-authz-candidates.XXXXXX")"
+  awk '
+    function is_category_path(value) {
+      return value == "src/main/java/com/bofan/modules/admin/controller/AdminCategoryController.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_category_path(path) &&
+          text ~ /@(PostMapping|PutMapping|DeleteMapping)/) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+
+  controller_file="$source_root/src/main/java/com/bofan/modules/admin/controller/AdminCategoryController.java"
+  web_config="$source_root/src/main/java/com/bofan/common/config/WebMvcConfig.java"
+  interceptor_file="$source_root/src/main/java/com/bofan/modules/admin/interceptor/AdminAuthInterceptor.java"
+  if [[ ! -f "$controller_file" || ! -f "$web_config" || ! -f "$interceptor_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bofan/modules/admin/controller/AdminCategoryController.java" ||
+     path_has_symlink_component "src/main/java/com/bofan/common/config/WebMvcConfig.java" ||
+     path_has_symlink_component "src/main/java/com/bofan/modules/admin/interceptor/AdminAuthInterceptor.java" ||
+     ! grep -Fq '@RequestMapping("/admin/category")' "$controller_file" ||
+     ! grep -Fq 'addPathPatterns("/admin/**")' "$web_config" ||
+     ! grep -Fq 'adminAuthInterceptor' "$web_config" ||
+     grep -Fq 'AdminPermissionInterceptor' "$web_config" ||
+     ! grep -Fq 'AdminContext.setRole' "$interceptor_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_root/$candidate_path" "$candidate_line" --masked-comments 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -Eq 'categoryMapper\.(insert|updateById|deleteById)' || continue
+    if printf '%s\n' "$method_text" | grep -Eqi '@PreAuthorize|@RequiresPermissions|@Permission|@SaCheckPermission|hasPermission[[:space:]]*\('; then
+      continue
+    fi
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+  [[ -n "$locations" ]] || { rm -f "$candidates"; return 0; }
+
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 后台分类写接口只有 JWT 登录拦截，缺少方法级角色/权限校验，普通管理员可直接增删改分类或修改状态。" \
+    "影响：拥有任意有效后台账号的低权限用户可调用 /admin/category 的新增、更新、状态变更和删除接口，篡改共享分类数据，影响所有使用该分类的业务功能；OperationLog 只记录操作，不构成授权。" \
+    "修复建议：在每个分类写入口和服务层增加稳定的权限表达式（例如 admin:category:create/update/delete/status），或接入真正按当前管理员角色/权限判定的拦截器；不要把 JWT 有效、登录拦截或日志注解当作写权限。" \
+    "验证方式：使用有效但无分类写权限的管理员 JWT 分别请求 POST、PUT、状态变更和 DELETE，确认全部 403 且数据库无变化；授权角色验证允许路径，并覆盖直接调用 service、越权 ID 和审计日志不改变授权结果。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_url_prefix_whitelist_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -10158,6 +10249,7 @@ collect_publishing_review_issue_waiver_preflight "$chunk_input_file" "$build_pre
 collect_system_dict_global_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_bafan_oss_anonymous_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_dept_tenant_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_bafan_admin_category_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

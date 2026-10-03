@@ -964,3 +964,9 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 针对 `platform-system:797cd5b` 的稳定漏报，新增 `collect_system_dept_tenant_write_preflight`。规则只匹配具体的 `DeptController`/`DeptServiceImpl`/`SysDept` 路径，并要求控制器从请求体读取 `tenantId`、服务层在 `createDept` 或 `updateDept` 中把该值送入 `insert`/`updateById`，同时缺少 `TenantOperationGuard`、当前租户解析或归属断言。方法窗口会避开 `buildDept(...)` 调用行，只分析真实方法声明；带服务层租户守卫的创建/更新和不涉及部门写入的接口保持 clean。影响描述同时覆盖父部门跨租户树污染、绕过控制器直接调用 service，以及租户插件开启/关闭的验证边界。
 
 正负 fixture、完整 `test-preflight.sh`、分片、输出可见性、证据过滤、Java 方法窗口和 shell 语法回归均通过。对真实 `797cd5b` 快照的归档 smoke 能稳定输出 `DeptController.java:86` 和 `DeptServiceImpl.java:38` 的 P1；该样本参与了规则设计，已从私有独立 holdout 转为 `tuning-source`，不增加正式召回率分母，后续必须用新的未见根因替补。
+
+### 2026-10-03：补齐 Bafan 后台分类写权限预检
+
+针对 `platform-bafan:807b43b4` 的稳定漏报，新增 `collect_bafan_admin_category_authorization_preflight`。规则只匹配 `AdminCategoryController` 的 POST/PUT/状态变更/DELETE 方法，并要求当前 `/admin/**` 只注册 `AdminAuthInterceptor`、认证拦截器仅解析 JWT/保存 role 而没有按权限拒绝，同时具体方法直接写 `categoryMapper` 且没有 `@PreAuthorize` 或等效权限表达式。方法级权限守卫和真正的 `AdminPermissionInterceptor` 作为 clean 边界，日志注解不被视为授权。
+
+正负 fixture、完整确定性回归和真实 `807b43b4` 归档 smoke 通过；真实快照稳定输出四个分类写入口的聚合 P1。该样本参与了规则设计，已从私有盲测候选转为 `tuning-source`，不计入独立 holdout 召回率，后续必须用新的未见根因替补。
