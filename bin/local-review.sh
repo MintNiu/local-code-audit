@@ -5993,6 +5993,62 @@ collect_direct_address_ssrf_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_http_job_handler_ssrf_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates source_file candidate_path candidate_line
+  [[ -n "$source_root" ]] || return 0
+
+  # The generic SSRF preflight tracks request parameters obtained through
+  # getParameter(...). XXL-JOB HTTP handlers receive the URL as the job
+  # method argument instead, so keep this separate and deliberately narrow:
+  # require a changed HttpJobHandler.java line that constructs HttpGet(param),
+  # the same current file to execute that request, and no visible URL/IP
+  # allowlist or private-address guard. A fixed URL or an explicitly checked
+  # parameter stays clean.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-http-job-ssrf-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && path ~ /(^|\/)HttpJobHandler\.java$/ &&
+          text ~ /new[[:space:]]+HttpGet[[:space:]]*\([[:space:]]*param[[:space:]]*\)/)
+        printf "%s\t%d\n", path, line_no
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    path_has_symlink_component "$candidate_path" && continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    grep -Eq 'execute[[:space:]]*\([[:space:]]*String[[:space:]]+param[[:space:]]*\)' "$source_file" || continue
+    grep -Eq '[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\.[[:space:]]*execute[[:space:]]*\([[:space:]]*httpGet[[:space:]]*\)' "$source_file" || continue
+    if grep -Eiq 'allow[-_]?list|allowed[[:space:]]+host|isAllowed(URL|Uri|Host)?|validate(URL|Uri|Host)|getHost[[:space:]]*\(|InetAddress|private[[:space:]-]*(address|network)|metadata|redirect[-_ ]?allow' "$source_file"; then
+      continue
+    fi
+    printf '%s\n%s\n%s\n%s\n%s\n\n' \
+      "P1 $candidate_path:$candidate_line - HTTP 任务处理器将任务参数直接构造成 HttpGet 并发起出站请求，缺少目标主机、协议和内网地址边界校验，存在服务端请求伪造（SSRF）风险。" \
+      '影响：可控任务参数能够让执行器访问内网服务、云 metadata 或其他非预期地址，绕过客户端网络边界并探测内部资源。' \
+      '修复建议：不要直接信任任务参数作为 URL；解析并严格限制 https scheme、host、port、解析后的 IP 和重定向目标，只允许受信目标集合。' \
+      '验证方式：使用外部地址、localhost、内网地址、metadata 地址、IPv6/整数 IP 和重定向目标测试，确认所有非允许目标都在发起请求前被拒绝。' \
+      "证据行：execute(String param) 接收任务输入；${candidate_path##*/}:$candidate_line 直接 new HttpGet(param)；同文件随后执行 httpGet。" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_authorization_annotation_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -9265,6 +9321,7 @@ collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$prefli
 collect_reactive_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
+collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_authorization_annotation_preflight "$chunk_input_file" "$build_preflight_file"
 collect_xxl_job_permission_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_job_sensitive_log_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
