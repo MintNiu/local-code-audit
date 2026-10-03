@@ -979,4 +979,12 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 
 随后补齐 `platform-system:abfb9cc` 内部 API 资源同步边界预检。规则限定 `/api/v1/internal/api-resources/sync`，要求同步应用按请求体 `applicationCode` 选择目标并直接新增/更新资源，同时 README 只证明共享 `X-Gateway-Token`，而控制器和同步服务没有可见的调用方到应用绑定；带 `@InternalService`、服务身份或显式 application grant 的安全夹具保持 clean。真实归档 smoke 稳定定位 `ApiResourceSyncController.java:24`，确定性 P1 与硬编码凭据等原有 P1 均可见。该样本参与规则设计，已转为 tuning-source，不计入独立召回率；独立表仍为 17 个记录（严格 16 个、命中 6 个、37.5%），tuning-source 增为 6 个，仍需至少 4 个未参与调优根因补足 20 个样本。
 
+### 2026-10-04：统一冻结 scorecard 口径并切换为高效率补样流程
+
+本轮对私有冻结目录中的三张表做了一次只读一致性审计，并修复候选 TSV 的缺失 `parent` 列、状态拼写和仓库名拼写。最终计分以 `independent-probe-results.tsv` 的 `label_status` 为唯一依据：`manual-confirmed` 才进入独立 holdout，`manual-confirmed-conditional` 单独记录部署前置条件，`tuning-source` 只用于回归保护。由此，当前严格独立表为 9 个 P0/P1 根因，命中 4 个，定位准确 4/4，双轮完整稳定 9/9，严格召回率为 44.4%；另有 1 个 HR 部署条件样本，以及 13 个已参与窄预检或规则设计的调优源。历史记录中的 16/17/20 等数字保留为当时冻结快照，不再与当前最终口径混用。
+
+为缩短调优周期，后续采用“静态证据预筛 → 多角色并行根因审计 → 只对通过审计的少量样本双跑 → 发现规则后立即移出 holdout 并补新样本”的流水线。静态预筛阶段先排除已在冻结表、修复提交派生、同一凭据族和纯功能改动；模型双跑只用于未见根因的真值/稳定性确认，不再把所有候选都完整跑一遍。任何新增预检命中的样本立即标记为 `tuning-source`，由下一批未参与设计的样本补回分母。当前仍需至少 11 个新的独立根因达到 20 个样本，并在最终冻结后重新执行召回、误报、定位、稳定性与输出完整性门禁。
+
+同日对 `platform-system`、`platform-gateway`、`platform-hr-service`、`platform-auth` 和 `platform-common` 的 11 个近期提交做并行只读审计。HR 目录、移动端登录、网关 publishing 路由、系统账号 provisioning 和迁移加固均未发现由提交直接引入且未见过的 P0/P1；`platform-auth:cb2dcb6` 的 Sentinel 默认 Nacos 凭据属于已有 `config-prod-nacos-default` 根因族，只能标为 recurrence/tuning-source，不能扩大独立分母。该批次全部在模型双跑前淘汰，验证了“先根因去重、后模型复测”可以避免重复消耗本地推理时间。
+
 随后完成独立替补与角色权限边界批次：`platform-auth:3d1eaac` 双轮完整稳定，新增 localhost 配置中的固定数据库/Redis/Nacos 凭据，按一个独立 P1 根因计入 holdout；`platform-system:ecc8d75` 的 `RolePermissionApplication` 菜单/部门跨租户绑定预检在真实快照稳定命中，转为 tuning-source。当前私有表为 17 个独立记录（严格排除 HR 条件样本为 16 个），严格 gold P0/P1 为 16 个、命中 7 个，严格召回约 43.8%；tuning-source 为 7 个。按阶段一门禁，仍需至少 4 个未参与调优的新 P0/P1 根因，并至少补足 3 个独立提交记录，同时完成 train/dev/holdout split；调优源继续只用于回归保护，不计入独立 holdout 分母。

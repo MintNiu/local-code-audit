@@ -52,6 +52,15 @@ SQL 迁移预检还会识别删除版本化 `sql/migration`/`db/migration` 文�
 ./evals/summarize-scorecard.sh ~/.local/share/local-review/evals/platform-api-labels/stage1-consolidated-scorecard.tsv
 ```
 
+冻结阶段一的私有 `independent-probe-results.tsv` 还应先通过独立表校验器。它把 `label_status` 作为唯一计分开关，防止把 `tuning-source` 或条件样本误算为 holdout，并同时检查 TSV 列数、提交号、重复根因、完整性和定位字段：
+
+```bash
+python3 ./scripts/validate-independent-scorecard.py \
+  ~/.local/share/local-review/evals/stage1-freeze-20261003/independent-probe-results.tsv
+```
+
+该命令只读取文件并输出严格 gold、命中、召回率及各状态计数；可用 `bash evals/test-independent-scorecard-validator.sh` 做无模型回归。
+
 可以先生成不覆盖已有标签的人工标注模板：
 
 ```bash
