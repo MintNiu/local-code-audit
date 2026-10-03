@@ -10,6 +10,10 @@
 
 同轮新增 `collect_publishing_pdf_render_resource_preflight`：只匹配 `TypesetEvidenceApplication` 中新增的 PDFBox `renderImageWithDPI`，且当前方法没有 MediaBox/CropBox 或像素面积上限；带几何上限的负例保持 clean。正负 fixture、真实 `0ae0ffb` 快照和完整预检均通过，输出 P2 资源耗尽风险；该提交参与规则设计，结果只作为 tuning-source，不计入独立 P0/P1 召回率。
 
+同轮对 ERP 未冻结候选 `0e6006b` 做父子快照静态验证：通用 `collect_schema_snapshot_migration_preflight` 在 `sql/platform_erp.sql:1768` 准确发现 `erp_sales_order.request_no` 字段和唯一索引只进入初始化快照，当前提交没有对应版本化 migration。该机制已被现有预检覆盖，因此跳过昂贵的模型双跑，不把同族 schema 缺陷重复计入 holdout；后续只需用不同根因补充独立样本。
+
+随后对 Bafan workflow 凭据样本 `7acb085d` 做两轮个人 profile 复测：两轮均为单分片、完整结束，模型与确定性凭据预检都定位 `.github/workflows/deploy.yml:14` 的 DingTalk `access_token`。只读 scorecard 审计确认该提交已计入严格独立表，故本轮只更新稳定性证据，不新增分母；这验证了运行前按 `commit + feature_cluster` 去重可以避免重复消耗推理时间和重复计分。
+
 ## 当前进展：锁序候选与阶段一门禁（2026-09-27）
 
 运行器现在会对包含 `@Transactional`、`find*ForUpdate` 或 `FOR UPDATE` 的变更 Java 文件，受限列出变更文件及使用相同锁接收者的关联 Java 文件。证据包含源码行号、锁调用上下文窗口和完整调用顺序，但只作为 prompt 文本证据，不自动生成 finding，也不能单独证明同表、同事务或可达并发；文件/行数有上限，预算不足时可跳过。`test-sharding.sh` 已验证分片请求仍能看到变更文件、未变更关联文件和行锁调用。
