@@ -6654,6 +6654,96 @@ collect_inventory_stock_race_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_gateway_workflow_application_scope_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates filter_file route_path route_line map_line allow_line internal_line resolve_line
+  [[ -n "$source_root" ]] || return 0
+
+  # A newly exposed /workflow/** gateway route must be paired with the
+  # business-application mapping used by the tenant authorization filter.
+  # Keep this narrow: require the current filter's blank-application allow
+  # branch and its internal-only exception, and suppress the finding when the
+  # exact /workflow/ mapping already exists.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-workflow-scope-candidates.XXXXXX")"
+  awk '
+    function flush_file() {
+      if (path != "" && path ~ /(^|\/)(platform-)?gateway.*\.ya?ml$/ && route_path != "")
+        printf "%s\t%d\n", path, route_line
+      route_path = ""
+      route_line = 0
+    }
+    /^diff --git / { flush_file(); path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { flush_file(); path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && text ~ /Path[[:space:]]*=[[:space:]]*\/workflow\/\*\*/) {
+        route_path = path
+        route_line = line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { flush_file() }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  filter_file="$(find "$source_root" -type f -path '*/src/main/java/com/bit/gateway/filter/SaTokenAuthGlobalFilter.java' -print -quit 2>/dev/null || true)"
+  [[ -n "$filter_file" && -f "$filter_file" ]] || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eq 'BUSINESS_APPLICATION_BY_PATH_PREFIX' "$filter_file" || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eq 'allowed[[:space:]]*\([[:space:]]*principalTenantId[[:space:]]*,[[:space:]]*principalTenantId[[:space:]]*,[[:space:]]*null[[:space:]]*\)' "$filter_file" || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eq 'isInternalOnlyPath|/workflow/v1/internal/\*\*' "$filter_file" || {
+    rm -f "$candidates"
+    return 0
+  }
+  grep -Eq 'resolveBusinessApplicationCode' "$filter_file" || {
+    rm -f "$candidates"
+    return 0
+  }
+  if grep -Eq '"/workflow/"[[:space:]]*,' "$filter_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  map_line="$(grep -n 'BUSINESS_APPLICATION_BY_PATH_PREFIX' "$filter_file" | head -n 1 | cut -d: -f1)"
+  allow_line="$(grep -nE 'allowed[[:space:]]*\([[:space:]]*principalTenantId[[:space:]]*,[[:space:]]*principalTenantId[[:space:]]*,[[:space:]]*null[[:space:]]*\)' "$filter_file" | head -n 1 | cut -d: -f1)"
+  internal_line="$(grep -nE 'isInternalOnlyPath|/workflow/v1/internal/\*\*' "$filter_file" | head -n 1 | cut -d: -f1)"
+  resolve_line="$(grep -n 'resolveBusinessApplicationCode' "$filter_file" | head -n 1 | cut -d: -f1)"
+  map_line="${map_line:-?}"
+  allow_line="${allow_line:-?}"
+  internal_line="${internal_line:-?}"
+  resolve_line="${resolve_line:-?}"
+
+  while IFS=$'\t' read -r route_path route_line; do
+    [[ -n "$route_path" && "$route_line" =~ ^[0-9]+$ ]] || continue
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n\n' \
+      "P1 $route_path:$route_line - 新增 /workflow/** 网关路由未加入业务应用租户映射，空 applicationCode 分支会绕过应用授权。" \
+      '影响：普通租户可能访问未开通的 workflow 能力，平台租户切换也可能跳过目标租户的 workflow 应用授权，形成跨租户边界绕过。' \
+      '修复建议：在 BUSINESS_APPLICATION_BY_PATH_PREFIX 中加入精确的 /workflow/ 到业务应用编码映射，并保持内部 workflow 路径的显式限制；空 applicationCode 或无法解析应用时默认拒绝。' \
+      '验证方式：使用未开通 workflow 的普通租户、已开通租户和 ROOT 切换目标租户分别请求 /workflow/**，断言未授权均拒绝且 hasEnabledAccess("workflow", tenant) 被校验。' \
+      "证据行：SaTokenAuthGlobalFilter.java:${map_line}（应用映射）、:${resolve_line}（应用解析）、:${allow_line}（空 applicationCode 放行）、:${internal_line}（内部路径例外）。" \
+      '来源：确定性预检（代码证据，非模型原文）。' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_role_api_tenant_scope_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -8994,6 +9084,7 @@ collect_logical_warehouse_sku_replace_preflight "$chunk_input_file" "$build_pref
 collect_sales_return_idempotency_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_payment_voucher_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_inventory_stock_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_gateway_workflow_application_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_division_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_presigned_replay_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

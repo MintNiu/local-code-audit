@@ -5133,6 +5133,83 @@ if printf '%s\n' "$job_log_safe_output" | grep -F 'XXL-JOB 操作日志直接序
   exit 1
 fi
 
+# A newly exposed workflow gateway route must be covered by the same
+# business-application mapping used by the tenant authorization filter.
+workflow_scope_repo="$fixture_root/workflow-scope-repo"
+mkdir -p "$workflow_scope_repo/nacos-config" "$workflow_scope_repo/src/main/java/com/bit/gateway/filter"
+git -C "$workflow_scope_repo" init -q
+git -C "$workflow_scope_repo" config user.email test@example.invalid
+git -C "$workflow_scope_repo" config user.name preflight-workflow-scope
+cat >"$workflow_scope_repo/nacos-config/platform-gateway.yml" <<'EOF'
+spring:
+  cloud:
+    gateway:
+      routes: []
+EOF
+cat >"$workflow_scope_repo/src/main/java/com/bit/gateway/filter/SaTokenAuthGlobalFilter.java" <<'EOF'
+final class SaTokenAuthGlobalFilter {
+    static final java.util.Map<String, String> BUSINESS_APPLICATION_BY_PATH_PREFIX =
+        java.util.Map.of("/system/", "system");
+    boolean allowed(Long principalTenantId, Long targetTenantId, String applicationCode) {
+        return principalTenantId.equals(targetTenantId) && applicationCode == null;
+    }
+    boolean authorize(Long principalTenantId) {
+        return allowed(principalTenantId, principalTenantId, null);
+    }
+    boolean isInternalOnlyPath(String path) { return path.startsWith("/workflow/v1/internal/**"); }
+    String resolveBusinessApplicationCode(String path) {
+        return BUSINESS_APPLICATION_BY_PATH_PREFIX.entrySet().stream()
+            .filter(entry -> path.startsWith(entry.getKey()))
+            .map(java.util.Map.Entry::getValue).findFirst().orElse(null);
+    }
+}
+EOF
+git -C "$workflow_scope_repo" add .
+git -C "$workflow_scope_repo" commit -qm workflow-scope-base
+cat >"$workflow_scope_repo/nacos-config/platform-gateway.yml" <<'EOF'
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: workflow
+          uri: lb://workflow
+          predicates:
+            - Path=/workflow/**
+EOF
+workflow_scope_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$workflow_scope_repo")"
+workflow_scope_marker='新增 /workflow/** 网关路由未加入业务应用租户映射'
+printf '%s\n' "$workflow_scope_output" | grep -F "$workflow_scope_marker" >/dev/null || {
+  echo 'workflow application scope preflight missed the vulnerable route fixture' >&2
+  printf '%s\n' "$workflow_scope_output" >&2
+  exit 1
+}
+workflow_scope_p1_count="$(printf '%s\n' "$workflow_scope_output" | grep -c '^P1 .*新增 /workflow/\*\* 网关路由未加入业务应用租户映射' || true)"
+[[ "$workflow_scope_p1_count" -eq 1 ]] || {
+  echo "workflow application scope preflight emitted duplicate or malformed blocks: $workflow_scope_p1_count" >&2
+  printf '%s\n' "$workflow_scope_output" >&2
+  exit 1
+}
+for workflow_scope_field in '影响：' '修复建议：' '验证方式：' '证据行：'; do
+  [[ "$(printf '%s\n' "$workflow_scope_output" | grep -cF "$workflow_scope_field" || true)" -eq 1 ]] || {
+    echo "workflow application scope preflight omitted field: $workflow_scope_field" >&2
+    printf '%s\n' "$workflow_scope_output" >&2
+    exit 1
+  }
+done
+
+workflow_scope_safe_repo="$fixture_root/workflow-scope-safe-repo"
+cp -R "$workflow_scope_repo" "$workflow_scope_safe_repo"
+perl -0pi -e 's/"\/system\/", "system"\);/"\/system\/", "system", "\/workflow\/", "workflow");/' \
+  "$workflow_scope_safe_repo/src/main/java/com/bit/gateway/filter/SaTokenAuthGlobalFilter.java"
+workflow_scope_safe_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  "$repo_root/bin/local-review.sh" --repo "$workflow_scope_safe_repo")"
+if printf '%s\n' "$workflow_scope_safe_output" | grep -F "$workflow_scope_marker" >/dev/null; then
+  echo 'workflow application scope preflight reported the explicitly mapped safe fixture' >&2
+  printf '%s\n' "$workflow_scope_safe_output" >&2
+  exit 1
+fi
+
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
 # paths here; testing their silent removal would bypass the location gate.
