@@ -6030,6 +6030,77 @@ collect_publishing_workspace_symlink_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_publishing_mcp_job_scope_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates mcp_file document_file readme_file locations first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # A shared gateway token authenticates the MCP service, but does not prove
+  # which tenant/job/execution may be read or mutated.  Keep this rule tied to
+  # the concrete publishing MCP file tools and require the current source to
+  # lack the grant/workspace authorization that later implementations add.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-publishing-mcp-scope-candidates.XXXXXX")"
+  awk '
+    function is_tool_path(value) {
+      return value ~ /^src\/main\/java\/com\/bit\/publishing\/mcp\/tool\/(PublishingMcpTools|PublishingDocumentTools)\.java$/
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_tool_path(path) &&
+          (text ~ /@McpTool/ || text ~ /createJobWorkspace|inspectDocx|applyDocxProfile|renderDocxToPdf/)) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+  mcp_file="$source_root/src/main/java/com/bit/publishing/mcp/tool/PublishingMcpTools.java"
+  document_file="$source_root/src/main/java/com/bit/publishing/mcp/tool/PublishingDocumentTools.java"
+  readme_file="$source_root/README.md"
+  if [[ ! -f "$mcp_file" || ! -f "$document_file" || ! -f "$readme_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/mcp/tool/PublishingMcpTools.java" ||
+     path_has_symlink_component "src/main/java/com/bit/publishing/mcp/tool/PublishingDocumentTools.java" ||
+     ! grep -Eqi 'X-Gateway-Token|GATEWAY_INTERNAL_TOKEN' "$readme_file" ||
+     ! grep -Eq 'createJobWorkspace[[:space:]]*\([^)]*String[[:space:]]+jobNo|resolveExisting|resolveGeneratedOutput|resolveOutputDirectory' "$mcp_file" "$document_file" ||
+     ! grep -Eqi 'Files\.(newInputStream|newOutputStream|createDirectories)|new[[:space:]]+ProcessBuilder' "$mcp_file" "$document_file" ||
+     grep -Eqi 'PublishingExecutionGrantService|PublishingWorkspaceService|grantService[[:space:]]*\.[[:space:]]*authorize|workspaceService[[:space:]]*\.[[:space:]]*authorize|ExecutionGrant|executionGrant|tenantId.*jobNo' "$mcp_file" "$document_file"; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations="$(awk -F '\t' '{ printf "%s%s:%s", (seen++ ? ", " : ""), $1, $2 }' "$candidates")"
+  IFS=$'\t' read -r first_path first_line <"$candidates"
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 出版 MCP 文件工具只有共享网关令牌认证，缺少 tenant/job/execution 级授权边界。" \
+    "影响：任何获得网关令牌的调用方都可自行指定 jobNo 或工作区相对路径，读取、覆盖或渲染其他任务/租户的工作区文件；任务号可猜测或路径可枚举时会形成跨任务、跨租户数据读写和审计污染。" \
+    "修复建议：每次工具调用必须携带短时签名 execution grant，绑定 tenantId、jobNo、executionId、attemptNo、允许工具和过期时间；在打开工作区前由服务端校验 grant、任务归属和当前执行租约，不能把共享 X-Gateway-Token 当作资源授权。" \
+    "验证方式：使用同一网关令牌访问另一租户/任务的 input、work、output 和 audit 路径，确认在文件系统操作前均被拒绝；使用有效 grant 验证允许工具、任务、租户、执行轮次和过期时间逐项校验，并覆盖重放与跨任务替换。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_publishing_evidence_write_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -9636,6 +9707,7 @@ collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$prefli
 collect_reactive_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_xxl_job_empty_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_workspace_symlink_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_publishing_mcp_job_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_evidence_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_publishing_review_issue_waiver_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

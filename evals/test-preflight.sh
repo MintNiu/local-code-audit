@@ -5438,6 +5438,9 @@ bash "$repo_root/evals/test-xxl-job-empty-token-preflight.sh"
 # Publishing MCP workspace path containment keeps symlink escapes covered by
 # the same aggregate deterministic suite.
 bash "$repo_root/evals/test-publishing-workspace-symlink-preflight.sh"
+# MCP file tools must carry tenant/job/execution grants, not only a shared
+# gateway token; keep the resource-authorization boundary covered.
+bash "$repo_root/evals/test-publishing-mcp-job-scope-preflight.sh"
 # Publishing evidence writes must be fenced by a worker execution grant and
 # actual content verification; keep the user-facing DTO trust boundary covered.
 bash "$repo_root/evals/test-publishing-evidence-write-preflight.sh"

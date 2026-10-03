@@ -950,3 +950,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 正负 fixture 与完整 `test-preflight.sh` 已通过。该提交参与规则设计，真实运行结果不计入独立 holdout，必须由新的未见根因替补；规则刻意不扩展到普通 CRUD 或无法证明执行上下文的通用 DTO 写入，以控制误报。
 
 同一提交还新增 `collect_publishing_review_issue_waiver_preflight`：当质量问题决策允许把任意状态写成 `RESOLVED/ACCEPTED/IGNORED`，而复核只统计 `status=OPEN` 的 `ERROR/BLOCKER` 时，聚合报告一条 P1。该规则对应可复现的两步路径（同租户 `publishing:job:review` 用户先豁免阻塞问题，再提交 APPROVED），并以 `NON_WAIVABLE_SEVERITIES`、执行实例锁和历史豁免复核作为 clean 边界；正负 fixture、聚合预检和证据过滤回归均通过。
+
+同轮补充 `collect_publishing_mcp_job_scope_preflight`：当出版 MCP 文件工具在 README/配置中声明只由共享 `X-Gateway-Token` 保护，但 `createJobWorkspace`、DOCX 读写或渲染方法没有 `ExecutionGrant`、租户/任务工作区服务或授权调用时，聚合报告资源授权 P1。后续引入 `PublishingExecutionGrantService`、`PublishingWorkspaceService` 和 HMAC execution grant 的实现作为 clean 边界；符号链接规则仍单独覆盖文件系统真实路径风险。该预检的正负 fixture 与完整回归均通过，`6cb134b` 已参与调优，不能计入正式 holdout。
