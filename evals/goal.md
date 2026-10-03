@@ -457,3 +457,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 2026-10-03：补齐 `platform-bafan:807b43b4` 后台分类写权限预检。规则限定 `AdminCategoryController` 的 POST/PUT/状态变更/DELETE 方法，要求 `/admin/**` 只注册认证拦截器、拦截器只解析 JWT/保存 role，且具体写方法直接操作 `categoryMapper`、没有方法级权限表达式；带权限守卫或真正权限拦截器的安全夹具保持 clean。完整回归与真实快照 smoke 通过，稳定聚合四个写入口为一条 P1；样本已转为 tuning-source，不计入独立 holdout，后续需补未见根因。
 
 本轮同步审计私有 scorecard：独立表当前为 17 个 P0/P1 根因（含 1 个 HR 条件样本），严格口径为 16 个、命中 6 个，召回约 37.5%；tuning-source 为 4 个。新增预检命中只证明已知漏报形成回归保护，不能回填独立召回率；还需至少 4 个未参与调优的独立根因补足样本规模，再执行最终召回、误报、定位、稳定性和完整性门禁。
+
+2026-10-03：补齐 `platform-system:e45a97f5` 应用详情密钥边界预检。只在查询权限详情返回原始 `SysApplication`、应用层直接 `ensureExists`、仓储 `findById` 直接 `selectById`、实体含 `clientSecret` 且同一仓储存在 `SysTenantApplication` 关系证据时报告 P1；脱敏 VO 和关系约束为 clean 负例。真实快照 smoke 稳定定位 `ApplicationController.java:66`，样本参与规则设计并转为 tuning-source，不计入独立 holdout。独立表口径仍为 17 个记录，严格排除 HR 条件样本为 16 个，命中 6 个，严格召回约 37.5%；tuning-source 为 5 个，仍需至少 4 个未见根因达到 20 个样本。

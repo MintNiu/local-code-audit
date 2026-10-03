@@ -972,3 +972,7 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 正负 fixture、完整确定性回归和真实 `807b43b4` 归档 smoke 通过；真实快照稳定输出四个分类写入口的聚合 P1。该样本参与了规则设计，已从私有盲测候选转为 `tuning-source`，不计入独立 holdout 召回率，后续必须用新的未见根因替补。
 
 截至本轮私有表审计，独立表保留 17 个 P0/P1 根因，其中 1 个是 HR 部署边界条件样本；严格口径为 16 个根因、命中 6 个，召回约 37.5%。部门和分类样本都已移入 tuning-source，不能把确定性预检命中回填到这个比例；后续仍需补充至少 4 个未参与调优的独立根因，才能达到 20 个样本的前置规模，然后再按 ≥90% 召回、≤10% 误报、定位准确、双轮稳定和输出完整门禁验收。
+
+随后补齐 `platform-system:e45a97f5` 应用详情密钥边界预检。规则要求 `ApplicationController` 的查询权限详情方法返回原始 `SysApplication`，应用层直接走 `ensureExists`，仓储层的 `findById` 使用 `selectById`，同时实体含 `clientSecret` 且仓储另有 `SysTenantApplication` 关系证据；脱敏 `ApplicationVO` 或按租户关系读取的安全夹具保持 clean。真实快照 smoke 稳定定位 `ApplicationController.java:66`，确定性 P1 与硬编码凭据等原有 P1 均可见。该样本参与规则设计，已转为 tuning-source，不计入独立召回率。
+
+加入该调优源后的私有表口径不变：仍为 17 个独立记录（严格排除 HR 条件样本为 16 个），命中仍为 6 个，严格召回约 37.5%；tuning-source 为 5 个。还需至少 4 个未参与调优的独立根因补足 20 个样本，再进入最终门禁。调优源只用于回归保护，不计入独立 holdout 分母。

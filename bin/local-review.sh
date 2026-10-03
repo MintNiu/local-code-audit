@@ -4773,11 +4773,11 @@ collect_online_session_tenant_scope_preflight() {
       if (prefix == "+" || prefix == " ") new_line++
     }
   ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
-
   [[ -s "$candidates" ]] || {
     rm -f "$candidates"
     return 0
   }
+
   controller_file="$(find "$source_root" -type f -name 'SsoOnlineController.java' -print -quit 2>/dev/null || true)"
   application_file="$(find "$source_root" -type f -name 'OnlineSessionApplication.java' -print -quit 2>/dev/null || true)"
   repository_file="$(find "$source_root" -type f -name 'OnlineSessionRepository.java' -print -quit 2>/dev/null || true)"
@@ -6782,6 +6782,114 @@ collect_bafan_admin_category_authorization_preflight() {
     "影响：拥有任意有效后台账号的低权限用户可调用 /admin/category 的新增、更新、状态变更和删除接口，篡改共享分类数据，影响所有使用该分类的业务功能；OperationLog 只记录操作，不构成授权。" \
     "修复建议：在每个分类写入口和服务层增加稳定的权限表达式（例如 admin:category:create/update/delete/status），或接入真正按当前管理员角色/权限判定的拦截器；不要把 JWT 有效、登录拦截或日志注解当作写权限。" \
     "验证方式：使用有效但无分类写权限的管理员 JWT 分别请求 POST、PUT、状态变更和 DELETE，确认全部 403 且数据库无变化；授权角色验证允许路径，并覆盖直接调用 service、越权 ID 和审计日志不改变授权结果。" \
+    "证据行：$locations" >>"$output_file"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_system_application_secret_scope_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates controller_file application_file repository_file domain_file relation_file candidate_path candidate_line
+  local method_text detail_line detail_method application_line application_method repository_line repository_method locations first_path first_line
+  [[ -n "$source_root" ]] || return 0
+
+  # Match only the concrete application-detail path.  The finding requires a
+  # raw SysApplication (which contains clientSecret) to cross the controller,
+  # application, and repository layers via selectById without a tenant
+  # relation check.  List/visible endpoints and already-redacted VO paths stay
+  # outside this rule.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-system-application-secret-candidates.XXXXXX")"
+  awk '
+    function is_controller_path(value) {
+      return value == "src/main/java/com/bit/system/controller/ApplicationController.java"
+    }
+    /^diff --git / {
+      path = $4
+      sub(/^b\//, "", path)
+      next
+    }
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      next
+    }
+    /^@@ / {
+      hunk = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk)
+      sub(/ .*/, "", hunk)
+      line_no = hunk + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = (prefix == "+" ? substr($0, 2) : $0)
+      if (prefix == "+" && is_controller_path(path) &&
+          (text ~ /@GetMapping\("\/\{id:/ || text ~ /Result<SysApplication>/ || text ~ /application\.detail\(/)) {
+        printf "%s\t%d\n", path, line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+  [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
+
+  controller_file="$source_root/src/main/java/com/bit/system/controller/ApplicationController.java"
+  application_file="$source_root/src/main/java/com/bit/system/application/ApplicationCenterApplication.java"
+  repository_file="$source_root/src/main/java/com/bit/system/repository/ApplicationRepository.java"
+  domain_file="$source_root/src/main/java/com/bit/system/domain/SysApplication.java"
+  relation_file="$source_root/src/main/java/com/bit/system/domain/SysTenantApplication.java"
+  if [[ ! -f "$controller_file" || ! -f "$application_file" || ! -f "$repository_file" || ! -f "$domain_file" ]] ||
+     path_has_symlink_component "src/main/java/com/bit/system/controller/ApplicationController.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/application/ApplicationCenterApplication.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/repository/ApplicationRepository.java" ||
+     path_has_symlink_component "src/main/java/com/bit/system/domain/SysApplication.java" ||
+     ! grep -Fq '@RequestMapping("/api/v1/applications")' "$controller_file" ||
+     ! grep -Fq 'clientSecret' "$domain_file" ||
+     ! grep -Fq 'applicationMapper.selectById' "$repository_file" ||
+     ! grep -Fq 'tenantApplicationMapper' "$repository_file" ||
+     ( [[ -n "$relation_file" && ! -f "$relation_file" ]] ); then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  locations=""
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && "$candidate_line" =~ ^[0-9]+$ ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_root/$candidate_path" "$candidate_line" --masked-comments 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -F 'Result<SysApplication>' >/dev/null || continue
+    printf '%s\n' "$method_text" | grep -F 'application.detail(' >/dev/null || continue
+    printf '%s\n' "$method_text" | grep -F '@PreAuthorize' >/dev/null || continue
+    printf '%s\n' "$method_text" | grep -F 'sys:application:query' >/dev/null || continue
+    if [[ -z "$locations" ]]; then
+      first_path="$candidate_path"
+      first_line="$candidate_line"
+    fi
+    locations="${locations:+$locations, }$candidate_path:$candidate_line"
+  done <"$candidates"
+  [[ -n "$locations" ]] || { rm -f "$candidates"; return 0; }
+
+  detail_line="$(grep -nE '^[[:space:]]*public[[:space:]]+SysApplication[[:space:]]+detail[[:space:]]*\(' "$application_file" | head -n 1 | cut -d: -f1 || true)"
+  [[ "$detail_line" =~ ^[0-9]+$ ]] || { rm -f "$candidates"; return 0; }
+  detail_method="$(python3 "$java_method_window_script" "$application_file" "$detail_line" --masked-comments 2>/dev/null || true)"
+  printf '%s\n' "$detail_method" | grep -F 'return ensureExists(id)' >/dev/null || { rm -f "$candidates"; return 0; }
+
+  repository_line="$(grep -nE '^[[:space:]]*public[[:space:]]+SysApplication[[:space:]]+findById[[:space:]]*\(' "$repository_file" | head -n 1 | cut -d: -f1 || true)"
+  [[ "$repository_line" =~ ^[0-9]+$ ]] || { rm -f "$candidates"; return 0; }
+  repository_method="$(python3 "$java_method_window_script" "$repository_file" "$repository_line" --masked-comments 2>/dev/null || true)"
+  printf '%s\n' "$repository_method" | grep -F 'applicationMapper.selectById(id)' >/dev/null || { rm -f "$candidates"; return 0; }
+  if printf '%s\n' "$repository_method" | grep -Eqi 'tenantApplicationMapper[[:space:]]*\.|TenantContextHolder|tenantId'; then
+    rm -f "$candidates"
+    return 0
+  fi
+
+  printf '%s\n%s\n%s\n%s\n%s\n\n' \
+    "P1 $first_path:$first_line - 应用详情接口把含 clientSecret 的 SysApplication 原样返回，服务层按 ID 直取主表，未校验当前租户与应用授权关系或进行密钥脱敏。" \
+    "影响：拥有 sys:application:query 权限的非 ROOT 调用方可读取不属于当前租户的应用记录和 clientSecret；即使应用被设计为平台共享，原始密钥也会扩散到不需要密钥的详情读取路径。" \
+    "修复建议：详情接口只返回脱敏 ApplicationVO，把 clientSecret 移到独立的受控 reset-secret 流程；按当前租户与 sys_tenant_application 关系校验目标应用，平台全局应用由 ROOT/明确的系统权限单独放行，禁止按主键直接绕过归属检查。" \
+    "验证方式：租户 A 使用查询权限读取租户 B/未授权应用 ID，确认返回 403/404 且响应不含 clientSecret；ROOT 的受控全局路径验证允许，覆盖租户关系、密钥重置和详情列表的响应字段断言。" \
     "证据行：$locations" >>"$output_file"
   rm -f "$candidates"
   dedup_preflight_blocks "$output_file"
@@ -10250,6 +10358,7 @@ collect_system_dict_global_authorization_preflight "$chunk_input_file" "$build_p
 collect_bafan_oss_anonymous_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_system_dept_tenant_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_bafan_admin_category_authorization_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_system_application_secret_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_url_prefix_whitelist_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_direct_address_ssrf_preflight "$chunk_input_file" "$build_preflight_file"
 collect_http_job_handler_ssrf_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
