@@ -16,16 +16,20 @@ cat >"$test_root/scorecard.tsv" <<'EOF'
 repo	commit	parent	feature_cluster	gold_p0_p1	label_status
 platform-a	abcdef1234568	123456789abc1	scored-root	1	manual-confirmed
 EOF
+cat >"$test_root/review.tsv" <<'EOF'
+repo	commit	feature_cluster	decision	evidence_confidence	reason
+platform-a	abcdef1234567	new-root	exclude-clean	high	already reviewed
+EOF
 
 python3 "$repo_root/scripts/triage-candidates.py" \
   --candidates "$test_root/candidates.tsv" \
   --scorecard "$test_root/scorecard.tsv" \
+  --review "$test_root/review.tsv" \
   --out "$test_root/selected.tsv" \
   2>"$test_root/stderr"
 
-grep -F $'candidate triage: selected=1 skipped-status=1 skipped-scorecard=1 skipped-duplicate=1' "$test_root/stderr" >/dev/null
-grep -F $'platform-a\tabcdef1234567\t123456789abcd\tnew-root' "$test_root/selected.tsv" >/dev/null
-[[ "$(wc -l <"$test_root/selected.tsv" | tr -d ' ')" == 2 ]]
+grep -F $'candidate triage: selected=0 skipped-status=1 skipped-scorecard=1 skipped-review=1 skipped-duplicate=1' "$test_root/stderr" >/dev/null
+[[ "$(wc -l <"$test_root/selected.tsv" | tr -d ' ')" == 1 ]]
 
 printf 'bad-header\n' >"$test_root/bad-candidates.tsv"
 if python3 "$repo_root/scripts/triage-candidates.py" \

@@ -80,10 +80,11 @@ python3 ./scripts/validate-independent-scorecard.py \
 python3 ./scripts/triage-candidates.py \
   --candidates ~/.local/share/local-review/evals/stage1-freeze-20261003/blind-candidates.tsv \
   --scorecard ~/.local/share/local-review/evals/stage1-freeze-20261003/independent-probe-results.tsv \
+  --review ~/.local/share/local-review/evals/stage1-freeze-20261003/blind-candidate-review.tsv \
   --out /tmp/local-review-pending-candidates.tsv
 ```
 
-筛选器只按 `repo + commit + feature_cluster` 做精确去重；相似根因、修复派生提交和条件性风险仍必须由人工或并行静态审计判断，不能用脚本猜测。
+筛选器按 `repo + commit + feature_cluster` 做精确去重，并跳过候选评审表中已经填写 `decision` 的记录；相似根因、修复派生提交和条件性风险仍必须由人工或并行静态审计判断，不能用脚本猜测。
 
 需要批量安排评测时，可在筛选结果上运行风险排序。排序读取每个提交的真实 parent-to-commit diff，只调整执行顺序，不会删除候选或过滤模型输出：
 

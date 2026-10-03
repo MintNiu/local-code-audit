@@ -26,6 +26,7 @@ REQUIRED_CANDIDATE_COLUMNS = (
     "status",
 )
 REQUIRED_SCORECARD_COLUMNS = ("repo", "commit", "parent", "feature_cluster")
+REQUIRED_REVIEW_COLUMNS = ("repo", "commit", "feature_cluster", "decision")
 
 
 def fail(message: str) -> "NoReturn":
@@ -90,6 +91,10 @@ def main() -> int:
     )
     parser.add_argument("--candidates", required=True, type=Path, help="候选池 TSV")
     parser.add_argument("--scorecard", required=True, type=Path, help="已有评分卡 TSV")
+    parser.add_argument(
+        "--review", type=Path,
+        help="已有候选人工评审 TSV；填写过 decision 的候选不会再次进入队列",
+    )
     parser.add_argument("--out", type=Path, help="筛选结果 TSV；省略则输出到 stdout")
     args = parser.parse_args()
 
@@ -97,28 +102,43 @@ def main() -> int:
     scorecard_columns, scored = read_tsv(args.scorecard, REQUIRED_SCORECARD_COLUMNS)
     if "label_status" not in scorecard_columns:
         fail(f"评分卡缺少 label_status 列: {args.scorecard}")
+    reviewed: list[dict[str, str]] = []
+    if args.review:
+        review_columns, reviewed = read_tsv(args.review, REQUIRED_REVIEW_COLUMNS)
+        if "decision" not in review_columns:
+            fail(f"候选评审缺少 decision 列: {args.review}")
+        for index, row in enumerate(reviewed, start=2):
+            if not SHA_RE.fullmatch(row["commit"].strip()):
+                fail(f"候选评审第 {index} 行 commit 不是 7-64 位十六进制")
+            if not row["repo"].strip() or not row["feature_cluster"].strip() or not row["decision"].strip():
+                fail(f"候选评审第 {index} 行缺少 repo、feature_cluster 或 decision")
     validate_identity(candidates, "候选池", require_status=True)
     validate_identity(scored, "评分卡")
 
     scored_keys = {key(row) for row in scored}
+    reviewed_keys = {key(row) for row in reviewed}
     selected: list[dict[str, str]] = []
     seen_pending: set[tuple[str, str, str]] = set()
     skipped_status = 0
     skipped_scored = 0
     skipped_duplicate = 0
+    skipped_review = 0
 
     for row in candidates:
         candidate_key = key(row)
         if row["status"].strip() != "pending-human-label":
             skipped_status += 1
             continue
-        if candidate_key in scored_keys:
-            skipped_scored += 1
-            continue
         if candidate_key in seen_pending:
             skipped_duplicate += 1
             continue
         seen_pending.add(candidate_key)
+        if candidate_key in reviewed_keys:
+            skipped_review += 1
+            continue
+        if candidate_key in scored_keys:
+            skipped_scored += 1
+            continue
         selected.append(row)
 
     destination = args.out
@@ -143,6 +163,7 @@ def main() -> int:
         f"selected={len(selected)} "
         f"skipped-status={skipped_status} "
         f"skipped-scorecard={skipped_scored} "
+        f"skipped-review={skipped_review} "
         f"skipped-duplicate={skipped_duplicate}",
         file=sys.stderr,
     )
