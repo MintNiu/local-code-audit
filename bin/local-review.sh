@@ -5539,6 +5539,67 @@ collect_weak_password_hash_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_hr_default_password_policy_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # A shared BCrypt hash is not intrinsically a vulnerability.  Only surface
+  # the operationally conditional risk when the changed HR projection path
+  # starts using the shared default-password setting and the same snapshot
+  # explicitly says that first-login password rotation is not enforced.
+  grep -Eq '^\+.*(DEFAULT_PASSWORD_HASH_KEY|platform\.hr-projection\.default-password-hash)' "$diff_file" || return 0
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-hr-default-password-candidates.XXXXXX")"
+  awk '
+    function flush_file() {
+      if (path ~ /(^|\/)HrAccountProjectionApplication\.java$/ || path ~ /(^|\/)platform_hr_platform_tenant\.sql$/) {
+        if (candidate_line > 0) printf "%s\t%d\n", path, candidate_line
+      }
+    }
+    /^diff --git / { flush_file(); path = ""; candidate_line = 0; next }
+    /^\+\+\+ b\// { flush_file(); path = substr($0, 7); sub(/[[:space:]]+$/, ""); candidate_line = 0; next }
+    /^@@ / {
+      range = $0
+      sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", range)
+      sub(/ .*/, "", range)
+      line_no = range + 0
+      next
+    }
+    {
+      prefix = substr($0, 1, 1)
+      text = prefix == "+" ? substr($0, 2) : $0
+      if (prefix == "+" && text ~ /(DEFAULT_PASSWORD_HASH_KEY|platform\.hr-projection\.default-password-hash)/ && candidate_line == 0) {
+        candidate_line = line_no
+      }
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+    END { flush_file() }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    if ! rg -n --glob '*.java' --glob '*.md' --glob '*.sql' \
+      --glob '!target/**' --glob '!.git/**' \
+      '没有首次登录强制改密|未实现首次登录强制改密|无首次登录强制改密' "$source_root" >/dev/null 2>&1; then
+      continue
+    fi
+    {
+      printf '%s\n' "P1（有条件） $candidate_path:$candidate_line - HR 投影账号使用共享初始密码哈希，但当前快照明确没有首次登录强制改密策略。"
+      printf '%s\n' '影响：若默认密码或其交付方式被非受控人员获得，新投影账号可能长期复用同一初始口令，攻击者可直接登录多个员工账号；风险取决于默认密码保密性和部署策略。'
+      printf '%s\n' '修复建议：为首次投影账号增加强制改密/一次性激活流程，或为每个账号生成短期随机初始密码并只返回一次；不要把共享默认口令当作长期凭据。'
+      printf '%s\n' '验证方式：使用真实投影账号完成首次登录，确认旧初始密码立即失效；在多租户、多账号和重复同步场景验证不会复用可预测口令，并审计初始凭据不会写入日志。'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 can_return_weak_password_hash_preflight_on_model_failure() {
   local preflight_file="$1"
   local paths_file="$2"
@@ -11436,6 +11497,7 @@ collect_idor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_s
 collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_hr_default_password_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_check_then_act_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_partial_side_effect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_fail_open_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

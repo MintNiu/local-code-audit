@@ -1083,3 +1083,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同轮复核 `platform-system:9fda495` 时，父版本的固定 SSO 密钥确实构成历史风险，但目标提交把两个 SQL seed 值改成 UUID 组合的 SHA2 随机密钥，属于修复而非引入。两轮单分片运行均完整 clean；候选现标记为 `exclude-remediation`，以后先做“风险方向（引入/修复）”判断，再启动模型双跑，避免把父版本问题错误计入目标提交。
 
 随后复核 `platform-system:e8bd04b`：目标新增 HR 投影账号统一使用 `sys_config` 中的 BCrypt 初始哈希，README 明确当前账号模型没有首次登录强制改密标记。两轮个人 profile 均完整 clean（4 分片，结果哈希稳定），因此记录为 `manual-confirmed-conditional`：只有在默认密码/哈希可被非受控人员获得、且部署不强制改密时才升级为 P1，不进入严格无条件召回分母。该分类保留了风险线索，同时避免把策略前置条件误报成确定漏洞。
+
+为把这类条件性风险稳定展示给使用者，新增 `collect_hr_default_password_policy_preflight` 与 `evals/test-hr-default-password-policy-preflight.sh`。预检必须同时看到 HR 投影路径新增共享初始密码哈希、源码快照明确没有首次登录强制改密，以及安全的 HR 文件边界；带强制改密说明、普通 BCrypt 配置或无 HR 投影证据的夹具保持 clean。输出标记为 `P1（有条件）`，不会回填模型原生召回，也不会把条件性风险混入严格无条件门禁。
