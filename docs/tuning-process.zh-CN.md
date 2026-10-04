@@ -1081,3 +1081,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 为防止同类字符串契约漏报，新增窄范围 `collect_sales_return_warehouse_type_preflight` 与 `evals/test-sales-return-warehouse-type-preflight.sh`。规则只在变更文件确实是 `SalesReturnApplication.java`、常量名不变但值改成 `AFTER_SALES_GOOD`，且当前源码快照仍存在 `AFTER_SALE_GOOD` 规范证据时报告 P1；安全字面量、无规范证据和构建产物不会触发。正例、反例、shell 语法和差异完整性检查均通过。该确定性 finding 只作为后续回归保护，不冒充模型原生命中。
 
 同轮复核 `platform-system:9fda495` 时，父版本的固定 SSO 密钥确实构成历史风险，但目标提交把两个 SQL seed 值改成 UUID 组合的 SHA2 随机密钥，属于修复而非引入。两轮单分片运行均完整 clean；候选现标记为 `exclude-remediation`，以后先做“风险方向（引入/修复）”判断，再启动模型双跑，避免把父版本问题错误计入目标提交。
+
+随后复核 `platform-system:e8bd04b`：目标新增 HR 投影账号统一使用 `sys_config` 中的 BCrypt 初始哈希，README 明确当前账号模型没有首次登录强制改密标记。两轮个人 profile 均完整 clean（4 分片，结果哈希稳定），因此记录为 `manual-confirmed-conditional`：只有在默认密码/哈希可被非受控人员获得、且部署不强制改密时才升级为 P1，不进入严格无条件召回分母。该分类保留了风险线索，同时避免把策略前置条件误报成确定漏洞。
