@@ -8424,6 +8424,84 @@ collect_sales_return_warehouse_type_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sales_order_sample_warehouse_type_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file context_file context_path
+  local context_line=""
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+  (( ${#context_files[@]} > 0 )) || return 0
+
+  # The sample-warehouse code is a cross-repository dictionary contract. Do
+  # not infer it from the English word SAMPLE alone: require explicit context
+  # showing the persisted erp_warehouse_type value is the Chinese code 样机.
+  for context_file in "${context_files[@]}"; do
+    if has_unsafe_line_path_chars "$context_file"; then
+      echo "本地代码审查失败：--context 路径包含换行或回车，拒绝读取不安全路径。" >&2
+      exit 2
+    fi
+    context_path="$context_file"
+    [[ "$context_path" == /* ]] || context_path="$repo_root/$context_path"
+    [[ "$context_path" == "$repo_root/"* ]] && path_has_symlink_component "${context_path#"$repo_root/"}" && continue
+    [[ -f "$context_path" ]] || continue
+    context_line="$(grep -En "erp_warehouse_type[^[:cntrl:]]*'样机'[^[:cntrl:]]*'样机'" "$context_path" | head -1 || true)"
+    if [[ -n "$context_line" ]]; then
+      break
+    fi
+    context_line=""
+  done
+  [[ -n "$context_line" ]] || return 0
+
+  grep -Eq '^\+.*WAREHOUSE_TYPE_SAMPLE[[:space:]]*=[[:space:]]*"SAMPLE"' "$diff_file" || return 0
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-sales-order-sample-warehouse-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = ""; next }
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ b\//) {
+        code = substr($0, 2)
+        if (path ~ /(^|\/)SalesOrderApplication\.java$/ &&
+            code ~ /WAREHOUSE_TYPE_SAMPLE[[:space:]]*=[[:space:]]*"SAMPLE"/) {
+          printf "%s\t%d\n", path, new_line
+        }
+        new_line++
+      } else if (prefix != "-") {
+        new_line++
+      }
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    grep -Eq 'WAREHOUSE_TYPE_SAMPLE[[:space:]]*=[[:space:]]*"SAMPLE"' "$source_file" || continue
+    grep -Eq 'getWarehouseType[[:space:]]*\(\)' "$source_file" || continue
+    grep -F '无可用样机仓' "$source_file" >/dev/null 2>&1 || continue
+    {
+      printf '%s\n' "P1 $candidate_path:$candidate_line - 样机订单默认仓逻辑使用 warehouseType=SAMPLE，但显式 context 显示 erp_warehouse_type 的持久化 value 为“样机”，代码常量与字典契约不一致。"
+      printf '%s\n' "影响：存在可用样机仓时查询仍按 SAMPLE 精确匹配，通常会得到空结果并抛出“无可用样机仓”；样机订单创建/编辑流程会在合法配置下稳定失败。证据：context ${context_file}:${context_line%%:*}。"
+      printf '%s\n' '修复建议：统一使用字典约定的“样机” value，或在应用启动时建立明确的 code-to-dictionary 映射；不要在业务代码中复制未经验证的英文常量。'
+      printf '%s\n' '验证方式：准备一条 erp_warehouse_type=样机 且启用的仓库，分别创建样机订单、普通订单和无样机仓场景，确认样机订单能选中正确仓库，普通订单不受影响，无仓库时仍返回明确错误。'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_logical_warehouse_sku_replace_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11528,6 +11606,7 @@ collect_xxl_job_reliability_preflight "$chunk_input_file" "$build_preflight_file
 collect_sales_stock_warehouse_owner_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_shopping_cart_price_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_return_warehouse_type_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sales_order_sample_warehouse_type_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_logical_warehouse_sku_replace_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_return_idempotency_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_payment_voucher_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

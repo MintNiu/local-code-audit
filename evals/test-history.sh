@@ -191,6 +191,11 @@ PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
 }
 grep -F '没有匹配的 pending-human-label 提交' "$fixture_root/empty-history-stderr" >/dev/null
 
+# Context snapshots live below a fresh temporary root on every run. The
+# repeatability gate must ignore only that root while still comparing the
+# selected context path and all other routing metadata.
+repeat_context="$fixture_root/repeat-context.txt"
+printf '固定重复评测 context\n' >"$repeat_context"
 PATH="$fake_bin:$PATH" \
   HISTORY_TEST_CURL_COUNT="$fixture_root/repeat-curl-count" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
@@ -198,6 +203,7 @@ PATH="$fake_bin:$PATH" \
   OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
   "$repo_root/evals/run-history-repeat.sh" \
     --runs 2 --repo "$repo" --manifest "$manifest" --out-dir "$repeat_out" \
+    --context "$repeat_context" \
     >"$fixture_root/repeat-stdout"
 grep -F 'history repeat stability passed: runs=2, commits=1' "$fixture_root/repeat-stdout" >/dev/null
 cmp -s "$repeat_out/run-1/$commit.txt" "$repeat_out/run-2/$commit.txt"

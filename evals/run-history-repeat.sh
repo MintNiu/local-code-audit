@@ -113,6 +113,33 @@ validate_completed_run() {
   fi
 }
 
+repeat_metadata_signature() {
+  local metadata_file="$1"
+  # Context files are frozen below a fresh mktemp directory on every run.
+  # Keep the relative snapshot path (and therefore the selected context
+  # file) in the signature, but replace only that ephemeral root.  Other
+  # absolute paths are intentionally left untouched so a real routing or
+  # configuration change still fails the repeatability gate.
+  awk -F '\t' '
+    BEGIN { OFS = "\t" }
+    $1 == "elapsed_seconds" || $1 == "result_file" || $1 == "result_sha256" || $1 == "stderr_sha256" || $1 == "stderr_file" { next }
+    $1 == "initial_status" && NF >= 3 { printf "%s\t%s\n", $1, $2; next }
+    $1 == "chunk_status" && NF >= 5 { printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $5; next }
+    $1 == "chunk_paths" && NF >= 3 {
+      path_count = split($3, paths, ",")
+      normalized_paths = ""
+      for (i = 1; i <= path_count; i++) {
+        # run-history.sh uses local-review-history.<random>/ as the frozen
+        # context root. Normalize only this known temporary component.
+        sub(/^.*\/local-review-history\.[^\/]+\//, "<history-temp>/", paths[i])
+        normalized_paths = normalized_paths (i > 1 ? "," : "") paths[i]
+      }
+      $3 = normalized_paths
+    }
+    { print }
+  ' "$metadata_file"
+}
+
 for ((run = 1; run <= runs; run++)); do
   run_dir="$output_dir/run-$run"
   if [[ -e "$run_dir" ]]; then
@@ -172,18 +199,8 @@ for ((run = 2; run <= runs; run++)); do
     # are expected to vary with machine load and must not be mistaken for
     # model/configuration drift. Keep status, exit code and input diff byte
     # count so a real change still fails.
-    baseline_signature="$(awk -F '\t' '
-      $1 == "elapsed_seconds" || $1 == "result_file" || $1 == "result_sha256" || $1 == "stderr_sha256" || $1 == "stderr_file" { next }
-      $1 == "initial_status" && NF >= 3 { printf "%s\t%s\n", $1, $2; next }
-      $1 == "chunk_status" && NF >= 5 { printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $5; next }
-      { print }
-    ' "$baseline_meta")"
-    current_signature="$(awk -F '\t' '
-      $1 == "elapsed_seconds" || $1 == "result_file" || $1 == "result_sha256" || $1 == "stderr_sha256" || $1 == "stderr_file" { next }
-      $1 == "initial_status" && NF >= 3 { printf "%s\t%s\n", $1, $2; next }
-      $1 == "chunk_status" && NF >= 5 { printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $5; next }
-      { print }
-    ' "$current_meta")"
+    baseline_signature="$(repeat_metadata_signature "$baseline_meta")"
+    current_signature="$(repeat_metadata_signature "$current_meta")"
     if [[ "$baseline_signature" != "$current_signature" ]]; then
       echo "历史评测运行配置漂移: ${relative_file%.txt}（run-1 vs run-${run}）" >&2
       diff -u <(printf '%s\n' "$baseline_signature") <(printf '%s\n' "$current_signature") >&2 || true

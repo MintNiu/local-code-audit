@@ -1085,3 +1085,9 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 随后复核 `platform-system:e8bd04b`：目标新增 HR 投影账号统一使用 `sys_config` 中的 BCrypt 初始哈希，README 明确当前账号模型没有首次登录强制改密标记。两轮个人 profile 均完整 clean（4 分片，结果哈希稳定），因此记录为 `manual-confirmed-conditional`：只有在默认密码/哈希可被非受控人员获得、且部署不强制改密时才升级为 P1，不进入严格无条件召回分母。该分类保留了风险线索，同时避免把策略前置条件误报成确定漏洞。
 
 为把这类条件性风险稳定展示给使用者，新增 `collect_hr_default_password_policy_preflight` 与 `evals/test-hr-default-password-policy-preflight.sh`。预检必须同时看到 HR 投影路径新增共享初始密码哈希、源码快照明确没有首次登录强制改密，以及安全的 HR 文件边界；带强制改密说明、普通 BCrypt 配置或无 HR 投影证据的夹具保持 clean。输出标记为 `P1（有条件）`，不会回填模型原生召回，也不会把条件性风险混入严格无条件门禁。
+
+### 2026-10-05：提高重复评测效率并补齐样机仓字典契约
+
+重复评测脚本原先会把每轮冻结 context 的临时根目录名当成运行配置漂移，导致模型输出、分片和哈希完全一致时仍失败。现只规范化 `local-review-history.<随机目录>` 这一已知临时路径，仍严格比较上下文相对路径、分片路由、模型/SYSTEM/脚本哈希、状态和输入字节；`evals/test-history.sh` 增加带外部 context 的重复回归。这样减少无效人工复核，不会放宽真正的配置漂移门禁。
+
+对 `platform-erp-service:bcf776abddaaeca68705a7e941f1d78b18e2fda6` 的源码和跨仓库字典证据核对发现，样机订单默认仓新增 `WAREHOUSE_TYPE_SAMPLE = "SAMPLE"`，但 `platform-system` 的 `erp_warehouse_type` 初始 value 是“样机”。个人模型在窄 context 双跑中未稳定完成（一次请求超时），因此不把它计入模型召回；新增 `collect_sales_order_sample_warehouse_type_preflight`，只在显式 `--context` 提供两次“样机”字典 value、变更文件确为 `SalesOrderApplication.java` 且当前代码实际按 `getWarehouseType()` 精确匹配并抛出“无可用样机仓”时报告 P1。正负夹具通过，未提供字典 context 时保持静默，避免凭 `SAMPLE` 字面量推断跨仓库契约。该提交标记为 `tuning-source`，schema 快照缺 migration 的既有发现仍单独归入迁移风险族。
