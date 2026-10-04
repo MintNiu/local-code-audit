@@ -1040,3 +1040,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 - 前一批 `platform-gateway:d3aa21`、`platform-ai-service:ddc7b767`、`platform-system:db93e1d` 均未发现新独立 P0/P1；网关配置目标可变、缓存定时刷新竞态和 SSE 流内异常均不由目标差异直接构成高严重度根因。
 
 本轮 `model_double_run=no`，没有把已知根因、修复提交、清洁提交或低危契约问题送入 Ollama。筛选器当前输出 `selected=0`，评分卡验证仍为严格 gold P0/P1 10 个、命中 5 个、召回 50.0%，输出完整/双轮稳定 10/10；这次效率提升来自“先静态证据去重，后模型双跑”，而不是降低“所有问题都必须展示”的输出要求。下一步只从尚未扫描的功能簇补充真正独立的 P0/P1，达到 20 个未见根因后再冻结最终验收集。
+
+同日继续检查两个未入池功能簇：`platform-ai-front:83821a4` 的 ERP 助手页面访问权限与发起查询权限本来就是双权限设计，README、后端旧权限校验和后续统一迁移提交相互一致，未发现差异支持的 P0/P1/P2；`platform-workflow-service:189b671` 为无父提交的全新基线，内部事件按共享令牌和 applicationCode 跨租户领取、内部发起接口接受 header/body 租户身份，存在需要部署边界确认的信任风险，但不满足当前“直接父提交 + 可重复双轮”冻结门禁，暂不强行计入 scorecard。两者均 `model_double_run=no`，避免把契约样本或不可比的 root commit 消耗为无效评测。
