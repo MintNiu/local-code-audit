@@ -3875,6 +3875,53 @@ collect_context_tenant_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_tenant_lifecycle_login_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local mapper_file login_file context_file mapper_line login_line
+  local context_has_lifecycle=false context_has_tenant=false
+
+  # This is intentionally opt-in. A mapper that lacks a status predicate is
+  # not by itself a vulnerability: the target service must also introduce
+  # tenant selection during login, and explicit context must prove that the
+  # tenant contract has lifecycle fields. This prevents generic SQL/auth
+  # changes from becoming a broad false-positive rule.
+  (( ${#context_files[@]} > 0 )) || return 0
+  [[ -n "$source_root" ]] || return 0
+  mapper_file="$source_root/src/main/java/com/bit/auth/mapper/SysTenantMapper.java"
+  login_file="$source_root/src/main/java/com/bit/auth/service/impl/LoginServiceImpl.java"
+  [[ -f "$mapper_file" && -f "$login_file" ]] || return 0
+  grep -Eq 'selectIdByCode|SELECT[[:space:]]+id[[:space:]]+FROM[[:space:]]+sys_tenant' "$mapper_file" || return 0
+  grep -Eiq 'is_deleted[[:space:]]*=[[:space:]]*0' "$mapper_file" || return 0
+  grep -Eiq 'status[[:space:]]*=[[:space:]]*1|expire[_A-Za-z]*[[:space:]]*(IS|=)|expireTime' "$mapper_file" && return 0
+  grep -Eq 'parseTenantId|Long[.]parseLong' "$login_file" || return 0
+  grep -Eq 'TenantContextHolder[.]setTenantId' "$login_file" || return 0
+  grep -Eq 'UsernamePasswordAuthenticationToken|authenticationManager[.]authenticate' "$login_file" || return 0
+
+  for context_file in "${context_files[@]}"; do
+    if has_unsafe_line_path_chars "$context_file"; then
+      echo "本地代码审查失败：--context 路径包含换行或回车，拒绝读取不安全路径。" >&2
+      exit 2
+    fi
+    [[ -f "$context_file" ]] || continue
+    if rg -qi -- 'sys[_-]?tenant|SysTenant|tenant_id|tenantId' "$context_file"; then
+      context_has_tenant=true
+    fi
+    if rg -qi -- 'expire[_A-Za-z]*|expireTime' "$context_file" &&
+       rg -qi -- '(^|[^[:alnum:]_])(status|状态)([^[:alnum:]_]|$)' "$context_file"; then
+      context_has_lifecycle=true
+    fi
+  done
+  [[ "$context_has_tenant" == true && "$context_has_lifecycle" == true ]] || return 0
+
+  mapper_line="$(grep -En 'SELECT[[:space:]]+id[[:space:]]+FROM[[:space:]]+sys_tenant|selectIdByCode' "$mapper_file" | head -1 | cut -d: -f1)"
+  login_line="$(grep -En 'parseTenantId|TenantContextHolder[.]setTenantId' "$login_file" | head -1 | cut -d: -f1)"
+  [[ -n "$mapper_line" && -n "$login_line" ]] || return 0
+  printf 'P1（条件） src/main/java/com/bit/auth/mapper/SysTenantMapper.java:%s - 登录租户解析只按 code/is_deleted 或请求中的数字 tenantId 选择租户，未校验租户启用状态与过期时间；同一流程在 LoginServiceImpl.java:%s 将该租户写入认证上下文并继续签发会话。\n影响：停用或到期租户在仍有有效账号时可能继续密码登录并获得 JWT/Redis 会话，绕过租户生命周期控制；该结论依赖显式 context 证明租户存在 status/expireTime 契约。\n修复建议：登录前通过带 status=1、is_deleted=0 且 expire_time 为空或未到期的查询解析 tenantId；拒绝停用/到期租户，并在刷新令牌时重新执行同一检查。\n验证方式：分别使用启用、停用、已到期和不存在的租户登录/刷新令牌，确认只有启用且未到期的租户能进入认证流程，并检查 SQL 与集成测试覆盖 status、expire_time 和软删除条件。\n\n' "$mapper_line" "$login_line" >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_cross_platform_config_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11154,6 +11201,7 @@ fi
 } | awk '$1 == "D" { print $2 }' | LC_ALL=C sort -u >"$deleted_types_file"
 collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"
 collect_context_tenant_preflight "$chunk_input_file" "$build_preflight_file"
+collect_tenant_lifecycle_login_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 ensure_review_deadline "确定性预检完成" || exit 124
 if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   echo "本地代码审查失败：检测到 combined diff（diff --cc/diff --combined），当前分片器不会猜测合并冲突语义；请先展开为普通文件 diff 后重试。" >&2

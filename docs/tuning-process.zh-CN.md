@@ -1026,4 +1026,6 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 
 为进一步缩短评测排队时间，新增 `scripts/rank-candidates.py`。它在筛选结果上读取真实 parent-to-commit diff，按租户/权限、令牌/凭据、共享边界、并发状态、副作用和外部运行时等风险信号排序，但保留每一行候选，不把启发式分数当成人工标签，也不改变模型输出。仓库或 parent 无法验证时直接失败，防止排序过程静默漏掉提交；配套 `evals/test-candidate-ranking.sh` 覆盖高风险候选优先、候选数量不变和 parent 校验。后续只对 `first` 批次优先做人工证据核对和模型双轮评测，仍需保持 Ollama 单锁顺序，避免本地推理并发争抢资源。
 
+认证租户生命周期候选 `platform-auth:54087eec` 是新的独立 P1 根因：目标提交在 `LoginServiceImpl` 接受请求中的数字 `tenantId`，并用 `SysTenantMapper.selectIdByCode` 仅按 `code/is_deleted` 选择租户；后续 `5a9d99f`、`60aab92` 才加入启用状态和过期时间条件及拒绝测试。个人 tuned 模型对该提交两轮均完整返回 clean（结果哈希一致），因此不把它算作模型原生命中；新增严格 `--context` opt-in 的租户生命周期登录预检，只在目标代码、生命周期实体证据和登录流程三者同时成立时追加条件 P1，安全查询 fixture 保持 clean。该样本进入 tuning-source，不扩大独立 holdout 分母；一次通用入口 600 秒运行超时也不计入完整性指标。
+
 对当前冻结候选池的演练结果为 57 条记录、24 条仍待人工标注，筛选器没有发现待标候选与现有 scorecard 的精确重叠。随后并行审计 auth/gateway/common、file/publishing/HKS、AI 和 ERP 功能簇：认证/网关/文件/出版/AI 没有新的独立 P0/P1；ERP 15 条待标候选逐提交均为已知库存/退货/串码/支付族、clean/P2、修复或预期公开契约。全批 `model_double_run=no`，避免把父提交已有问题、同族派生提交和低危功能改动再次送入 Ollama。私有严格 scorecard 仍为 10 个 gold P0/P1、命中 5 个、召回 50.0%，输出完整和双轮稳定均为 10/10，仍需至少 10 个未参与规则设计的新根因。

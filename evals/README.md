@@ -97,6 +97,8 @@ python3 ./scripts/rank-candidates.py \
 
 `priority_band=first` 只表示应优先人工确认和双轮评测，并不表示该提交一定有漏洞；仓库、提交或 parent 不可验证时命令会失败，避免静默跳过候选。模型评测仍按单次 Ollama 锁顺序执行，不能并发请求同一个本地模型。
 
+对跨仓库租户生命周期问题，`local-review` 的 `--context` 只应传入目标提交明确依赖的实体/契约快照；`evals/test-tenant-lifecycle-login-preflight.sh` 覆盖“新增登录租户解析 + 查询缺少启用/过期条件 + context 明确生命周期字段”的窄规则，并验证带完整条件的安全查询不报告问题。
+
 如果只是结果目录搬迁，可用 `migrate-labels.sh` 做内容哈希验证迁移。它不会覆盖已有标签目录，只迁移结果文本完全相同、标签条目数量不超过最终结果候选数且文件/行号能与最终候选重叠的 complete 标签；疑似来自另一份/原始模型响应的标签会被跳过，其余提交保留在原目录等待重新标注：
 
 ```bash
