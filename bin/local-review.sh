@@ -8526,6 +8526,56 @@ collect_sales_payment_voucher_race_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sales_payment_confirmation_race_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local source_file fund_file schema_file confirm_line reject_line confirm_text reject_text
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # The target commit introduced a separate sales-order payment-voucher
+  # confirmation path.  Keep this guard project-shaped: require both
+  # confirm/reject entry points, non-locking order/voucher reads, and the
+  # downstream check-then-recharge/freeze sequence.  This is intentionally
+  # narrower than a generic "possible race" heuristic.
+  grep -Eq '^\+.*(confirmPaymentVoucher|rechargeAndFreezeSalesOrder)' "$diff_file" || return 0
+  source_file="$(find "$source_root" -type f -path '*/SalesOrderApplication.java' -print | LC_ALL=C sort | head -1)"
+  fund_file="$(find "$source_root" -type f -path '*/SalesFundTransactionService.java' -print | LC_ALL=C sort | head -1)"
+  [[ -f "$source_file" && -f "$fund_file" ]] || return 0
+  confirm_line="$(grep -n -m1 -E 'public[[:space:]]+SalesOrderVO[[:space:]]+confirmPaymentVoucher[[:space:]]*\(' "$source_file" | cut -d: -f1)"
+  reject_line="$(grep -n -m1 -E 'public[[:space:]]+SalesOrderVO[[:space:]]+rejectPaymentVoucher[[:space:]]*\(' "$source_file" | cut -d: -f1)"
+  [[ "$confirm_line" =~ ^[0-9]+$ && "$reject_line" =~ ^[0-9]+$ ]] || return 0
+  confirm_text="$(python3 "$java_method_window_script" "$source_file" "$confirm_line")"
+  reject_text="$(python3 "$java_method_window_script" "$source_file" "$reject_line")"
+  printf '%s\n' "$confirm_text" | grep -Eq 'ensureExists[[:space:]]*\([[:space:]]*id[[:space:]]*\)' || return 0
+  printf '%s\n' "$confirm_text" | grep -Eq 'ensureVoucher[[:space:]]*\([[:space:]]*id[[:space:]]*,[[:space:]]*voucherId[[:space:]]*\)' || return 0
+  printf '%s\n' "$reject_text" | grep -Eq 'ensureExists[[:space:]]*\([[:space:]]*id[[:space:]]*\)' || return 0
+  printf '%s\n' "$reject_text" | grep -Eq 'ensureVoucher[[:space:]]*\([[:space:]]*id[[:space:]]*,[[:space:]]*voucherId[[:space:]]*\)' || return 0
+  if printf '%s\n%s\n' "$confirm_text" "$reject_text" | grep -Eqi 'findByIdForUpdate|@Lock[[:space:]]*\([^)]*PESSIMISTIC_WRITE|compareAndSet|where[[:space:]]+.*confirm_status'; then
+    return 0
+  fi
+  grep -Eq 'rechargeAndFreezeSalesOrder[[:space:]]*\(' "$fund_file" || return 0
+  grep -Eq 'countActiveBySourceOrderNo[[:space:]]*\(' "$fund_file" || return 0
+  grep -Eq 'rechargeAndFreezeIfEnabled[[:space:]]*\(' "$fund_file" || return 0
+  grep -Eq 'fundFreezeRecordRepository\.save[[:space:]]*\(' "$fund_file" || return 0
+  if grep -Eqi 'listActiveBySourceOrderNoForUpdate|findBySourceOrderNoForUpdate|UNIQUE[[:space:]]+KEY[^\n]*source_order_no' "$fund_file"; then
+    return 0
+  fi
+  schema_file="$(find "$source_root" -type f -path '*/sql/platform_erp.sql' -print | LC_ALL=C sort | head -1)"
+  if [[ -f "$schema_file" ]] && grep -Eqi 'UNIQUE[[:space:]]+KEY[^\n]*source_order_no|source_order_no[^\n]*UNIQUE' "$schema_file"; then
+    return 0
+  fi
+
+  {
+    printf '%s\n' "P1 ${source_file#"$source_root/"}:$confirm_line - 销售订单支付凭证确认/驳回使用非锁定订单与凭证读取，资金确认先检查冻结再充值并新增冻结记录，缺少同单并发互斥或状态 CAS。"
+    printf '%s\n' '影响：并发确认可能对同一订单重复充值、重复冻结并写入多条资金流水；确认与驳回并发还可能出现资金已入账但订单最终被驳回，或驳回后又被确认，造成资金账、凭证状态和订单状态不一致。'
+    printf '%s\n' '修复建议：在同一事务内锁定订单和待确认凭证，或使用带状态条件的 CAS/唯一幂等记录；冻结记录和充值流水必须按来源订单建立唯一约束，并在冲突时返回稳定结果。'
+    printf '%s\n' "验证方式：并发确认同一凭证、并发确认与驳回同一凭证，确认最多一次充值/冻结、状态转换单向且资金流水唯一；覆盖重试、异常回滚和不同凭证 ID。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_inventory_stock_race_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11169,6 +11219,7 @@ collect_shopping_cart_price_preflight "$chunk_input_file" "$build_preflight_file
 collect_logical_warehouse_sku_replace_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_return_idempotency_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_payment_voucher_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sales_payment_confirmation_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_inventory_stock_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_inventory_serial_null_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_gateway_workflow_application_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
