@@ -1060,3 +1060,9 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 对 `platform-erp-service:81ab687949019e9a84a78974d5d1578371433fe3` 的源码核对发现新 P1：退货提交在 `SalesReturnApplication.java:176` 先锁销售订单，再经 `validateLines`/`returnedQuantityByOutboundLineForUpdate` 在约 `:851` 锁退货申请；收货确认和退款确认则分别在 `SalesReturnInspectionApplication`、`SalesReturnRefundApplication` 先锁退货申请，随后在状态重算方法中锁销售订单，形成可并发的反向锁序。两轮个人 profile 原始模型结果均为 clean，但第一次默认 6000 字节分片在 10 个分片预算下超时，不能计入完整结果；将私有复测的 `OLLAMA_REVIEW_MAX_DIFF_BYTES` 提高到 12000 后，两轮各 1 个分片、`exit=0`、结果哈希和 finding signature 一致，确认是稳定模型漏报而非随机失败。
 
 运行器新增窄范围 `collect_sales_return_lock_order_preflight`，只在变更的 `SalesReturnApplication` 新增锁定读、且当前快照同时存在收货/退款两条具体反向路径时报告；正负 fixture 为 `evals/test-sales-return-lock-order-preflight.sh`。该样本标记为 `tuning-source`，确定性 finding 不回填模型原生召回；这次调优的效率收益来自“先缩小分片验证模型，再固化规则”，超时结果仍严格 fail-closed，不会被当作 clean。
+
+同日对较小的 `platform-system:16c3fa3fe21993f67a30cce181c7812071fb2f54` 做效率优先的独立 clean holdout 复核。该提交只有 3 个文件、约 100 行 SQL/契约测试变更；两轮个人 profile 在 12000 字节差异预算下各 1 个分片、约 3 秒完成，结果哈希和 finding signature 一致。静态核验确认高级 AI 菜单软删除、租户/角色关系撤销、RAG/Wiki 保留范围与标准套餐边界一致，`AiErpAssistantMenuSqlContractTest` 通过 4/4，未发现由差异支持的 P0/P1。该样本计入 clean holdout，不增加 P0/P1 召回分母。
+
+本轮效率规则固定为：候选先做差异级风险筛选和根因去重；小差异候选先用 12000 字节预算双跑，只有 metadata 标记 `completed/exit=0/output_complete=true` 且重复签名一致才入评分卡；空结果、超时或缺 metadata 一律丢弃并重跑，不计为 clean。这样把可验证的 clean 样本控制在秒级，同时保留“所有有效 finding 必须展示”的输出门禁。
+
+随后复核 ERP 退货数量口径提交 `platform-erp-service:b359b2b3cb6d2985b1a87d1a19c3f0f5d272cb3`。变更仅把订单详情的累计退货量改为累计已退款量，并把未完成退货的剩余申请量计入处理中；静态核验确认这三项数量关系保持守恒，租户条件和有效状态过滤没有变化。两轮个人 profile 均为单分片、约 20 秒、完整且 finding signature 一致，模型原生结果为 clean，因此该样本作为第二个独立 clean holdout 计入评分卡，不增加 P0/P1 分母。当前源码没有专门覆盖该数量公式的回归测试，已记录为验证缺口，未将其误报成代码问题。
