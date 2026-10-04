@@ -74,7 +74,19 @@ python3 ./scripts/validate-independent-scorecard.py \
 模板同时记录 `source_result_sha256`；如果结果目录搬迁，只要内容哈希完全一致即可安全复用，结果内容改变则必须重新人工复核。
 旧版本模板没有该字段时，构建器会拒绝汇总；应重新运行模板生成器，不要手工猜测或补写哈希。
 
-候选池进入人工复核前，可以用只读筛选器去掉已经进入评分卡、已经被人工分类或在候选池中重复出现的行。它不会判断严重度，也不会修改候选池和评分卡；输出仍是候选 TSV，需人工确认后再转换为 `run-history.sh` 使用的 manifest：
+候选池进入人工复核前，可以用只读筛选器去掉已经进入评分卡、已经被人工分类或在候选池中重复出现的行。它不会判断严重度，也不会修改候选池和评分卡；输出仍是候选 TSV，需人工确认后再转换为 `run-history.sh` 使用的 manifest。
+
+如果候选池还没有整理，可以先从多个本地仓库自动发现直接父提交。发现器只读取 `git log`，跳过 root/merge commit，自动填写真实 parent、提交主题和待人工状态；它不推断严重度，也不替代后续人工去重。`--exclude` 可以传入已有评分卡或评审表的合并 TSV，按 `repo + commit` 排除已处理提交：
+
+```bash
+python3 ./scripts/discover-candidates.py \
+  --workspace-root /Users/mintniu/Documents/04workspaces/Platform \
+  --since 2026-09-01 \
+  --exclude ~/.local/share/local-review/evals/stage1-freeze-20261003/independent-probe-results.tsv \
+  --out /tmp/local-review-discovered-candidates.tsv
+```
+
+发现结果仍需人工补充 `feature_cluster`/根因判断，再交给下面的筛选器和排序器；建议只对 `priority_band=first` 且人工确认有新 P0/P1 根因的少量提交做 Ollama 双轮评测。
 
 ```bash
 python3 ./scripts/triage-candidates.py \

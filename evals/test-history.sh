@@ -316,6 +316,7 @@ printf 'history unlocated-output fail-closed regression passed\n'
 # frozen run is sleeping must not change its output or recorded hashes.
 cat >"$fake_workflow/bin/local-review-local.sh" <<'EOF'
 #!/usr/bin/env bash
+: >"${HISTORY_RACE_STARTED_FILE:?}"
 sleep 1
 printf '%s\n' "fake-core" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"
 printf '未发现阻塞问题\n'
@@ -323,10 +324,19 @@ EOF
 chmod +x "$fake_workflow/bin/local-review-local.sh"
 race_out="$fixture_root/race-results"
 (PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=fake \
+  HISTORY_RACE_STARTED_FILE="$fixture_root/race-started" \
   "$fake_workflow/evals/run-history.sh" \
     --repo "$repo" --manifest "$manifest" --out-dir "$race_out" >"$fixture_root/race-stdout" 2>"$fixture_root/race-stderr") &
 history_pid=$!
-sleep 0.2
+for _ in {1..100}; do
+  [[ -e "$fixture_root/race-started" ]] && break
+  sleep 0.05
+done
+[[ -e "$fixture_root/race-started" ]] || {
+  echo 'history reviewer did not reach the frozen snapshot in time' >&2
+  cat "$fixture_root/race-stderr" >&2
+  exit 1
+}
 cat >"$fake_workflow/bin/local-review-local.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "fake-mutated" >"${LOCAL_REVIEW_RESOLVED_MODEL_FILE:?}"

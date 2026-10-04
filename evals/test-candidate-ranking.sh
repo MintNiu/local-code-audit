@@ -37,4 +37,11 @@ python3 "$script" --candidates "$tmp_dir/candidates.tsv" --workspace-root "$tmp_
 [[ "$(awk -F '\t' 'NR == 2 { print $2 }' "$tmp_dir/ranked.tsv")" == "$high" ]]
 [[ "$(awk -F '\t' 'NR == 2 { print $7 }' "$tmp_dir/ranked.tsv")" == "first" ]]
 [[ "$(wc -l <"$tmp_dir/ranked.tsv" | tr -d ' ')" == 3 ]]
+
+cat >"$tmp_dir/candidates-with-subject.tsv" <<EOF
+repo	commit	parent	feature_cluster	candidate_reason	status	commit_subject
+demo	$high	$parent	gateway-token	trusted header and tenant boundary	pending-human-label	fix auth token boundary
+EOF
+python3 "$script" --candidates "$tmp_dir/candidates-with-subject.tsv" --workspace-root "$tmp_dir/workspace" --out "$tmp_dir/ranked-with-subject.tsv"
+[[ -z "$(head -1 "$tmp_dir/ranked-with-subject.tsv" | tr '\t' '\n' | sort | uniq -d)" ]]
 echo "candidate ranking test passed"

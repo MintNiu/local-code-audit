@@ -145,7 +145,8 @@ def main() -> int:
         if not repo.is_dir() or repo.is_symlink():
             fail(f"repo 目录不存在或是符号链接: {repo}")
         ranked.append(score_candidate(repo, row))
-    output_columns = columns + ["priority_band", "priority_score", "changed_files", "changed_lines", "risk_signals", "commit_subject"]
+    derived_columns = ["priority_band", "priority_score", "changed_files", "changed_lines", "risk_signals", "commit_subject"]
+    output_columns = columns + [column for column in derived_columns if column not in columns]
     ranked.sort(key=lambda row: (-int(row["priority_score"]), row["repo"], row["commit"].lower()))
     if args.out.exists():
         fail(f"拒绝覆盖已有排序结果: {args.out}")
