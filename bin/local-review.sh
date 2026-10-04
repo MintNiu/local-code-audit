@@ -11092,6 +11092,69 @@ collect_transaction_lock_order_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sales_return_lock_order_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local repo_root="$3"
+  local changed_path source_file inspection_file refund_file
+  local sales_lock_line return_lock_line counterpart return_lock_line counterpart_sales_line
+
+  # This is a deliberately narrow cross-application rule.  The generic lock
+  # scanner only compares direct ForUpdate calls inside one method, while this
+  # workflow acquires the second lock through validateLines ->
+  # listBySalesOrderIdForUpdate.  Require the changed call and both unchanged
+  # confirmation flows to be visible before reporting a candidate.
+  changed_path="$(awk '
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      if (path ~ /(^|\/)SalesReturnApplication\.java$/) print path
+    }
+  ' "$diff_file" | LC_ALL=C sort -u | head -n 1)"
+  [[ -n "$changed_path" ]] || return 0
+  if ! awk '
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    path ~ /(^|\/)SalesReturnApplication\.java$/ && /^\+/ && $0 !~ /^\+\+\+ b\// &&
+      ($0 ~ /listBySalesOrderIdForUpdate/ || $0 ~ /returnedQuantityByOutboundLineForUpdate/) { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file"; then
+    return 0
+  fi
+
+  source_file="$repo_root/$changed_path"
+  [[ -f "$source_file" ]] || return 0
+  rg -q 'salesOrderRepository\.findByIdForUpdate' "$source_file" || return 0
+  rg -q 'returnRepository\.listBySalesOrderIdForUpdate' "$source_file" || return 0
+  sales_lock_line="$(rg -n 'salesOrderRepository\.findByIdForUpdate' "$source_file" | head -n 1 | cut -d: -f1)"
+  return_lock_line="$(rg -n 'returnRepository\.listBySalesOrderIdForUpdate' "$source_file" | head -n 1 | cut -d: -f1)"
+  [[ "$sales_lock_line" =~ ^[0-9]+$ && "$return_lock_line" =~ ^[0-9]+$ ]] || return 0
+
+  inspection_file="$(find "$repo_root" -type f -name 'SalesReturnInspectionApplication.java' -print -quit 2>/dev/null || true)"
+  refund_file="$(find "$repo_root" -type f -name 'SalesReturnRefundApplication.java' -print -quit 2>/dev/null || true)"
+  for counterpart in "$inspection_file" "$refund_file"; do
+    [[ -n "$counterpart" && -f "$counterpart" ]] || continue
+    rg -q '@Transactional' "$counterpart" || continue
+    rg -q 'returnRepository\.findByIdForUpdate' "$counterpart" || continue
+    rg -q 'salesOrderRepository\.findByIdForUpdate' "$counterpart" || continue
+    counterpart_sales_line="$(rg -n 'salesOrderRepository\.findByIdForUpdate' "$counterpart" | tail -n 1 | cut -d: -f1)"
+    counterpart_return_line="$(rg -n 'returnRepository\.findByIdForUpdate' "$counterpart" | head -n 1 | cut -d: -f1)"
+    [[ "$counterpart_sales_line" =~ ^[0-9]+$ && "$counterpart_return_line" =~ ^[0-9]+$ ]] || continue
+    if [[ "$counterpart" == *SalesReturnInspectionApplication.java ]]; then
+      rg -q 'updateSalesOrder(Return|Status)' "$counterpart" || continue
+    else
+      rg -q 'updateSalesOrderRefundStatus' "$counterpart" || continue
+    fi
+    printf '%s\n' \
+      "P1 $changed_path:$sales_lock_line,$return_lock_line - 退货提交路径先锁销售订单再锁退货申请，而 $(basename "$counterpart") 的确认路径先锁退货申请再锁销售订单，形成反向锁序。" \
+      "影响：同一销售订单的退货提交与收货/退款确认并发时可能循环等待并触发数据库死锁，导致请求回滚、重复重试或业务状态推进失败。证据位置：$counterpart:$counterpart_return_line 先获取退货申请锁，$counterpart:$counterpart_sales_line 随后获取销售订单锁。" \
+      '修复建议：统一退货提交、收货确认和退款确认的锁顺序（推荐所有路径先锁销售订单，再锁退货申请及明细），或抽取共享的按销售订单串行化入口；不要只依赖死锁重试。' \
+      '验证方式：使用同一销售订单并发执行 createAndSubmit/submit 与收货确认或退款确认，检查 InnoDB deadlock 日志、事务回滚和最终状态；修复后重复压测应无循环等待。' \
+      >>"$output_file"
+    printf '\n' >>"$output_file"
+  done
+  dedup_preflight_blocks "$output_file"
+}
+
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
@@ -11342,6 +11405,7 @@ if ! collect_transaction_lock_order_preflight "$chunk_input_file" "$deterministi
   echo "本地代码审查失败：锁序预检扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2
   exit 1
 fi
+collect_sales_return_lock_order_preflight "$chunk_input_file" "$deterministic_lock_order_file" "$repo_root"
 {
   git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-status --no-renames --cached
   git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-textconv --name-status --no-renames

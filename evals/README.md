@@ -146,7 +146,7 @@ python3 ./scripts/rank-candidates.py \
 
 构建器只输出 `review_status=complete` 且运行成功的提交；它会校验标签中的 `# source_result_sha256` 与所选结果文件内容完全一致，要求每个标签文件内的 `finding_id` 唯一，并逐条校验 confirmed/false-positive 的文件和行号与结果候选重叠，允许安全搬迁同一结果，拒绝把旧 profile/旧运行的标签套到不同结果上。`missed` 是人工记录的 false negative，必须使用 P0/P1、真实路径、正数行号和证据备注，并且不能与所选结果中的任何候选范围重叠；否则标签与结果矛盾，构建器会 fail-closed。`uncertain` 不计入指标。缺少结果、元数据或字段不完整会 fail-closed；失败时不会留下半成品输出。输出仍应保存在私有目录，不要提交业务源码、模型响应或凭据。
 
-对于跨事务/行锁风险，运行器会把受限的源码上下文送入 prompt，并额外执行一个窄范围的确定性反向锁序预检。预检只报告“候选”：它要求两个带 `@Transactional` 的源码段直接调用相同 `*ForUpdate` 接收者且顺序相反，并且至少一侧属于变更文件、且变更行本身触及事务/锁标记；它不证明相同数据库资源、调用可达性或真实死锁。候选在模型结果后合并，避免 prompt 重复；Prompt 证据会展示 `@Lock(PESSIMISTIC_WRITE)` 等声明式锁标记，但确定性配对暂不覆盖声明式锁、同文件 helper 或跨类 helper。锁文本索引和反向锁序扫描都有总超时；扫描超时或出错会让整次审查 fail-closed，不会把不完整的 prompt 证据当作 clean。请用人工调用链审计和真实数据库并发测试确认，不要把候选直接当作最终真值。
+对于跨事务/行锁风险，运行器会把受限的源码上下文送入 prompt，并额外执行一个窄范围的确定性反向锁序预检。通用预检只报告“候选”：它要求两个带 `@Transactional` 的源码段直接调用相同 `*ForUpdate` 接收者且顺序相反，并且至少一侧属于变更文件、且变更行本身触及事务/锁标记；它不证明相同数据库资源、调用可达性或真实死锁。针对退货提交这种“变更应用先锁销售订单、通过 helper 再锁退货单，而收货/退款应用沿相反顺序回锁销售订单”的跨类 helper 形状，另有 `SalesReturnApplication`/`SalesReturnInspectionApplication`/`SalesReturnRefundApplication` 的窄范围正负预检；它只在三方具体调用、事务和锁文本同时可见时触发。候选在模型结果后合并，避免 prompt 重复；Prompt 证据会展示 `@Lock(PESSIMISTIC_WRITE)` 等声明式锁标记，但通用确定性配对暂不覆盖声明式锁、同文件 helper 或任意跨类 helper。锁文本索引和反向锁序扫描都有总超时；扫描超时或出错会让整次审查 fail-closed，不会把不完整的 prompt 证据当作 clean。请用人工调用链审计和真实数据库并发测试确认，不要把候选直接当作最终真值。
 
 对象存储上传取消也有窄范围确定性预检：只有源码同时展示未过期预签名票据、取消先删除同一 `objectKey` 后标记终态、活动态过期清理，以及没有撤销/失效证据时，才补充一个 P1 重放/孤儿对象候选；普通上传、普通删除或存在撤销机制不会触发。该候选仍需人工确认票据版本化、调用可达性和真实对象存储行为。
 
@@ -202,6 +202,8 @@ python3 scripts/run-regression.py fast --jobs 2 \
   --test evals/test-system-role-permission-resource-scope-preflight.sh
 python3 scripts/run-regression.py full --jobs 2
 ```
+
+真实历史评测遇到“大文件多分片 + 本地模型超时”时，先保留模型配置不变，只在私有评测命令中提高 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（例如 12000）并适当提高 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS`，让同一候选尽量进入单分片；确认结果完整后再用完全相同参数重复一轮。该参数只用于缩短候选筛选，不应修改公开脚本默认值或把超时结果计为 clean；`.meta.tsv` 中的 `effective_max_diff_bytes`、`chunk_count`、`status` 和 `output_complete` 必须全部核对。
 
 `fast` 只接受仓库 `evals/test-*.sh` 顶层套件，`full` 会排除编排器自身；失败套件会保留退出码并以非零状态结束。不要把 `run-synthetic.sh`、`run-history.sh` 或真实 Ollama 审查放入并行队列。
 
