@@ -4721,6 +4721,50 @@ collect_security_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_public_actuator_metrics_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local config_file web_config line_number
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # Exposing metrics on the application port is only actionable when the
+  # current code has no visible Actuator authentication or separate management
+  # boundary.  Keep this fail-closed and project-shaped: require the changed
+  # application YAML, the MVC interceptor scope, and the absence of an
+  # explicit management port/security guard.
+  if ! awk '
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^\+[^+].*include:[^\n]*metrics/ && path ~ /(^|\/)src\/main\/resources\/application[^\/]*\.ya?ml$/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file"; then
+    return 0
+  fi
+  config_file="$(find "$source_root/src/main/resources" -maxdepth 1 -type f -name 'application*.yml' -print -quit 2>/dev/null || true)"
+  [[ -n "$config_file" && -f "$config_file" ]] || return 0
+  grep -Eq 'include:[[:space:]]*[^#]*metrics|metrics[[:space:]]*,[[:space:]]*[^#]*include' "$config_file" || return 0
+  if rg -n 'management[.]server[.]port|management[.]endpoint[.]metrics[.]enabled[=:][[:space:]]*false|exposure[.]exclude.*metrics' "$source_root/src/main/resources" 2>/dev/null; then
+    return 0
+  fi
+
+  web_config="$(find "$source_root/src/main/java" -type f -name 'WebMvcConfig.java' -print -quit 2>/dev/null || true)"
+  [[ -n "$web_config" && -f "$web_config" ]] || return 0
+  grep -Eq 'addPathPatterns\("/api/\*\*"\)|addPathPatterns\("/admin/\*\*"\)' "$web_config" || return 0
+  grep -Eq 'actuator|SecurityFilterChain|EndpointRequest' "$source_root/src/main/java" 2>/dev/null && return 0
+
+  line_number="$(grep -n -m1 -E 'include:[[:space:]]*[^#]*metrics|metrics[[:space:]]*,[[:space:]]*[^#]*include' "$config_file" | cut -d: -f1)"
+  [[ "$line_number" =~ ^[0-9]+$ ]] || line_number=1
+  {
+    printf '%s\n' "P1 ${config_file#"$source_root/"}:$line_number - Actuator metrics 被暴露在业务应用端口，但当前代码没有可见的认证拦截或独立管理端口边界。"
+    printf '%s\n' '影响：未认证请求可能枚举线程池、队列、JVM、HTTP、数据库连接池和自定义运行指标，泄露部署拓扑与负载信息并辅助攻击者侦察；指标端点还可能被外部流量持续查询放大运维面压力。'
+    printf '%s\n' '修复建议：默认只暴露必要的 health 探针，将 metrics 放到独立且仅内网可达的管理端口，或为 /actuator/** 增加明确的服务端认证和网络 allowlist；不要把“受控运维访问”只写在注释中。'
+    printf '%s\n' '验证方式：在无凭据请求 /actuator/metrics 和具体指标路径应得到 401/403 或网络拒绝；持有运维凭据时才能读取，并验证生产业务端口、反向代理和健康探针行为。'
+    printf '%s\n' "证据行：${config_file#"$source_root/"}:${line_number}；Web MVC 认证范围：${web_config#"$source_root/"}"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_raw_session_token_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11230,6 +11274,7 @@ ensure_review_deadline "确定性预检" || exit 124
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_public_actuator_metrics_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_raw_session_token_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_online_session_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_non_atomic_authorization_code_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

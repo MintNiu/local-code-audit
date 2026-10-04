@@ -1050,3 +1050,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 2026-10-04：对未冻结 ERP 退货退款提交 `platform-erp-service:7fee9f1a2af94fdc6d47769a7e93f2d7a493f140` 做两轮个人 profile 复测。两轮均 19 个分片、`exit=0`、约 350/327 秒，结果哈希和 finding signature 一致；模型稳定报告了一个锁顺序 P1 候选，但源码核验确认退款与验收流程均按“退货单→验收单”顺序加锁，故不确认该候选。静态证据确认新增退款主表/明细表只进入 `sql/platform_erp.sql`，没有对应版本化 migration；这是既有 schema-migration 机制族，不重复计入独立召回。新增窄范围 `collect_sales_return_refund_schema_migration_preflight` 及“缺 migration / 有版本化 migration”正负夹具，先静态规则即可覆盖，避免再次消耗模型推理时间。scorecard 增加 1 条 `tuning-source`，严格 gold 仍为 10 个、命中 5 个、召回 50.0%；当前高效流程保持为“静态预筛→必要时双跑→立即固化回归”。
 
 同日针对该样本的锁序误报补强模型硬边界：要求逐条列出可达事务路径的实际锁调用、资源映射和方法边界；可见路径同序时禁止报告，不得把行号、方法名或静态候选文本拼成反向锁序。完整预检回归通过，严格 scorecard 不变；该调整用于减少人工复核和无效修复建议，不把提示词约束当作模型原生命中。
+
+随后从未扫描的 Bafan 可用性提交 `bafan-backend:85da9946` 补入一个独立安全样本。目标把 Actuator `metrics` 加入业务应用端口的公开暴露列表，并新增线程池指标；现有 Web MVC 拦截器只覆盖 `/api/**` 与 `/admin/**`，没有管理端口或 Actuator 认证边界。个人 profile 两轮均 10 个分片、`exit=0`、结果哈希一致且均返回 clean，源码核验确认未认证 `/actuator/metrics` 可枚举线程池、JVM、HTTP 和连接池遥测，计为新的独立 P1 漏报。独立 scorecard 当前为 11 个 gold P0/P1、命中 5 个、召回 45.5%，输出完整/双轮稳定 11/11。随后新增 `collect_public_actuator_metrics_preflight` 与独立/隔离管理端口正负夹具，作为后续审查的确定性保护，不回填模型原生召回。
