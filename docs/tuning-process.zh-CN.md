@@ -1079,3 +1079,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 对 `platform-erp-service:060c0d9cc4295f57d9bf13e227bccf1d248923bf` 做两轮个人 profile 复测时，两轮均为单分片、`exit=0`、输出完整且 finding signature 一致，但模型稳定返回 clean。源码核验确认 `SalesReturnApplication.java` 把 `WAREHOUSE_TYPE_AFTER_SALE_GOOD` 的持久化字面量从仓库字典约定的 `AFTER_SALE_GOOD` 改成了不存在的 `AFTER_SALES_GOOD`，而收货应用和文档仍使用单数 code，售后待检仓映射可能无法识别目标仓库类型。该样本标记为 `tuning-source`，不回填模型原生召回。
 
 为防止同类字符串契约漏报，新增窄范围 `collect_sales_return_warehouse_type_preflight` 与 `evals/test-sales-return-warehouse-type-preflight.sh`。规则只在变更文件确实是 `SalesReturnApplication.java`、常量名不变但值改成 `AFTER_SALES_GOOD`，且当前源码快照仍存在 `AFTER_SALE_GOOD` 规范证据时报告 P1；安全字面量、无规范证据和构建产物不会触发。正例、反例、shell 语法和差异完整性检查均通过。该确定性 finding 只作为后续回归保护，不冒充模型原生命中。
+
+同轮复核 `platform-system:9fda495` 时，父版本的固定 SSO 密钥确实构成历史风险，但目标提交把两个 SQL seed 值改成 UUID 组合的 SHA2 随机密钥，属于修复而非引入。两轮单分片运行均完整 clean；候选现标记为 `exclude-remediation`，以后先做“风险方向（引入/修复）”判断，再启动模型双跑，避免把父版本问题错误计入目标提交。
