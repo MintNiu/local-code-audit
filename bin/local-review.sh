@@ -10741,6 +10741,31 @@ collect_transaction_lock_preflight() {
   receivers="$(grep -v '^__transaction_or_lock_text__$' "$receiver_file" | sed '/^$/d' | head -n 8 | paste -sd '|' -)"
   rm -f "$receiver_file"
 
+  # A changed @Transactional method without any actual row-lock marker does
+  # not establish a lock relationship with arbitrary files elsewhere in the
+  # repository.  The old path scanned and emitted unrelated lock-bearing
+  # classes in this case, which could consume the entire prompt budget before
+  # the model saw the diff.  Keep changed-file lock evidence when present, but
+  # never add unrelated files unless a changed receiver gives us a concrete
+  # relationship to follow.
+  if [[ -z "$receivers" ]]; then
+    has_changed_lock=false
+    while IFS= read -r changed_path; do
+      [[ -n "$changed_path" ]] || continue
+      source_file="$repo_root/$changed_path"
+      [[ -f "$source_file" ]] || continue
+      if rg -q '@Lock|PESSIMISTIC_WRITE|find[A-Za-z0-9_]*ForUpdate|FOR[[:space:]]+UPDATE' "$source_file" 2>/dev/null; then
+        has_changed_lock=true
+        break
+      fi
+    done <<<"$changed_java_paths"
+    if [[ "$has_changed_lock" != true ]]; then
+      rm -f "$candidate_paths_file"
+      return 0
+    fi
+    printf '%s\n' "$changed_java_paths" >"$candidate_paths_file"
+  fi
+
   printf '%s\n' '--- 构建预检（确定性证据：跨事务/行锁文本序列；仅供模型核验） ---' >>"$output_file"
   printf '%s\n' '说明：以下仅表示源码中的事务注解与 FOR UPDATE 调用文本，不能单独证明同表、同事务或可达并发；不得仅凭此段自动升级为问题。' >>"$output_file"
 

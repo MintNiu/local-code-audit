@@ -453,4 +453,53 @@ if printf '%s\n' "$annotation_output" | grep -F '事务内行锁存在反向锁�
   echo 'declaration-only lock marker produced an unsupported deterministic finding' >&2
   exit 1
 fi
+
+# A changed transactional method with no actual lock marker must not pull an
+# unrelated lock-bearing class into the prompt. This keeps large repositories
+# within the input budget when a feature change does not touch lock ordering.
+noise_repo="$fixture_root/transaction-noise-repo"
+noise_capture="$fixture_root/transaction-noise-requests"
+mkdir -p "$noise_repo/src/main/java/com/example"
+git -C "$noise_repo" init -q
+git -C "$noise_repo" config user.email test@example.invalid
+git -C "$noise_repo" config user.name transaction-noise-test
+cat >"$noise_repo/src/main/java/com/example/ChangedTransactionalService.java" <<'EOF'
+package com.example;
+
+final class ChangedTransactionalService {
+    @Transactional
+    void update(long id) {
+        // business-only transaction
+    }
+}
+EOF
+cat >"$noise_repo/src/main/java/com/example/UnrelatedLockService.java" <<'EOF'
+package com.example;
+
+final class UnrelatedLockService {
+    @Transactional
+    void update(long id) {
+        repository.findByIdForUpdate(id);
+    }
+}
+EOF
+git -C "$noise_repo" add .
+git -C "$noise_repo" commit -qm base
+printf '\n    // changed business rule\n' >>"$noise_repo/src/main/java/com/example/ChangedTransactionalService.java"
+noise_output="$(PATH="$fake_bin:$PATH" LOCAL_REVIEW_CAPTURE="$noise_capture" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review \
+  LOCAL_REVIEW_FAKE_CLEAN=true \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=1000 \
+  OLLAMA_REVIEW_CHUNK_NUM_PREDICT=256 \
+  OLLAMA_REVIEW_NUM_CTX=16384 \
+  "$repo_root/bin/local-review.sh" --repo "$noise_repo")"
+if grep -F 'UnrelatedLockService.java' "$noise_capture" >/dev/null; then
+  echo 'transaction-only change pulled unrelated lock evidence into the prompt' >&2
+  exit 1
+fi
+if printf '%s\n' "$noise_output" | grep -F '事务内行锁存在反向锁序候选' >/dev/null; then
+  echo 'transaction-only change produced a lock-order finding' >&2
+  exit 1
+fi
 echo 'diff sharding regression passed'
