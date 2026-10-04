@@ -1074,3 +1074,8 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 为减少小型候选的不必要分片，`evals/run-history.sh` 现在只在个人 profile 且调用方没有显式设置 `OLLAMA_REVIEW_MAX_DIFF_BYTES` 时，对 6KB 至 12KB 的提交自动使用已验证的 12KB 预算；超过 12KB 仍保持 6KB，显式环境变量优先。每个结果的 `.meta.tsv` 记录实际 `max_diff_bytes` 与运行器计算出的 `effective_max_diff_bytes`，重复评测仍比较完整状态、分片签名和输出，不会把超时或截断当作 clean。新增历史回归夹具验证自适应值确实传给审计器；公开 `local-review` 默认值未改变。
 
 同轮对两个大规模前端交付候选先做快照级测试/构建：`platform-ai-front:38d84bd1` 的 26 个测试文件、113 个断言和生产构建通过，`platform-dac-front:0b898c98` 的 6 个测试文件、23 个断言和生产构建通过，均未发现删除造成的仓库内断链，因此不启动 Ollama。ERP 报量前端候选 `platform-erp-front:c05753fe` 的 18 个测试文件、149 个断言和构建通过，但当前工作区没有对应后端 endpoint/menu 实现，作为跨仓库集成风险保留人工复核，不把未运行模型的静态结论写入独立 scorecard。该流程把模型调用保留给真正可能产生新根因的候选。
+### 2026-10-05：补齐退货仓库类型字典 code 预检
+
+对 `platform-erp-service:060c0d9cc4295f57d9bf13e227bccf1d248923bf` 做两轮个人 profile 复测时，两轮均为单分片、`exit=0`、输出完整且 finding signature 一致，但模型稳定返回 clean。源码核验确认 `SalesReturnApplication.java` 把 `WAREHOUSE_TYPE_AFTER_SALE_GOOD` 的持久化字面量从仓库字典约定的 `AFTER_SALE_GOOD` 改成了不存在的 `AFTER_SALES_GOOD`，而收货应用和文档仍使用单数 code，售后待检仓映射可能无法识别目标仓库类型。该样本标记为 `tuning-source`，不回填模型原生召回。
+
+为防止同类字符串契约漏报，新增窄范围 `collect_sales_return_warehouse_type_preflight` 与 `evals/test-sales-return-warehouse-type-preflight.sh`。规则只在变更文件确实是 `SalesReturnApplication.java`、常量名不变但值改成 `AFTER_SALES_GOOD`，且当前源码快照仍存在 `AFTER_SALE_GOOD` 规范证据时报告 P1；安全字面量、无规范证据和构建产物不会触发。正例、反例、shell 语法和差异完整性检查均通过。该确定性 finding 只作为后续回归保护，不冒充模型原生命中。

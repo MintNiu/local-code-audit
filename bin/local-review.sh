@@ -8300,6 +8300,69 @@ collect_shopping_cart_price_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sales_return_warehouse_type_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # The warehouse-type code is a persisted dictionary contract, not a free
+  # form label. Keep this guard narrow: only a changed SalesReturnApplication
+  # constant that renames the documented singular code to the plural typo is
+  # authoritative. Do not generalize arbitrary enum/string edits.
+  grep -Eq '^\+.*WAREHOUSE_TYPE_AFTER_SALE_GOOD[[:space:]]*=[[:space:]]*"AFTER_SALES_GOOD"' "$diff_file" || return 0
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-sales-return-warehouse-type-candidates.XXXXXX")"
+  awk '
+    function start_hunk(header, fields, range, parts) {
+      split(header, fields, /[[:space:]]+/)
+      range = fields[3]
+      sub(/^\+/, "", range)
+      split(range, parts, ",")
+      new_line = parts[1] + 0
+      if (new_line < 1) new_line = 1
+    }
+    /^diff --git / { path = ""; next }
+    /^\+\+\+ b\// { path = substr($0, 7); next }
+    /^@@ / { start_hunk($0); next }
+    {
+      prefix = substr($0, 1, 1)
+      if (prefix == "+" && $0 !~ /^\+\+\+ b\//) {
+        code = substr($0, 2)
+        if (path ~ /(^|\/)SalesReturnApplication\.java$/ &&
+            code ~ /WAREHOUSE_TYPE_AFTER_SALE_GOOD[[:space:]]*=[[:space:]]*"AFTER_SALES_GOOD"/) {
+          printf "%s\t%d\n", path, new_line
+        }
+        new_line++
+      } else if (prefix != "-") {
+        new_line++
+      }
+    }
+  ' "$diff_file" | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" ]] || continue
+    is_safe_repo_relative_path "$candidate_path" || continue
+    source_file="$source_root/$candidate_path"
+    [[ -f "$source_file" ]] || continue
+    grep -Eq 'AFTER_SALES_GOOD' "$source_file" || continue
+    if ! rg -n --glob '*.java' --glob '*.md' --glob '*.sql' \
+      --glob '!target/**' --glob '!.git/**' \
+      'AFTER_SALE_GOOD([^A-Z_]|$)' "$source_root" >/dev/null 2>&1; then
+      continue
+    fi
+    {
+      printf '%s\n' "P1 $candidate_path:$candidate_line - 退货默认仓库类型字典 code 从约定的 AFTER_SALE_GOOD 改成了 AFTER_SALES_GOOD，使用了不存在的复数 code。"
+      printf '%s\n' '影响：售后待检仓映射得到的仓库类型与字典/验收校验不一致，保存或审核时可能无法识别目标仓，导致退货流程失败或写入错误的仓库类型。'
+      printf '%s\n' '修复建议：恢复并集中使用字典约定的 AFTER_SALE_GOOD，避免在应用代码中复制易拼错的字符串；同时为售后待检仓映射和校验补充契约测试。'
+      printf '%s\n' '验证方式：用 defaultWarehouseUsage=AFTER_SALE_PENDING 执行审核上下文、保存和确认验收，确认返回和持久化的 warehouseType 均为 AFTER_SALE_GOOD，并覆盖其他供方仓类型。'
+      printf '\n'
+    } >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_logical_warehouse_sku_replace_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11402,6 +11465,7 @@ collect_job_sensitive_log_preflight "$chunk_input_file" "$build_preflight_file" 
 collect_xxl_job_reliability_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_stock_warehouse_owner_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_shopping_cart_price_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sales_return_warehouse_type_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_logical_warehouse_sku_replace_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_return_idempotency_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sales_payment_voucher_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
