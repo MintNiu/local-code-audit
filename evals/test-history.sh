@@ -34,6 +34,9 @@ if [[ -n "${HISTORY_TEST_CURL_COUNT:-}" ]]; then
     printf 'transient transport warning\n' >&2
   fi
 fi
+if [[ -n "${HISTORY_TEST_MAX_DIFF_FILE:-}" ]]; then
+  printf '%s\n' "${OLLAMA_REVIEW_MAX_DIFF_BYTES:-unset}" >"$HISTORY_TEST_MAX_DIFF_FILE"
+fi
 printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
@@ -110,6 +113,33 @@ if grep -F 'transient transport warning' "$out_dir/$commit.txt" >/dev/null; then
   exit 1
 fi
 grep -F 'transient transport warning' "$out_dir/$commit.stderr.log" >/dev/null
+
+# When the personal profile is left at its default, a small diff just above
+# 6KB should use the validated 12KB shard budget to avoid an unnecessary
+# second model request. The adaptive value is recorded and passed to the
+# reviewer; an explicit environment override remains authoritative.
+awk 'BEGIN {
+  printf "class Adaptive { String payload = \""
+  for (i = 0; i < 7000; i++) printf "x"
+  printf "\"; }\n"
+}' >"$repo/src/Adaptive.java"
+git -C "$repo" add src/Adaptive.java
+git -C "$repo" commit -qm 'adaptive history budget'
+adaptive_parent="$commit"
+adaptive_commit="$(git -C "$repo" rev-parse HEAD)"
+adaptive_manifest="$fixture_root/adaptive-manifest.tsv"
+adaptive_out="$fixture_root/adaptive-results"
+printf 'commit\tparent\tdate\tsubject\tstatus\n%s\t%s\t2026-09-14\tadaptive budget\tpending-human-label\n' \
+  "$adaptive_commit" "$adaptive_parent" >"$adaptive_manifest"
+PATH="$fake_bin:$PATH" \
+  HISTORY_TEST_MAX_DIFF_FILE="$fixture_root/adaptive-max-diff" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/evals/run-history.sh" \
+    --repo "$repo" --manifest "$adaptive_manifest" --out-dir "$adaptive_out" \
+    >"$fixture_root/adaptive-stdout" 2>"$fixture_root/adaptive-stderr"
+grep -F $'max_diff_bytes\t12000' "$adaptive_out/$adaptive_commit.meta.tsv" >/dev/null
+grep -Fx '12000' "$fixture_root/adaptive-max-diff" >/dev/null
 
 "$repo_root/evals/prepare-history-labels.sh" \
   --manifest "$manifest" --results "$out_dir" --labels-dir "$labels_out" >/dev/null

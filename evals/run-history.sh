@@ -439,6 +439,19 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     commit -qm 'evaluation parent snapshot'
   git --no-replace-objects -c core.fsmonitor=false -C "$repo_root" diff --binary --no-ext-diff --no-textconv "$resolved_parent" "$resolved_commit" >"$patch_file"
   diff_sha256="$(shasum -a 256 "$patch_file" | awk '{print $1}')"
+  patch_bytes="$(wc -c <"$patch_file" | tr -d ' ')"
+  effective_profile_max_diff_bytes="$profile_max_diff_bytes"
+  # Small real commits often sit just above the conservative 6KB personal
+  # shard cap.  A second shard adds transport and prompt overhead without
+  # improving evidence coverage; focused 12KB runs have already been
+  # validated for this range.  Keep the public local-review default and all
+  # explicit OLLAMA_REVIEW_MAX_DIFF_BYTES overrides untouched, and stay
+  # conservative for larger diffs where a bigger shard can time out.
+  if [[ "$profile" == "personal" && -z "${OLLAMA_REVIEW_MAX_DIFF_BYTES+x}" &&
+        "$patch_bytes" =~ ^[0-9]+$ ]] &&
+     (( patch_bytes > profile_max_diff_bytes && patch_bytes <= 12000 )); then
+    effective_profile_max_diff_bytes=12000
+  fi
 
   if ! git -C "$worktree" apply --whitespace=nowarn "$patch_file"; then
     printf 'commit\t%s\nstatus\tapply-failed\nsubject\t%s\n' "$commit" "$subject" >"$metadata_file"
@@ -499,6 +512,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     LOCAL_REVIEW_RESOLVED_MODEL_FILE="$resolved_model_file" \
     OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE="$resolved_chunk_bytes_file" \
     OLLAMA_REVIEW_TRACE_FILE="$resolved_trace_file" \
+    OLLAMA_REVIEW_MAX_DIFF_BYTES="$effective_profile_max_diff_bytes" \
       "$review_script" "${review_args[@]}" >"$review_stdout_file" 2>"$review_stderr_file" || exit_code=$?
     if [[ "$exit_code" -eq 0 ]] && ! LC_ALL=C grep -q '[^[:space:]]' "$review_stdout_file"; then
       printf '本次历史评测无效：审计器 exit 0 但没有非空审查结果。\n' >>"$review_stderr_file"
@@ -588,7 +602,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'top_p\t%s\n' "$review_top_p"
     printf 'num_ctx\t%s\n' "$profile_num_ctx"
     printf 'num_predict\t%s\n' "$profile_num_predict"
-    printf 'max_diff_bytes\t%s\n' "$profile_max_diff_bytes"
+    printf 'max_diff_bytes\t%s\n' "$effective_profile_max_diff_bytes"
     printf 'chunk_num_predict\t%s\n' "$profile_chunk_num_predict"
     if [[ -s "$resolved_chunk_bytes_file" ]]; then
       while IFS=$'\t' read -r budget_key budget_value; do

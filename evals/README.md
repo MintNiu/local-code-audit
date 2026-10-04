@@ -203,7 +203,7 @@ python3 scripts/run-regression.py fast --jobs 2 \
 python3 scripts/run-regression.py full --jobs 2
 ```
 
-真实历史评测遇到“大文件多分片 + 本地模型超时”时，先保留模型配置不变，只在私有评测命令中提高 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（例如 12000）并适当提高 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS`，让同一候选尽量进入单分片；确认结果完整后再用完全相同参数重复一轮。该参数只用于缩短候选筛选，不应修改公开脚本默认值或把超时结果计为 clean；`.meta.tsv` 中的 `effective_max_diff_bytes`、`chunk_count`、`status` 和 `output_complete` 必须全部核对。
+真实历史评测遇到“大文件多分片 + 本地模型超时”时，先保留模型配置不变，只在私有评测命令中提高 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（例如 12000）并适当提高 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS`，让同一候选尽量进入单分片；确认结果完整后再用完全相同参数重复一轮。个人 profile 的历史评测器在未显式设置 `OLLAMA_REVIEW_MAX_DIFF_BYTES` 时，会把 6KB 至 12KB 的小型提交自适应到 12KB；超过 12KB 仍使用保守预算，显式环境变量始终优先。该自适应只作用于私有候选筛选，不修改公开 `local-review` 默认值，也不把超时结果计为 clean；`.meta.tsv` 中的 `max_diff_bytes`、`effective_max_diff_bytes`、`chunk_count`、`status` 和 `output_complete` 必须全部核对。
 
 `fast` 只接受仓库 `evals/test-*.sh` 顶层套件，`full` 会排除编排器自身；失败套件会保留退出码并以非零状态结束。不要把 `run-synthetic.sh`、`run-history.sh` 或真实 Ollama 审查放入并行队列。
 
