@@ -8695,6 +8695,59 @@ collect_inventory_serial_null_migration_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sales_return_refund_schema_migration_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local refund_app schema_file migration_contract_file line_number schema_line
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # Refund tables added only to the bootstrap snapshot are unsafe for an
+  # existing ERP database.  Keep this deliberately project-shaped: require
+  # both new refund tables, the refund application, the repository's stated
+  # versioned-migration contract, and the absence of an actual migration.
+  grep -Eq '^\+.*CREATE TABLE IF NOT EXISTS [`"]?erp_sales_return_refund[`"]?' "$diff_file" || return 0
+  grep -Eq '^\+.*CREATE TABLE IF NOT EXISTS [`"]?erp_sales_return_refund_line[`"]?' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/SalesReturnRefundApplication\.java$' "$diff_file" || return 0
+  if awk '
+    /^\+\+\+ b\// {
+      path = substr($0, 7)
+      sub(/[[:space:]]+$/, "", path)
+      if (path ~ /(^|\/)sql\/(migration|migrations)\//) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file"; then
+    return 0
+  fi
+
+  schema_file="$source_root/sql/platform_erp.sql"
+  [[ -f "$schema_file" ]] || return 0
+  grep -Eq 'CREATE TABLE IF NOT EXISTS [`"]?erp_sales_return_refund[`"]?' "$schema_file" || return 0
+  grep -Eq 'CREATE TABLE IF NOT EXISTS [`"]?erp_sales_return_refund_line[`"]?' "$schema_file" || return 0
+  migration_contract_file="$(rg -l --glob 'README*' 'sql/migration|db/migration|已有库.*迁移|版本化迁移' "$source_root" 2>/dev/null | head -n 1 || true)"
+  [[ -n "$migration_contract_file" ]] || return 0
+  if rg -n 'erp_sales_return_refund(_line)?' "$source_root/sql/migration" "$source_root/sql/migrations" "$source_root/db/migration" "$source_root/db/migrations" 2>/dev/null; then
+    return 0
+  fi
+
+  refund_app="$(find "$source_root/src/main/java" -type f -name 'SalesReturnRefundApplication.java' -print -quit 2>/dev/null || true)"
+  [[ -f "$refund_app" ]] || return 0
+  grep -Eq 'createDraft[[:space:]]*\(|refundSalesReturn[[:space:]]*\(' "$refund_app" || return 0
+  line_number="$(grep -n -m1 -E 'createDraft[[:space:]]*\(|refundSalesReturn[[:space:]]*\(' "$refund_app" | cut -d: -f1)"
+  [[ "$line_number" =~ ^[0-9]+$ ]] || line_number=1
+  schema_line="$(grep -n -m1 'erp_sales_return_refund' "$schema_file" | cut -d: -f1)"
+  [[ "$schema_line" =~ ^[0-9]+$ ]] || schema_line=1
+  {
+    printf '%s\n' "P1 ${refund_app#"$source_root/"}:$line_number - 销售退货退款新增表只写入初始化 schema，当前差异没有对应的版本化迁移，已有数据库升级后退款接口可能因缺表失败。"
+    printf '%s\n' '影响：CREATE TABLE IF NOT EXISTS 只覆盖新建库，滚动升级的既有库不会自动得到退款主表和明细表；创建、确认或入账路径会在运行时因缺表失败，部署可能出现代码与数据库版本不一致。'
+    printf '%s\n' '修复建议：为退款主表、明细表及索引新增幂等版本化 migration，并保证先后顺序、重复执行和失败重试安全；初始化 schema 与 migration 保持同一结构。'
+    printf '%s\n' '验证方式：从上一个已部署版本升级含数据的数据库，执行退款创建、修改、确认、取消和入账流程；再重复 migration 并验证新建库初始化，确认两张表和全部索引一致。'
+    printf '%s\n' "证据行：${refund_app#"$source_root/"}:${line_number}；${schema_file#"$source_root/"}:${schema_line}；迁移契约：${migration_contract_file#"$source_root/"}"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_gateway_workflow_application_scope_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11222,6 +11275,7 @@ collect_sales_payment_voucher_race_preflight "$chunk_input_file" "$build_preflig
 collect_sales_payment_confirmation_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_inventory_stock_race_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_inventory_serial_null_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sales_return_refund_schema_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_gateway_workflow_application_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_sso_provider_login_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_role_api_tenant_scope_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

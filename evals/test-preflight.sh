@@ -5475,6 +5475,9 @@ bash "$repo_root/evals/test-sso-ticket-replay-preflight.sh"
 # Existing NULL serial rows must have a versioned migration before the new
 # empty-string-only inventory contract is accepted.
 bash "$repo_root/evals/test-inventory-serial-null-migration-preflight.sh"
+# New sales-return refund tables must have a versioned migration for existing
+# databases, not only an initialization snapshot.
+bash "$repo_root/evals/test-sales-return-refund-schema-migration-preflight.sh"
 # Sales-order payment confirmation must serialize voucher state and fund
 # recharge/freeze side effects; check-then-act paths stay visible.
 bash "$repo_root/evals/test-sales-payment-confirmation-race-preflight.sh"
