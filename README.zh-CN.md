@@ -121,6 +121,14 @@ Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最�
 真实历史提交评测请按照 [evals/README.md](evals/README.md) 使用，并将清单、原始输出和人工标签保存在公开仓库之外。
 
 可以用 `evals/prepare-history-labels.sh` 生成不会覆盖已有标签的私有 TSV 标注模板，再人工确认召回率和误报率。
+
+多语言外部数据应以规范化 JSONL 和许可元数据保存在公开仓库之外。进入 few-shot 或微调候选前先执行：
+
+```bash
+python3 scripts/validate-external-dataset.py /path/to/private/review-dataset.jsonl
+```
+
+校验器会检查来源/许可信息、正例问题完整性、文件行号，以及 `train`、`dev`、`holdout` 之间的仓库/提交泄漏；它不会自动下载数据，也不会输出源码片段。
 每个模板先填写 `# verdict`（`clean` 或 `findings`）和 `# review_status`（完成后填 `complete`），再逐条标记发现；未完成或 `uncertain` 的记录不应计入汇总指标。
 
 `examples/` 目录只保存公开的格式说明。真实 few-shot 示例放在本机私有文件 `~/.local/share/local-review/examples.md`。

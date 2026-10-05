@@ -151,6 +151,14 @@ For private historical-commit evaluation, use [evals/README.md](evals/README.md)
 
 Use `evals/prepare-history-labels.sh` to create non-overwriting private TSV label templates before calculating recall and false-positive rates.
 
+For a multilingual external dataset, keep normalized JSONL and license metadata outside this public repository. Validate it before sampling or fine-tuning:
+
+```bash
+python3 scripts/validate-external-dataset.py /path/to/private/review-dataset.jsonl
+```
+
+The validator checks source/license metadata, positive finding completeness, changed-file line locations, and repository/commit leakage across `train`, `dev`, and `holdout`. It never downloads data or prints source snippets.
+
 The `examples/` directory contains only the public format specification. Real few-shot examples belong in the local private file `~/.local/share/local-review/examples.md`.
 
 The tuning history and known failure modes are documented in [docs/tuning-process.zh-CN.md](docs/tuning-process.zh-CN.md).
