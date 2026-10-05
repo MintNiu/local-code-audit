@@ -279,4 +279,117 @@ if printf '%s\n' "$safe_cookie_output" | grep -F '敏感 Cookie 未设置 Secure
   exit 1
 fi
 
+resource_repo="$fixture_root/resource-repo"
+git -C "$fixture_root" init -q resource-repo
+git -C "$resource_repo" config user.email test@example.invalid
+git -C "$resource_repo" config user.name java-resource-loop-preflight
+git -C "$resource_repo" commit --allow-empty -qm 基线
+mkdir -p "$resource_repo/src/main/java/testcases"
+cat >"$resource_repo/src/main/java/testcases/ResourceLoopFixture.java" <<'EOF'
+package testcases;
+
+class ResourceLoopFixture {
+    void bad() {
+        String raw = System.getenv("COUNT");
+        int count = Integer.parseInt(raw);
+        for (int i = 0; i < count; i++) {
+            work();
+        }
+    }
+
+    private void work() {}
+}
+EOF
+resource_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-resource" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$resource_repo")"
+printf '%s\n' "$resource_output" | grep -F '外部输入直接控制无上限循环' >/dev/null
+
+rm "$resource_repo/src/main/java/testcases/ResourceLoopFixture.java"
+cat >"$resource_repo/src/main/java/testcases/ResourceLoopFixture.java" <<'EOF'
+package testcases;
+
+class ResourceLoopFixture {
+    void safe() {
+        String raw = System.getenv("COUNT");
+        int count = Integer.parseInt(raw);
+        if (count > 0 && count <= 20) {
+            for (int i = 0; i < count; i++) {
+                work();
+            }
+        }
+    }
+
+    private void work() {}
+}
+EOF
+safe_resource_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-resource-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$resource_repo")"
+if printf '%s\n' "$safe_resource_output" | grep -F '外部输入直接控制无上限循环' >/dev/null; then
+  echo 'bounded external loop was incorrectly reported as resource exhaustion' >&2
+  printf '%s\n' "$safe_resource_output" >&2
+  exit 1
+fi
+
+infinite_repo="$fixture_root/infinite-repo"
+git -C "$fixture_root" init -q infinite-repo
+git -C "$infinite_repo" config user.email test@example.invalid
+git -C "$infinite_repo" config user.name java-infinite-loop-preflight
+git -C "$infinite_repo" commit --allow-empty -qm 基线
+mkdir -p "$infinite_repo/src/main/java/testcases"
+cat >"$infinite_repo/src/main/java/testcases/InfiniteLoopFixture.java" <<'EOF'
+package testcases;
+
+class InfiniteLoopFixture {
+    void bad() {
+        int i = 0;
+        do {
+            i = (i + 1) % 256;
+        } while (i >= 0);
+    }
+}
+EOF
+infinite_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-infinite" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$infinite_repo")"
+printf '%s\n' "$infinite_output" | grep -F '循环条件可由当前计数器更新证明永真' >/dev/null
+
+rm "$infinite_repo/src/main/java/testcases/InfiniteLoopFixture.java"
+cat >"$infinite_repo/src/main/java/testcases/InfiniteLoopFixture.java" <<'EOF'
+package testcases;
+
+class InfiniteLoopFixture {
+    void safe() {
+        int i = 0;
+        do {
+            if (i == 10) {
+                break;
+            }
+            i = (i + 1) % 256;
+        } while (i >= 0);
+    }
+}
+EOF
+safe_infinite_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-infinite-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$infinite_repo")"
+if printf '%s\n' "$safe_infinite_output" | grep -F '循环条件可由当前计数器更新证明永真' >/dev/null; then
+  echo 'loop with reachable break was incorrectly reported as infinite' >&2
+  printf '%s\n' "$safe_infinite_output" >&2
+  exit 1
+fi
+
 echo 'Java external security preflight passed'

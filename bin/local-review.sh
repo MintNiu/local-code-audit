@@ -5617,6 +5617,143 @@ collect_java_external_security_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_external_control_flow_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # An external numeric value used directly as a loop bound is only reported
+  # when the same source window shows environment parsing and no bound check.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-resource-loop-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+          text ~ /for[[:space:]]*\([^;]*;[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*</) {
+        print path "\t" line_no
+      }
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target="$candidate_line" '
+      { lines[NR] = $0 }
+      END {
+        line = lines[target]
+        sub(/\/\/.*$/, "", line)
+        if (line !~ /for[[:space:]]*\([^;]*;[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*</) exit 1
+        expression = line
+        sub(/^[^(]*\(/, "", expression)
+        split(expression, clauses, ";")
+        condition = clauses[2]
+        sub(/^[[:space:]]+/, "", condition)
+        split(condition, fields, /[[:space:]]+/)
+        variable = fields[3]
+        if (variable == "") exit 1
+        start = target - 25
+        if (start < 1) start = 1
+        environment_source = 0
+        parsed_value = 0
+        bounded = 0
+        for (i = start; i <= target; i++) {
+          context = lines[i]
+          sub(/\/\/.*$/, "", context)
+          if (context ~ /^[[:space:]]*(public|private|protected|static)[^;]*\(/ ||
+              context ~ /^[[:space:]]*[A-Za-z_$][A-Za-z0-9_$<>,.?]*[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*\{/) {
+            environment_source = 0
+            parsed_value = 0
+            bounded = 0
+          }
+          if (context ~ /System[.]getenv[[:space:]]*\(/) environment_source = 1
+          if (environment_source &&
+              context ~ /(Integer|Long)[.]parse(Int|Long)[[:space:]]*\(/ &&
+              index(context, variable) > 0) parsed_value = 1
+          if (parsed_value && context ~ /if[[:space:]]*\(/ &&
+              index(context, variable) > 0 && context ~ /(>|<)/) bounded = 1
+        }
+        exit (environment_source && parsed_value && !bounded) ? 0 : 1
+      }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 外部输入直接控制无上限循环，存在资源耗尽风险。" \
+      '影响：环境变量或其他外部计数可被设置为极大值，令请求线程持续消耗 CPU、线程时间或下游调用预算，造成拒绝服务。' \
+      '修复建议：在进入循环前校验正数范围并设置明确的最大值，拒绝负数、超限、缺失和非法输入；不要只依赖解析异常处理。' \
+      '验证方式：使用缺失、非法、负数、零、边界值和超大计数运行测试，确认超限输入在循环执行前被拒绝且资源占用有上限。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+
+  # A modulo counter with a non-negative do/while condition is a narrow,
+  # high-confidence infinite-loop pattern. A nearby break/return/throw keeps
+  # the sample out of this deterministic rule.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-infinite-loop-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+          text ~ /while[[:space:]]*\([^)]*>=[[:space:]]*0[[:space:]]*\)[[:space:]]*;/) {
+        print path "\t" line_no
+      }
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target="$candidate_line" '
+      { lines[NR] = $0 }
+      END {
+        start = target - 16
+        if (start < 1) start = 1
+        modulo_update = 0
+        do_loop = 0
+        exit_path = 0
+        for (i = start; i <= target; i++) {
+          context = lines[i]
+          sub(/\/\/.*$/, "", context)
+          sub(/\/\*.*\*\//, "", context)
+          if (context ~ /^[[:space:]]*(public|private|protected|static)[^;]*\(/ ||
+              context ~ /^[[:space:]]*[A-Za-z_$][A-Za-z0-9_$<>,.?]*[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*\{/) {
+            modulo_update = 0
+            do_loop = 0
+            exit_path = 0
+          }
+          if (context ~ /^[[:space:]]*do[[:space:]]*$/ ||
+              context ~ /^[[:space:]]*do[[:space:]]*\{/) do_loop = 1
+          if (context ~ /=[[:space:]]*\([^;]*\+[[:space:]]*1[[:space:]]*\)[[:space:]]*%[[:space:]]*[0-9]+/) modulo_update = 1
+          if (context ~ /(^|[^[:alnum:]_])(break|return|throw)([^[:alnum:]_]|$)/) exit_path = 1
+        }
+        exit (do_loop && modulo_update && !exit_path) ? 0 : 1
+      }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 循环条件可由当前计数器更新证明永真，存在无限循环/资源耗尽风险。" \
+      '影响：请求线程会持续占用 CPU 和线程资源，无法完成后续逻辑，可能造成服务线程池耗尽或拒绝服务。' \
+      '修复建议：增加可达的有界退出、取消信号或明确的最大迭代次数，并避免用取模计数器配合永真的非负条件。' \
+      '验证方式：使用超时和线程转储验证循环可终止；覆盖边界计数、取消请求和异常路径，确认不会持续占用线程。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_cors_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11801,6 +11938,7 @@ collect_idor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_s
 collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_hr_default_password_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

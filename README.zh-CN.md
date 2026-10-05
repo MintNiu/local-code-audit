@@ -140,7 +140,7 @@ python3 scripts/prepare-juliet-java.py \
 ```
 
 转换器从 manifest 读取 CWE 名称和缺陷行号，生成 bad/good 对照样本，并将结果保留在公开仓库之外。
-运行器还包含窄范围 Java 外部安全预检：对同一方法内字面量密码流入 `DriverManager.getConnection`、`readLine()` 数据直接进入 `sendRedirect`、弱加密算法、GET 表单提交密码，以及敏感 Cookie 未设置 `Secure` 的证据先给出确定性 finding；固定字符串重定向、环境/密钥注入、现代 AES、POST 表单和已设置 `Secure` 的 Cookie 保持 clean。回归入口为 `evals/test-java-external-preflight.sh`，不会下载或提交外部源码。
+运行器还包含窄范围 Java 外部安全预检：对同一方法内字面量密码流入 `DriverManager.getConnection`、`readLine()` 数据直接进入 `sendRedirect`、弱加密算法、GET 表单提交密码、敏感 Cookie 未设置 `Secure`、外部计数直接控制无上限循环，以及取模计数器配合永真 `do/while` 的证据先给出确定性 finding；固定字符串重定向、环境/密钥注入、现代 AES、POST 表单、已设置 `Secure` 的 Cookie、有明确上限的循环和带可达 `break` 的循环保持 clean。回归入口为 `evals/test-java-external-preflight.sh`，不会下载或提交外部源码。
 每个模板先填写 `# verdict`（`clean` 或 `findings`）和 `# review_status`（完成后填 `complete`），再逐条标记发现；未完成或 `uncertain` 的记录不应计入汇总指标。
 
 `examples/` 目录只保存公开的格式说明。真实 few-shot 示例放在本机私有文件 `~/.local/share/local-review/examples.md`。
