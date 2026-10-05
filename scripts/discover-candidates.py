@@ -42,25 +42,24 @@ def run_git(repo: Path, *args: str) -> str:
     return result.stdout
 
 
-def read_excluded(path: Path | None) -> set[tuple[str, str]]:
-    if path is None:
-        return set()
-    if not path.is_file():
-        fail(f"排除表不存在: {path}")
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        fail(f"无法读取排除表 {path}: {exc}")
-    reader = csv.DictReader(text.splitlines(), delimiter="\t")
-    if not reader.fieldnames or "repo" not in reader.fieldnames or "commit" not in reader.fieldnames:
-        fail(f"排除表必须包含 repo 和 commit 列: {path}")
+def read_excluded(paths: list[Path]) -> set[tuple[str, str]]:
     excluded: set[tuple[str, str]] = set()
-    for line_number, row in enumerate(reader, start=2):
-        repo = (row.get("repo") or "").strip().lower()
-        commit = (row.get("commit") or "").strip().lower()
-        if not repo or not REF_RE.fullmatch(commit):
-            fail(f"排除表第 {line_number} 行缺少 repo 或 commit 不是完整 SHA: {path}")
-        excluded.add((repo, commit))
+    for path in paths:
+        if not path.is_file():
+            fail(f"排除表不存在: {path}")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            fail(f"无法读取排除表 {path}: {exc}")
+        reader = csv.DictReader(text.splitlines(), delimiter="\t")
+        if not reader.fieldnames or "repo" not in reader.fieldnames or "commit" not in reader.fieldnames:
+            fail(f"排除表必须包含 repo 和 commit 列: {path}")
+        for line_number, row in enumerate(reader, start=2):
+            repo = (row.get("repo") or "").strip().lower()
+            commit = (row.get("commit") or "").strip().lower()
+            if not repo or not REF_RE.fullmatch(commit):
+                fail(f"排除表第 {line_number} 行缺少 repo 或 commit 不是完整 SHA: {path}")
+            excluded.add((repo, commit))
     return excluded
 
 
@@ -110,7 +109,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="从多个本地 Git 仓库发现直接父提交候选；只读且不判断严重度。")
     parser.add_argument("--workspace-root", required=True, type=Path, help="包含多个 Git 仓库的目录")
     parser.add_argument("--since", required=True, help="Git 可接受的起始时间，例如 2026-09-01")
-    parser.add_argument("--exclude", type=Path, help="已有评分卡/评审表合并文件，至少包含 repo、commit 列")
+    parser.add_argument(
+        "--exclude", type=Path, action="append", default=[],
+        help="已有评分卡或评审表，至少包含 repo、commit 列；可重复传入多个文件",
+    )
     parser.add_argument("--repo", action="append", help="只扫描指定仓库名；可重复传入")
     parser.add_argument("--out", required=True, type=Path, help="输出候选 TSV；拒绝覆盖已有文件")
     args = parser.parse_args()

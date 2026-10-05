@@ -1053,7 +1053,7 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 
 随后从未扫描的 Bafan 可用性提交 `bafan-backend:85da9946` 补入一个独立安全样本。目标把 Actuator `metrics` 加入业务应用端口的公开暴露列表，并新增线程池指标；现有 Web MVC 拦截器只覆盖 `/api/**` 与 `/admin/**`，没有管理端口或 Actuator 认证边界。个人 profile 两轮均 10 个分片、`exit=0`、结果哈希一致且均返回 clean，源码核验确认未认证 `/actuator/metrics` 可枚举线程池、JVM、HTTP 和连接池遥测，计为新的独立 P1 漏报。独立 scorecard 当前为 11 个 gold P0/P1、命中 5 个、召回 45.5%，输出完整/双轮稳定 11/11。随后新增 `collect_public_actuator_metrics_preflight` 与独立/隔离管理端口正负夹具，作为后续审查的确定性保护，不回填模型原生召回。
 
-同日把补样流程再压缩为“自动发现 → 人工根因去重 → 风险排序 → 少量双跑”：新增只读 `scripts/discover-candidates.py`，从多个本地仓库的 `git log` 生成真实 parent、主题和待人工状态，跳过 root/merge 提交并支持按 `repo + commit` 排除已处理表；`rank-candidates.py` 同时修复了已有 `commit_subject` 列时的重复表头。发现器、筛选器和排序器的串联回归通过，真实 Platform 工作区在 2026-09-25 之后得到 22 条候选且排序后仍为 22 条；这一步只减少人工抄录和无效模型调用，不改变“所有有效模型问题必须可见”的输出门禁。
+同日把补样流程再压缩为“自动发现 → 人工根因去重 → 风险排序 → 少量双跑”：新增只读 `scripts/discover-candidates.py`，从多个本地仓库的 `git log` 生成真实 parent、主题和待人工状态，跳过 root/merge 提交并支持重复传入多个 `--exclude`，按 `repo + commit` 合并排除评分卡和候选评审表；`rank-candidates.py` 同时修复了已有 `commit_subject` 列时的重复表头。发现器、筛选器和排序器的串联回归通过，真实 Platform 工作区在 2026-09-25 之后得到 22 条候选且排序后仍为 22 条；这一步只减少人工抄录和无效模型调用，不改变“所有有效模型问题必须可见”的输出门禁。
 
 ### 2026-10-04：补齐退货跨类 helper 反向锁序漏报并缩短复测时间
 

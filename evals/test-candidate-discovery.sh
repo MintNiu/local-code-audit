@@ -22,8 +22,12 @@ done
 excluded="$temp_root/excluded.tsv"
 cat >"$excluded" <<'EOF'
 repo	commit
-repo-a	0000000000000000000000000000000000000000
 EOF
+excluded_extra="$temp_root/excluded-extra.tsv"
+base_commit="$(git -C "$workspace/repo-a" rev-parse HEAD~1)"
+new_commit="$(git -C "$workspace/repo-a" rev-parse HEAD)"
+printf 'repo\tcommit\nrepo-a\t%s\n' "$base_commit" >"$excluded"
+printf 'repo\tcommit\nrepo-a\t%s\n' "$new_commit" >"$excluded_extra"
 
 output="$temp_root/discovered.tsv"
 python3 "$script_root/scripts/discover-candidates.py" \
@@ -44,6 +48,23 @@ assert row["repo"] == "repo-a"
 assert len(row["commit"]) == 40 and len(row["parent"]) == 40
 assert row["feature_cluster"].startswith("unclassified-")
 assert row["status"] == "pending-human-label"
+PY
+
+excluded_output="$temp_root/discovered-excluded.tsv"
+python3 "$script_root/scripts/discover-candidates.py" \
+  --workspace-root "$workspace" \
+  --since 2000-01-01 \
+  --repo repo-a \
+  --exclude "$excluded" \
+  --exclude "$excluded_extra" \
+  --out "$excluded_output" >/dev/null
+python3 - "$excluded_output" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+rows = list(csv.DictReader(Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(), delimiter="\t"))
+assert rows == [], rows
 PY
 
 if python3 "$script_root/scripts/discover-candidates.py" \
