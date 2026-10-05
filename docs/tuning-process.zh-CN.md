@@ -1093,3 +1093,9 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 重复评测脚本原先会把每轮冻结 context 的临时根目录名当成运行配置漂移，导致模型输出、分片和哈希完全一致时仍失败。现只规范化 `local-review-history.<随机目录>` 这一已知临时路径，仍严格比较上下文相对路径、分片路由、模型/SYSTEM/脚本哈希、状态和输入字节；`evals/test-history.sh` 增加带外部 context 的重复回归。这样减少无效人工复核，不会放宽真正的配置漂移门禁。
 
 对 `platform-erp-service:bcf776abddaaeca68705a7e941f1d78b18e2fda6` 的源码和跨仓库字典证据核对发现，样机订单默认仓新增 `WAREHOUSE_TYPE_SAMPLE = "SAMPLE"`，但 `platform-system` 的 `erp_warehouse_type` 初始 value 是“样机”。个人模型在窄 context 双跑中未稳定完成（一次请求超时），因此不把它计入模型召回；新增 `collect_sales_order_sample_warehouse_type_preflight`，只在显式 `--context` 提供两次“样机”字典 value、变更文件确为 `SalesOrderApplication.java` 且当前代码实际按 `getWarehouseType()` 精确匹配并抛出“无可用样机仓”时报告 P1。正负夹具通过，未提供字典 context 时保持静默，避免凭 `SAMPLE` 字面量推断跨仓库契约。该提交标记为 `tuning-source`，schema 快照缺 migration 的既有发现仍单独归入迁移风险族。
+
+### 2026-10-05：退货候选静态分流与空窗检查
+
+为提高补样效率，对新发现的 ERP 退货候选先进行只读差异审计，再决定是否调用 Ollama。退货 CRUD 基线、寻货 SKU `EXISTS` 查询、退货验收状态联动、订单退货汇总和退款字段快照均已有租户条件或属于已覆盖的退货状态/幂等/迁移家族；五个高优先级前端提交只包含页面、请求封装、权限常量或文档，没有新增服务端鉴权、租户或库存写入边界。上述样本全部记录到私有 `blind-candidate-review.tsv`，不重复启动模型双跑。
+
+该轮将待审队列从 69 条降至 51 条，剩余记录全部为前端功能回归样本；对 2026-10-05 之后的 26 个本地 Platform 仓库重新发现直接父提交，结果为 0 条，避免无效等待。候选筛选、排序和三套回归套件仍通过；严格独立 scorecard 保持 11 个 gold P0/P1、命中 5 个、召回 45.5%、输出完整 14/14、重复稳定 14/14。该效率收益来自静态证据去重和候选空窗确认，不降低“所有有效模型问题必须展示”的门禁；下一轮应从新的功能簇或新增提交中补充未参与规则设计的独立根因。
