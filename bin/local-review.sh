@@ -5501,6 +5501,122 @@ collect_java_hardcoded_db_password_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_external_security_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file secure_state
+
+  # Legacy algorithm factories are high-confidence when the changed Java
+  # line names the algorithm itself. Imports and comments do not trigger.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-crypto-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text !~ /^\+/ && text ~ /(getInstance|SecretKeySpec)[[:space:]]*\([^)]*"(DESede|DES|3DES|RC2|RC4|MD2|MD4|MD5|SHA-1)"/) print path "\t" line_no
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target="$candidate_line" '
+      NR == target {
+        line = $0
+        gsub(/\\/, "", line)
+        if (line !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+            line ~ /(getInstance|SecretKeySpec)[[:space:]]*\([^)]*"(DESede|DES|3DES|RC2|RC4|MD2|MD4|MD5|SHA-1)"/) {
+          found = 1
+        }
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 使用已知风险或过时的加密算法。" \
+      '影响：DES/3DES、RC4、MD2/MD4/MD5 或 SHA-1 等算法存在已知强度或碰撞风险，可能使加密数据被恢复或完整性校验被伪造。' \
+      '修复建议：根据用途迁移到 AES-GCM、ChaCha20-Poly1305 或 SHA-256 以上的现代算法，并保持密钥/随机数管理符合协议要求。' \
+      '验证方式：用算法白名单扫描构建产物和运行配置，执行兼容性测试并验证旧算法输入会被拒绝。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+
+  # A password field submitted with GET is directly exposed in the query
+  # string. Ordinary GET forms without password fields remain untouched.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-password-form-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      normalized = text
+      gsub(/\\/, "", normalized)
+      if (text !~ /^\+/ && normalized ~ /method[[:space:]]*=[[:space:]]*"get"/) print path "\t" line_no
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    sed 's/\\//g' "$source_file" | grep -Eiq 'method[[:space:]]*=[[:space:]]*"get"' || continue
+    sed 's/\\//g' "$source_file" | grep -Eiq '<input[^>]+(name[[:space:]]*=[[:space:]]*"password"|type[[:space:]]*=[[:space:]]*"password")' || continue
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 密码字段通过 GET 表单进入查询字符串。" \
+      '影响：密码会出现在浏览器历史、代理记录、访问日志或 Referer 中，形成凭据泄漏。' \
+      '修复建议：改用 POST 或受保护的请求体传输密码，并检查网关、日志和缓存不会记录敏感字段。' \
+      '验证方式：提交密码字段后检查最终 URL、浏览器历史、代理和服务端日志，确认密码不出现在查询参数中。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+
+  # A sensitive cookie added without Secure in its method is a high-confidence
+  # HTTPS transport boundary issue. Source validation is method-local so a
+  # later good() helper cannot mask bad().
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-cookie-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    {
+      prefix = substr($0, 1, 1); text = (prefix == "+" ? substr($0, 2) : $0)
+      if ((prefix == "+" || prefix == " ") && text ~ /response[[:space:]]*\.[[:space:]]*addCookie[[:space:]]*\(/ && prefix == "+") print path "\t" line_no
+      if (prefix == "+" || prefix == " ") line_no++
+    }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    grep -Eiq 'new[[:space:]]+Cookie[[:space:]]*\([^)]*(Secret|Session|Auth|Token|Password)' "$source_file" || continue
+    secure_state="$(awk -v target="$candidate_line" '
+      /^[[:space:]]*(public|private|protected|static)[^;]*\(/ { secure = 0 }
+      /^[[:space:]]*[A-Za-z_$][A-Za-z0-9_$<>,.?]*[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*\{/ { secure = 0 }
+      NR == target { print (secure ? "true" : "false"); found = 1; exit }
+      /setSecure[[:space:]]*\([[:space:]]*true[[:space:]]*\)/ { secure = 1 }
+      END { if (!found) print "false" }
+    ' "$source_file")"
+    [[ "$secure_state" == false ]] || continue
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 敏感 Cookie 未设置 Secure 属性。" \
+      '影响：在 HTTPS 会话中，Cookie 可能被降级或通过非加密连接传输，导致会话或敏感数据泄漏。' \
+      '修复建议：对敏感 Cookie 显式设置 Secure，并同时核对 HttpOnly、SameSite 和全链路 HTTPS 强制策略。' \
+      '验证方式：通过 HTTP/HTTPS 分别请求并检查 Set-Cookie，确认敏感 Cookie 始终带 Secure 且非 HTTPS 请求不会携带它。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_cors_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11684,6 +11800,7 @@ collect_xxe_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_so
 collect_idor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_hr_default_password_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

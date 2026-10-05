@@ -125,4 +125,158 @@ if printf '%s\n' "$safe_password_output" | grep -F 'Java 数据库连接使用�
   exit 1
 fi
 
+weak_repo="$fixture_root/weak-repo"
+git -C "$fixture_root" init -q weak-repo
+git -C "$weak_repo" config user.email test@example.invalid
+git -C "$weak_repo" config user.name java-weak-crypto-preflight
+git -C "$weak_repo" commit --allow-empty -qm 基线
+mkdir -p "$weak_repo/src/main/java/testcases"
+cat >"$weak_repo/src/main/java/testcases/WeakCryptoFixture.java" <<'EOF'
+package testcases;
+
+import javax.crypto.Cipher;
+
+class WeakCryptoFixture {
+    void bad() throws Exception {
+        Cipher.getInstance("DESede");
+    }
+}
+EOF
+weak_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-weak" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$weak_repo")"
+printf '%s\n' "$weak_output" | grep -F '已知风险或过时的加密算法' >/dev/null
+
+rm "$weak_repo/src/main/java/testcases/WeakCryptoFixture.java"
+cat >"$weak_repo/src/main/java/testcases/WeakCryptoFixture.java" <<'EOF'
+package testcases;
+
+import javax.crypto.Cipher;
+
+class WeakCryptoFixture {
+    void safe() throws Exception {
+        // Example: Cipher.getInstance("DESede")
+        Cipher.getInstance("AES/GCM/NoPadding");
+    }
+}
+EOF
+safe_weak_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-weak-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$weak_repo")"
+if printf '%s\n' "$safe_weak_output" | grep -F '已知风险或过时的加密算法' >/dev/null; then
+  echo 'modern AES algorithm was incorrectly reported as weak crypto' >&2
+  printf '%s\n' "$safe_weak_output" >&2
+  exit 1
+fi
+
+form_repo="$fixture_root/form-repo"
+git -C "$fixture_root" init -q form-repo
+git -C "$form_repo" config user.email test@example.invalid
+git -C "$form_repo" config user.name java-password-form-preflight
+git -C "$form_repo" commit --allow-empty -qm 基线
+mkdir -p "$form_repo/src/main/java/testcases"
+cat >"$form_repo/src/main/java/testcases/PasswordFormFixture.java" <<'EOF'
+package testcases;
+
+class PasswordFormFixture {
+    // <form method="get">
+    // <input name="password" type="text">
+    void bad() {}
+}
+EOF
+form_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-form" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$form_repo")"
+printf '%s\n' "$form_output" | grep -F '密码字段通过 GET 表单' >/dev/null
+
+rm "$form_repo/src/main/java/testcases/PasswordFormFixture.java"
+cat >"$form_repo/src/main/java/testcases/PasswordFormFixture.java" <<'EOF'
+package testcases;
+
+class PasswordFormFixture {
+    // <form method="post">
+    // <input name="password" type="text">
+    void safe() {}
+}
+EOF
+safe_form_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-form-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$form_repo")"
+if printf '%s\n' "$safe_form_output" | grep -F '密码字段通过 GET 表单' >/dev/null; then
+  echo 'POST password form was incorrectly reported as GET password form' >&2
+  printf '%s\n' "$safe_form_output" >&2
+  exit 1
+fi
+
+cookie_repo="$fixture_root/cookie-repo"
+git -C "$fixture_root" init -q cookie-repo
+git -C "$cookie_repo" config user.email test@example.invalid
+git -C "$cookie_repo" config user.name java-cookie-preflight
+git -C "$cookie_repo" commit --allow-empty -qm 基线
+mkdir -p "$cookie_repo/src/main/java/testcases"
+cat >"$cookie_repo/src/main/java/testcases/CookieFixture.java" <<'EOF'
+package testcases;
+
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletResponse;
+
+class CookieFixture {
+    void helper() {
+        Cookie cookie = new Cookie("SessionToken", "x");
+        cookie.setSecure(true);
+    }
+
+    void bad(HttpServletResponse response) {
+        Cookie cookie = new Cookie("SessionToken", "x");
+        response.addCookie(cookie);
+    }
+}
+EOF
+cookie_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-cookie" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$cookie_repo")"
+printf '%s\n' "$cookie_output" | grep -F '敏感 Cookie 未设置 Secure' >/dev/null
+
+rm "$cookie_repo/src/main/java/testcases/CookieFixture.java"
+cat >"$cookie_repo/src/main/java/testcases/CookieFixture.java" <<'EOF'
+package testcases;
+
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletResponse;
+
+class CookieFixture {
+    void safe(HttpServletResponse response) {
+        Cookie cookie = new Cookie("SessionToken", "x");
+        cookie.setSecure(true);
+        response.addCookie(cookie);
+    }
+}
+EOF
+safe_cookie_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-cookie-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$cookie_repo")"
+if printf '%s\n' "$safe_cookie_output" | grep -F '敏感 Cookie 未设置 Secure' >/dev/null; then
+  echo 'Secure cookie was incorrectly reported as missing Secure' >&2
+  printf '%s\n' "$safe_cookie_output" >&2
+  exit 1
+fi
+
 echo 'Java external security preflight passed'

@@ -1152,3 +1152,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 - 反向 `ReentrantLock` 顺序的最小样本由私有 few-shot 命中 P2，要求同时展示两条可达路径和同一共享状态，避免把单锁或不同资源误报为死锁。
 
 这些结果只证明外部 smoke 的运行器稳定性和当前窄规则覆盖，不改写严格 Platform scorecard；当前 scorecard 仍为 11 个 gold P0/P1、命中 5 个、召回 45.5%、输出完整 14/14、重复稳定 14/14。后续补盲仍需从未参与规则设计的真实 Java/JS/SQL/config 根因中建立独立 holdout，并分别记录模型原生结果与确定性预检结果。
+
+同轮复测把 `CWE327`、`CWE598` 和 `CWE614` 的真实 Juliet Java 形态接入回归：弱加密算法、Java 字符串中转义引号包裹的 GET 密码表单，以及敏感 Cookie 未设置 `Secure` 均能被确定性预检准确定位；现代 AES、POST 表单和显式 `setSecure(true)` 对照保持 clean。这里专门保留了 Java 字符串转义边界，避免只在人工简化夹具中通过。`CWE400` 资源耗尽和 `CWE835` 无限循环仍需要方法级控制流/数据流分析，当前不以正则预检代替模型或人工复核。该轮仍不改写严格 scorecard，确定性命中只作为 tuning-source 和后续回归保护。
