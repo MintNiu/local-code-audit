@@ -16,6 +16,7 @@ from pathlib import Path
 
 ALLOWED_SPLITS = {"external-smoke", "train", "dev", "holdout"}
 ALLOWED_LABELS = {"positive", "clean"}
+ALLOWED_TASKS = {"review-comment", "audit-finding"}
 REQUIRED = {
     "id",
     "source",
@@ -25,6 +26,7 @@ REQUIRED = {
     "language",
     "label",
     "root_causes",
+    "task",
 }
 
 
@@ -92,6 +94,10 @@ def validate(path: Path) -> tuple[list[str], Counter[str], Counter[str]]:
         if label not in ALLOWED_LABELS:
             fail(errors, line_no, f"label must be one of {sorted(ALLOWED_LABELS)}")
 
+        task = row["task"]
+        if task not in ALLOWED_TASKS:
+            fail(errors, line_no, f"task must be one of {sorted(ALLOWED_TASKS)}")
+
         root_causes = row["root_causes"]
         if not isinstance(root_causes, list) or any(
             not isinstance(item, str) or not item.strip() for item in root_causes
@@ -103,7 +109,7 @@ def validate(path: Path) -> tuple[list[str], Counter[str], Counter[str]]:
         findings = row.get("findings", [])
         if not isinstance(findings, list):
             fail(errors, line_no, "findings must be a list when present")
-        elif label == "positive" and not findings:
+        elif task == "audit-finding" and label == "positive" and not findings:
             fail(errors, line_no, "positive record must include findings")
         for finding in findings:
             if not isinstance(finding, dict):
@@ -116,6 +122,10 @@ def validate(path: Path) -> tuple[list[str], Counter[str], Counter[str]]:
                 not isinstance(finding["line"], int) or finding["line"] < 1
             ):
                 fail(errors, line_no, "finding line must be a positive integer")
+        if task == "review-comment":
+            comment = row.get("reviewer_comment")
+            if not isinstance(comment, str) or not comment.strip():
+                fail(errors, line_no, "review-comment record must include reviewer_comment")
 
         repository = row["repository"]
         commit = row.get("commit", "")

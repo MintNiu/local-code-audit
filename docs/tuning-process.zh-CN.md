@@ -35,6 +35,8 @@
 
 提示词和评测标签分为两层：跨语言通用根因（认证授权、租户边界、凭据、输入校验、并发、资源耗尽、兼容性和数据迁移）统一复用；Spring Security、MyBatis、Vue 权限、SQL 方言等框架规则按语言/框架路由。训练或 few-shot 采样必须按仓库和根因切分，避免同一漏洞的不同语言改写同时出现在训练与 holdout，防止把“全能”误判为记忆。
 
+本轮已从 CodeReviewBench 的 `comment-generation/test` 公共接口抽取 195 条私有 smoke 样本，并通过 `scripts/validate-external-dataset.py` 校验。实际分布为 Java 78、JavaScript/TypeScript 45、Python 20、SQL 2，另含少量 C++、Swift 和 Shell。该数据集的字段是人工审查评论，不含我们要求的 P0/P1 结构化证据，因此只用于语言覆盖、评论质量和提示词格式实验，不进入严格召回分母；Java 安全根因仍需由 Juliet/OWASP 和 Platform 真实提交补充。
+
 本阶段严格 scorecard 仍为 `gold_p0_p1=11`、`p0_p1_found=5`、严格召回 `45.5%`；输出完整、重复稳定和已命中问题的定位准确率保持 `14/14`、`14/14`、`5/5`。因此提速后的结论是“单位时间更聚焦”，不是模型能力已达到生产级高可用；后续仍需补充独立 P0/P1 holdout，并优先静态审计排名靠前的真实权限/跨服务候选。
 
 ### 2026-10-04：发布服务外部票据令牌预检
