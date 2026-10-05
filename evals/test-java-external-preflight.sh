@@ -496,4 +496,60 @@ if printf '%s\n' "$safe_session_output" | grep -F '会话被设置为永不过�
   exit 1
 fi
 
+shutdown_repo="$fixture_root/shutdown-repo"
+git -C "$fixture_root" init -q shutdown-repo
+git -C "$shutdown_repo" config user.email test@example.invalid
+git -C "$shutdown_repo" config user.name java-resource-shutdown-preflight
+git -C "$shutdown_repo" commit --allow-empty -qm 基线
+mkdir -p "$shutdown_repo/src/main/java/testcases"
+cat >"$shutdown_repo/src/main/java/testcases/ShutdownFixture.java" <<'EOF'
+package testcases;
+
+import java.io.FileReader;
+
+class ShutdownFixture {
+    void bad() throws Exception {
+        FileReader reader = new FileReader("input.txt");
+        reader.read();
+        reader.close();
+    }
+}
+EOF
+shutdown_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-shutdown" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$shutdown_repo")"
+printf '%s\n' "$shutdown_output" | grep -F '文件资源仅在成功路径关闭' >/dev/null
+
+rm "$shutdown_repo/src/main/java/testcases/ShutdownFixture.java"
+cat >"$shutdown_repo/src/main/java/testcases/ShutdownFixture.java" <<'EOF'
+package testcases;
+
+import java.io.FileReader;
+
+class ShutdownFixture {
+    void safe() throws Exception {
+        FileReader reader = new FileReader("input.txt");
+        try {
+            reader.read();
+        } finally {
+            reader.close();
+        }
+    }
+}
+EOF
+safe_shutdown_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-shutdown-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$shutdown_repo")"
+if printf '%s\n' "$safe_shutdown_output" | grep -F '文件资源仅在成功路径关闭' >/dev/null; then
+  echo 'finally-protected resource was incorrectly reported as leaked' >&2
+  printf '%s\n' "$safe_shutdown_output" >&2
+  exit 1
+fi
+
 echo 'Java external security preflight passed'

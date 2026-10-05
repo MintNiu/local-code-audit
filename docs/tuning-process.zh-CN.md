@@ -1160,3 +1160,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 继续对 `CWE613` 做单样本基线时，模型返回 clean；运行器新增更窄的会话生命周期预检，仅在变更行直接调用 `HttpSession.setMaxInactiveInterval(-1)` 且同一源码窗口可见 `getSession`/`HttpSession` 时报告 P1。有限的 `setMaxInactiveInterval(1800)` 对照保持 clean，避免把普通会话超时配置或仅缺少绝对超时的泛化建议升级为漏洞。该确定性命中仍只作为外部 tuning-source，不回填严格模型召回率。
 
 同轮对 `CWE321` 做了数据流收窄：模型单独请求返回 clean，但新增预检只接受当前变更中的非空字符串字面量赋值，并要求同一方法后续把该变量传入 `SecretKeySpec`；空初始化、`readLine()`、环境/密钥注入和普通明文变量保持 clean。真实 Juliet 样本定位到硬编码赋值行 `:37`，不复述密钥内容，也不把任意长字符串误报为密钥。
+
+随后复测 `CWE404` 文件资源关闭样本，模型仍未稳定报告 bad 路径；新增规则只在同一方法窗口同时看到 `FileReader`/输入流打开、`close()`，且在关闭前没有 `finally` 或 try-with-resources 时报告 P1。带 `finally` 的对照保持 clean；普通 `close()`、资源未在当前差异中打开或不同方法的关闭调用不触发。真实 Juliet bad 路径的两个关闭点均可定位，但不复述外部文件路径。

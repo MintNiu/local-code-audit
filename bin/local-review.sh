@@ -5879,6 +5879,66 @@ collect_java_session_expiration_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_resource_shutdown_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="$3"
+  local candidates candidate_path candidate_line source_file
+
+  candidates="$(mktemp "/tmp/local-review-java-resource-shutdown-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+          text ~ /[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\.[[:space:]]*close[[:space:]]*\([[:space:]]*\)/) {
+        print path "\t" line_no
+      }
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target="$candidate_line" '
+      { lines[NR] = $0 }
+      END {
+        start = target - 70
+        if (start < 1) start = 1
+        resource_open = 0
+        safe_scope = 0
+        for (i = start; i <= target; i++) {
+          context = lines[i]
+          sub(/\/\/.*$/, "", context)
+          if (context ~ /^[[:space:]]*(public|private|protected|static)[^;]*\(/ ||
+              context ~ /^[[:space:]]*[A-Za-z_$][A-Za-z0-9_$<>,.?]*[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*\{/) {
+            resource_open = 0
+            safe_scope = 0
+          }
+          if (context ~ /try[[:space:]]*\(/ ||
+              context ~ /new[[:space:]]+(FileReader|FileInputStream|BufferedReader|InputStreamReader)[[:space:]]*\(/) resource_open = 1
+          if (context ~ /finally[[:space:]]*\{?/) safe_scope = 1
+        }
+        exit (resource_open && !safe_scope) ? 0 : 1
+      }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 文件资源仅在成功路径关闭，异常路径缺少 finally 或 try-with-resources。" \
+      '影响：打开文件后发生读取、解析或业务异常时，资源可能保持打开并逐步耗尽文件描述符、句柄或线程资源。' \
+      '修复建议：使用 try-with-resources，或把所有资源关闭放入 finally，并保留关闭异常的可观测性。' \
+      '验证方式：在打开、读取和关闭前分别注入异常，检查资源最终关闭；通过句柄/文件描述符监控确认重复请求不会泄漏。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_cors_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -12066,6 +12126,7 @@ collect_java_hardcoded_crypto_key_preflight "$chunk_input_file" "$build_prefligh
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_session_expiration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_resource_shutdown_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_hr_default_password_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
