@@ -5754,6 +5754,63 @@ collect_java_external_control_flow_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_session_expiration_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-session-expiration-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+          text ~ /setMaxInactiveInterval[[:space:]]*\([[:space:]]*-1[[:space:]]*\)/) {
+        print path "\t" line_no
+      }
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target="$candidate_line" '
+      { lines[NR] = $0 }
+      END {
+        line = lines[target]
+        sub(/\/\/.*$/, "", line)
+        if (line ~ /^[[:space:]]*(\/\/|\/\*|\*)/ ||
+            line !~ /setMaxInactiveInterval[[:space:]]*\([[:space:]]*-1[[:space:]]*\)/) exit 1
+        start = target - 35
+        if (start < 1) start = 1
+        session_call = 0
+        for (i = start; i <= target; i++) {
+          context = lines[i]
+          sub(/\/\/.*$/, "", context)
+          if (context ~ /getSession[[:space:]]*\(/ ||
+              context ~ /HttpSession[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*/) session_call = 1
+        }
+        exit (session_call ? 0 : 1)
+      }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 会话被设置为永不过期，存在会话长期有效风险。" \
+      '影响：被盗或遗留的会话标识不会因空闲超时自动失效，攻击者可在更长时间窗口内重放会话访问受保护资源。' \
+      '修复建议：设置符合业务风险的有限空闲超时和绝对生命周期，并在登出、密码变更、权限变更和异常风险事件时主动失效会话。' \
+      '验证方式：使用空闲超时、绝对超时、登出、密码变更和会话重放测试确认会话在策略窗口后无法继续访问。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_cors_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11939,6 +11996,7 @@ collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$pr
 collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_session_expiration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_hr_default_password_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

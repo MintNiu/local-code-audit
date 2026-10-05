@@ -1156,3 +1156,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同轮复测把 `CWE327`、`CWE598` 和 `CWE614` 的真实 Juliet Java 形态接入回归：弱加密算法、Java 字符串中转义引号包裹的 GET 密码表单，以及敏感 Cookie 未设置 `Secure` 均能被确定性预检准确定位；现代 AES、POST 表单和显式 `setSecure(true)` 对照保持 clean。这里专门保留了 Java 字符串转义边界，避免只在人工简化夹具中通过。`CWE400` 资源耗尽和 `CWE835` 无限循环仍需要方法级控制流/数据流分析，当前不以正则预检代替模型或人工复核。该轮仍不改写严格 scorecard，确定性命中只作为 tuning-source 和后续回归保护。
 
 随后对 `CWE400` 与 `CWE835` 做了单样本复测：模型在混合/独立请求中仍有漏报或不稳定，因此只把证据足够窄的形态下沉为预检。`CWE400` 必须在同一 25 行窗口看到 `System.getenv`、`Integer/Long.parse*` 和未经过正数/上限比较的 `for` 上界，固定小循环与带 `count > 0 && count <= MAX` 的对照保持 clean；`CWE835` 必须同时看到 `do/while`、`(counter + 1) % N` 更新和无 `break`/`return`/`throw` 的局部窗口，带可达 `break` 的对照保持 clean。实际 Juliet 样本分别定位到 `:53` 和 `:22`；这些规则只覆盖已证明的模式，不把一般循环或“缺少超时”泛化为问题。
+
+继续对 `CWE613` 做单样本基线时，模型返回 clean；运行器新增更窄的会话生命周期预检，仅在变更行直接调用 `HttpSession.setMaxInactiveInterval(-1)` 且同一源码窗口可见 `getSession`/`HttpSession` 时报告 P1。有限的 `setMaxInactiveInterval(1800)` 对照保持 clean，避免把普通会话超时配置或仅缺少绝对超时的泛化建议升级为漏洞。该确定性命中仍只作为外部 tuning-source，不回填严格模型召回率。

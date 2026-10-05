@@ -392,4 +392,57 @@ if printf '%s\n' "$safe_infinite_output" | grep -F '循环条件可由当前计�
   exit 1
 fi
 
+session_repo="$fixture_root/session-repo"
+git -C "$fixture_root" init -q session-repo
+git -C "$session_repo" config user.email test@example.invalid
+git -C "$session_repo" config user.name java-session-expiration-preflight
+git -C "$session_repo" commit --allow-empty -qm 基线
+mkdir -p "$session_repo/src/main/java/testcases"
+cat >"$session_repo/src/main/java/testcases/SessionFixture.java" <<'EOF'
+package testcases;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpSession;
+
+class SessionFixture {
+    void bad(HttpServletRequest request) {
+        HttpSession session = request.getSession(true);
+        session.setMaxInactiveInterval(-1);
+    }
+}
+EOF
+session_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-session" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$session_repo")"
+printf '%s\n' "$session_output" | grep -F '会话被设置为永不过期' >/dev/null
+
+rm "$session_repo/src/main/java/testcases/SessionFixture.java"
+cat >"$session_repo/src/main/java/testcases/SessionFixture.java" <<'EOF'
+package testcases;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpSession;
+
+class SessionFixture {
+    void safe(HttpServletRequest request) {
+        HttpSession session = request.getSession(true);
+        session.setMaxInactiveInterval(1800);
+    }
+}
+EOF
+safe_session_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-session-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$session_repo")"
+if printf '%s\n' "$safe_session_output" | grep -F '会话被设置为永不过期' >/dev/null; then
+  echo 'finite session timeout was incorrectly reported as never-expiring' >&2
+  printf '%s\n' "$safe_session_output" >&2
+  exit 1
+fi
+
 echo 'Java external security preflight passed'
