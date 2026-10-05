@@ -25,6 +25,7 @@ jobs:
       - name: Run deterministic regression suites
         run: |
           ./evals/test-preflight.sh
+          ./evals/test-java-external-preflight.sh
           ./evals/test-url-prefix-dedup.sh
           ./evals/test-mybatis-dedup.sh
           ./evals/test-path-dedup.sh

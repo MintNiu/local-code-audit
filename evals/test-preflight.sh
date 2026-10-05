@@ -2562,6 +2562,44 @@ generic_credential_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral
   exit 1
 }
 
+# Paths from external security suites often contain words such as Password or
+# Token plus digits. Redaction must protect the credential value without
+# destroying the location needed by the output gate.
+cat >"$repo/src/main/java/com/example/api/client/CWE259_Hard_Coded_Password_01.java" <<'EOF'
+package com.example.api.client;
+
+final class CWE259_Hard_Coded_Password_01 {
+    String value() {
+        return "base";
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/CWE259_Hard_Coded_Password_01.java
+git -C "$repo" commit -qm cwe-path-base
+perl -0pi -e 's/return "base";/return "changed";/' \
+  "$repo/src/main/java/com/example/api/client/CWE259_Hard_Coded_Password_01.java"
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"response":"P1 src/main/java/com/example/api/client/CWE259_Hard_Coded_Password_01.java:5 - 字面量密码 \\\"Qz9alpha0123456789BetaGamma\\\"\\n影响：凭据可能泄露。\\n修复建议：轮换凭据。\\n验证方式：确认输出位置与源码一致。","done":true,"done_reason":"stop"}\n'
+EOF
+chmod +x "$fake_bin/curl"
+path_preserved_output="$(PATH="$fake_bin:$PATH" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo")"
+[[ "$path_preserved_output" == *'CWE259_Hard_Coded_Password_01.java:5'* ]] || {
+  echo 'security-suite path was redacted from a finding location' >&2
+  printf '%s\n' "$path_preserved_output" >&2
+  exit 1
+}
+[[ "$path_preserved_output" == *'字面量密码 "<REDACTED>"'* ]] || {
+  echo 'credential value in a security-suite path finding was not redacted' >&2
+  printf '%s\n' "$path_preserved_output" >&2
+  exit 1
+}
+[[ "$path_preserved_output" != *'Qz9alpha0123456789BetaGamma'* ]] || {
+  echo 'raw credential leaked beside a security-suite path' >&2
+  exit 1
+}
+
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '{"response":"P1 src/main/java/com/example/api/client/Consumer.java:5 - \\u001b[31mANSI marker\\u001b[0m remains visible\\n影响：示例影响。\\n修复建议：示例修复。\\n验证方式：示例验证。","done":true,"done_reason":"stop"}\n'

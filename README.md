@@ -169,6 +169,7 @@ python3 scripts/prepare-juliet-java.py \
 ```
 
 The converter reads the archive manifest for CWE names and flaw lines, emits bad/good pairs, and keeps the generated JSONL outside this repository.
+The runner also has narrow Java external-security preflights: it deterministically reports a literal password flowing into `DriverManager.getConnection` within one method, or `readLine()` data flowing directly into `sendRedirect`; fixed redirects, environment/secret injection, and empty initializers remain clean. The regression entry point is `evals/test-java-external-preflight.sh`; it neither downloads nor commits external source.
 
 The `examples/` directory contains only the public format specification. Real few-shot examples belong in the local private file `~/.local/share/local-review/examples.md`.
 

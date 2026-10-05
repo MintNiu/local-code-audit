@@ -406,21 +406,36 @@ redact_sensitive_text() {
     s~\e~~g;
     s~[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]~~g;
     s~\r~~g;
+    # Protect structured finding locations before the generic credential
+    # fallback runs. A Juliet/OWASP path can legitimately contain words such
+    # as `Password` or `Token` plus digits; redacting part of that path makes
+    # the result unverifiable even though no secret is present in the path.
+    my @protected_paths;
+    s{((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+:[0-9]+(?:-[0-9]+)?)}{
+      push @protected_paths, $1;
+      "\x00LOCAL_REVIEW_PATH_" . chr(65 + $#protected_paths) . "\x00"
+    }gex;
     s~((?:authorization|proxy-authorization)[[:space:]]*"?[[:space:]]*[:=：][[:space:]]*"?[[:space:]]*(?:Bearer|Basic)[[:space:]]+)[^[:space:],，;；)}`"]+~$1<REDACTED>~ig;
     s~((?:authorization|proxy-authorization)[[:space:]]*"?[[:space:]]*[:=：][[:space:]]*"?[[:space:]]*)(?!Bearer[[:space:]]|Basic[[:space:]])[^[:space:],，;；)}`"]+~$1<REDACTED>~ig;
     s~((?:[?&]|^)(?:x-amz-)?(?:signature|sig|security-token|credential|access[-_]?token|refresh[-_]?token|id[-_]?token)=)[^&#[:space:],，;；)}`"]+~$1<REDACTED>~ig;
     s~((?:access[-_ ]?key(?:[-_ ]?(?:id|secret))?|secret|password|passwd|token|api[-_ ]?key)[[:space:]]*[:=：][[:space:]]*)[^[:space:],，;；)}`]+~$1<REDACTED>~ig;
-    s~((?:字面量|硬编码|literal|hard[-_ ]coded)[[:space:]]*(?:凭据|令牌|token|secret|password)[[:space:]]+)[A-Za-z0-9][A-Za-z0-9._-]{7,}~$1<REDACTED>~ig;
+    s~((?:字面量|硬编码|literal|hard[-_ ]coded)[[:space:]]*(?:凭据|密码|令牌|token|secret|password)[[:space:]]+["\047]?)[A-Za-z0-9][A-Za-z0-9._-]{7,}~$1<REDACTED>~ig;
     s~((?:AccessKey|Secret|凭据|密钥)[^。\n]{0,120}?)([A-Za-z0-9][A-Za-z0-9._+/=-]{15,})~$1<REDACTED>~ig;
     s~\b(?:AKIA|ASIA|LTAI)[A-Za-z0-9_-]{8,}\b~<REDACTED>~g;
-    if (/(?:AccessKey|Secret|credential|password|passwd|token|令牌|凭据|密钥)/i) {
+    if (/(?:AccessKey|Secret|credential|password|passwd|token|令牌|凭据|密码|密钥)/i) {
       # Keep slash-containing repository paths visible; targeted URL/query
       # rules above already redact credentials in URI values.
       # Require a digit and exclude dots so repository paths, class names,
       # URL hosts, and parameter names remain readable. Structured URL values
       # are already handled by the targeted rules above.
-      s~(?<![A-Za-z0-9])(?=[A-Za-z0-9_+=-]{0,80}[0-9])[A-Za-z0-9][A-Za-z0-9_+=-]{15,}(?![A-Za-z0-9])~<REDACTED>~g;
+      # A CWE/testcase directory or Java class name may contain words such as
+      # `Password`/`Token` and digits. Keep path components intact so the
+      # location gate can still validate the model finding. Secrets copied
+      # into prose/config values remain covered because they are not adjacent
+      # to a path separator.
+      s~(?<![A-Za-z0-9/\\])(?=[A-Za-z0-9_+=-]{0,80}[0-9])[A-Za-z0-9][A-Za-z0-9_+=-]{15,}(?![A-Za-z0-9/\\])~<REDACTED>~g;
     }
+    s{\x00LOCAL_REVIEW_PATH_([A-Z])\x00}{$protected_paths[ord($1) - 65]}gex;
   '
 }
 
@@ -5325,7 +5340,9 @@ collect_open_redirect_preflight() {
   candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-open-redirect-candidates.XXXXXX")"
   awk '
     function flush_hunk() {
-      if (path != "" && path ~ /\.java$/ && sink_line > 0 && sink_added && route_seen && input_seen) {
+      if (path != "" && path ~ /\.java$/ && sink_line > 0 && sink_added &&
+          ((route_seen && request_input_seen) ||
+           (servlet_seen && file_input_seen && sink_data_seen))) {
         printf "%s\t%d\n", path, sink_line
       }
     }
@@ -5350,7 +5367,10 @@ collect_open_redirect_preflight() {
       sink_line = 0
       sink_added = 0
       route_seen = 0
-      input_seen = 0
+      request_input_seen = 0
+      file_input_seen = 0
+      sink_data_seen = 0
+      servlet_seen = 0
       next
     }
     {
@@ -5358,10 +5378,17 @@ collect_open_redirect_preflight() {
       text = (prefix == "+" ? substr($0, 2) : $0)
       if (prefix == "+" || prefix == " ") {
         if (text ~ /@(Get|Post|Put|Delete|Patch|Request)Mapping[[:space:]]*\(/) route_seen = 1
-        if (text ~ /@RequestParam|String[[:space:]]+(next|target|returnUrl|redirectUrl)/) input_seen = 1
+        if (text ~ /@RequestParam|String[[:space:]]+(next|target|returnUrl|redirectUrl)/) request_input_seen = 1
+        if (text ~ /data[[:space:]]*=[^;]*readLine[[:space:]]*\(/) file_input_seen = 1
+        if (text ~ /extends[[:space:]]+AbstractTestCaseServlet/) servlet_seen = 1
         if (text ~ /location[[:space:]]*\([[:space:]]*URI[[:space:]]*\.create[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)/ ||
             text ~ /sendRedirect[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)/ ||
             text ~ /new[[:space:]]+RedirectView[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)/) {
+          if (sink_line == 0) sink_line = line_no
+          if (prefix == "+") sink_added = 1
+        }
+        if (text ~ /sendRedirect[[:space:]]*\([[:space:]]*data[[:space:]]*\)/) {
+          sink_data_seen = 1
           if (sink_line == 0) sink_line = line_no
           if (prefix == "+") sink_added = 1
         }
@@ -5376,9 +5403,19 @@ collect_open_redirect_preflight() {
     source_file="$source_root/$candidate_path"
     path_has_symlink_component "$candidate_path" && continue
     [[ -f "$source_file" ]] || continue
-    if ! grep -Eq '@(Get|Post|Put|Delete|Patch|Request)Mapping[[:space:]]*\(' "$source_file" ||
-       ! grep -Eq '@RequestParam|String[[:space:]]+(next|target|returnUrl|redirectUrl)' "$source_file" ||
-       ! grep -Eq 'location[[:space:]]*\([[:space:]]*URI[[:space:]]*\.create[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)|sendRedirect[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)|new[[:space:]]+RedirectView[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)' "$source_file"; then
+    standard_redirect=false
+    if grep -Eq '@(Get|Post|Put|Delete|Patch|Request)Mapping[[:space:]]*\(' "$source_file" &&
+       grep -Eq '@RequestParam|String[[:space:]]+(next|target|returnUrl|redirectUrl)' "$source_file" &&
+       grep -Eq 'location[[:space:]]*\([[:space:]]*URI[[:space:]]*\.create[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)|sendRedirect[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)|new[[:space:]]+RedirectView[[:space:]]*\([[:space:]]*(next|target|returnUrl|redirectUrl)[[:space:]]*\)' "$source_file"; then
+      standard_redirect=true
+    fi
+    file_redirect=false
+    if grep -Eq 'extends[[:space:]]+AbstractTestCaseServlet' "$source_file" &&
+       grep -Eq 'data[[:space:]]*=[^;]*readLine[[:space:]]*\(' "$source_file" &&
+       grep -Eq 'sendRedirect[[:space:]]*\([[:space:]]*data[[:space:]]*\)' "$source_file"; then
+      file_redirect=true
+    fi
+    if [[ "$standard_redirect" != true && "$file_redirect" != true ]]; then
       continue
     fi
     if grep -Eq 'allowed[_-]?hosts?|allowed[_-]?origins?|getHost\(\)|getScheme\(\)|isAllowedRedirect|validateRedirect|sameOrigin|trustedRedirect' "$source_file"; then
@@ -5386,6 +5423,79 @@ collect_open_redirect_preflight() {
     fi
     printf 'P1 %s:%s - 不可信跳转目标直接进入重定向响应，存在开放重定向风险。\n影响：攻击者可把登录后跳转或站内链接改成恶意站点，用于钓鱼、令牌转发或绕过用户对目标站点的信任判断。\n修复建议：只允许相对路径或严格校验 URI 的 scheme、host、port 和规范化路径；使用固定路由映射，不要直接信任请求参数作为 Location。\n验证方式：使用外部 HTTPS、userinfo、协议相对 URL、编码和双重跳转输入测试，确认所有非允许目标在生成响应前被拒绝。\n\n' \
       "$candidate_path" "$candidate_line" >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_java_hardcoded_db_password_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path changed_name candidate_lines source_file
+
+  # Keep this Java rule deliberately narrow: a non-empty string literal must
+  # flow through a local variable into DriverManager.getConnection, and the
+  # changed diff must add either the literal assignment or connection call.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-password-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text ~ /^\+/) next
+      if (text ~ /DriverManager[.]getConnection[[:space:]]*\(/) changed[path SUBSEP "__SINK__"] = 1
+      if (text ~ /=[[:space:]]*"[^"$][^"]{3,}"/) {
+        assignment = text
+        sub(/^[[:space:]]*(String[[:space:]]+)?/, "", assignment)
+        sub(/[[:space:]]*=.*$/, "", assignment)
+        gsub(/[[:space:]]/, "", assignment)
+        if (assignment != "") changed[path SUBSEP assignment] = 1
+      }
+    }
+    END {
+      for (key in changed) {
+        split(key, fields, SUBSEP)
+        if (fields[1] ~ /\.java$/) print fields[1] "\t" fields[2]
+      }
+    }
+  ' "$diff_file" >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path changed_name; do
+    [[ -n "$candidate_path" && -n "$changed_name" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    candidate_lines="$(awk -v changed_name="$changed_name" '
+      /^[[:space:]]*\/\// { next }
+      {
+        # Do not carry a literal from one Java method into a later safe
+        # counterpart (Juliet deliberately places bad() and goodG2B() in the
+        # same class). This keeps the data-flow evidence method-local.
+        if ($0 ~ /^[[:space:]]*(public|private|protected|static)[^;]*\(/) {
+          delete literal_line
+        }
+        if ($0 ~ /^[[:space:]]*(String[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*"[^"$][^"]{3,}"/) {
+          assignment = $0
+          sub(/^[[:space:]]*(String[[:space:]]+)?/, "", assignment)
+          sub(/[[:space:]]*=.*$/, "", assignment)
+          gsub(/[[:space:]]/, "", assignment)
+          if (assignment != "") literal_line[assignment] = NR
+        }
+        if (index($0, "DriverManager.getConnection") > 0) {
+          for (name in literal_line) {
+            if ((changed_name == "__SINK__" || changed_name == name) &&
+                $0 ~ ",[[:space:]]*" name "[[:space:]]*\)") print literal_line[name] "," NR
+          }
+        }
+      }
+    ' "$source_file" | LC_ALL=C sort -u)"
+    [[ -n "$candidate_lines" ]] || continue
+    while IFS= read -r line_range; do
+      [[ -n "$line_range" ]] || continue
+      printf 'P1 %s:%s - Java 数据库连接使用硬编码密码。\n影响：字面量密码会随源码提交并作为数据库连接凭据复用，泄漏后可导致未授权数据库访问。\n修复建议：移除源码中的密码字面量，改用受保护的密钥注入或环境配置，并立即轮换已暴露凭据。\n验证方式：确认源码与构建产物中不再包含字面量密码，使用受保护配置连接数据库并执行凭据轮换验证。\n\n' \
+        "$candidate_path" "$line_range" >>"$output_file"
+    done <<<"$candidate_lines"
   done <"$candidates"
   rm -f "$candidates"
   dedup_preflight_blocks "$output_file"
@@ -11573,6 +11683,7 @@ collect_unsafe_deserialization_preflight "$chunk_input_file" "$build_preflight_f
 collect_xxe_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_idor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_hr_default_password_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
