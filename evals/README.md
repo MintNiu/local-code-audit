@@ -79,6 +79,8 @@ python3 ./scripts/validate-independent-scorecard.py \
 
 如果候选池还没有整理，可以先从多个本地仓库自动发现直接父提交。发现器只读取 `git log`，跳过 root/merge commit，自动填写真实 parent、提交主题和待人工状态；它不推断严重度，也不替代后续人工去重。`--exclude` 可重复传入评分卡和候选评审表，按 `repo + commit` 合并排除已处理提交，避免手工拼接不同来源的 TSV：
 
+排除表中的 `commit` 可以是完整 SHA，也可以是至少 7 位的短 SHA 前缀；发现器会在同一仓库内按前缀匹配 `git log` 输出的完整 SHA。仓库名仍必须完全匹配，避免不同仓库恰好使用相同前缀时误排除。
+
 ```bash
 python3 ./scripts/discover-candidates.py \
   --workspace-root /Users/mintniu/Documents/04workspaces/Platform \

@@ -63,6 +63,23 @@ def read_excluded(paths: list[Path]) -> set[tuple[str, str]]:
     return excluded
 
 
+def is_excluded(repo: str, commit: str, excluded: set[tuple[str, str]]) -> bool:
+    """Match full discovery SHAs against exact or short excluded refs.
+
+    Scorecards and review tables may retain a 7-40 character Git prefix.  A
+    discovered commit is always a full SHA, so a prefix match is equivalent to
+    the exact commit while still keeping repositories isolated.
+    """
+    normalized_repo = repo.strip().lower()
+    normalized_commit = commit.strip().lower()
+    return any(
+        excluded_commit == normalized_commit
+        or normalized_commit.startswith(excluded_commit)
+        for excluded_repo, excluded_commit in excluded
+        if excluded_repo == normalized_repo
+    )
+
+
 def discover_repo(repo: Path, since: str, excluded: set[tuple[str, str]]) -> list[dict[str, str]]:
     if repo.is_symlink() or not repo.is_dir() or not (repo / ".git").exists():
         fail(f"仓库目录不存在、是符号链接或不是 Git 工作树: {repo}")
@@ -86,7 +103,7 @@ def discover_repo(repo: Path, since: str, excluded: set[tuple[str, str]]) -> lis
             # Root and merge commits are intentionally outside the direct-parent
             # history evaluation contract.
             continue
-        if (name.lower(), commit.lower()) in excluded:
+        if is_excluded(name, commit, excluded):
             continue
         if any(any(ord(char) < 32 for char in value) for value in (name, subject)):
             fail(f"{name} {commit} 含不可安全写入 TSV 的控制字符")

@@ -26,7 +26,9 @@ EOF
 excluded_extra="$temp_root/excluded-extra.tsv"
 base_commit="$(git -C "$workspace/repo-a" rev-parse HEAD~1)"
 new_commit="$(git -C "$workspace/repo-a" rev-parse HEAD)"
-printf 'repo\tcommit\nrepo-a\t%s\n' "$base_commit" >"$excluded"
+# Exclusion sources may use a short Git prefix; discovery must still match the
+# full SHA emitted by `git log`.
+printf 'repo\tcommit\nrepo-a\t%s\n' "${base_commit:0:12}" >"$excluded"
 printf 'repo\tcommit\nrepo-a\t%s\n' "$new_commit" >"$excluded_extra"
 
 output="$temp_root/discovered.tsv"
