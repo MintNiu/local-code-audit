@@ -1158,3 +1158,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 随后对 `CWE400` 与 `CWE835` 做了单样本复测：模型在混合/独立请求中仍有漏报或不稳定，因此只把证据足够窄的形态下沉为预检。`CWE400` 必须在同一 25 行窗口看到 `System.getenv`、`Integer/Long.parse*` 和未经过正数/上限比较的 `for` 上界，固定小循环与带 `count > 0 && count <= MAX` 的对照保持 clean；`CWE835` 必须同时看到 `do/while`、`(counter + 1) % N` 更新和无 `break`/`return`/`throw` 的局部窗口，带可达 `break` 的对照保持 clean。实际 Juliet 样本分别定位到 `:53` 和 `:22`；这些规则只覆盖已证明的模式，不把一般循环或“缺少超时”泛化为问题。
 
 继续对 `CWE613` 做单样本基线时，模型返回 clean；运行器新增更窄的会话生命周期预检，仅在变更行直接调用 `HttpSession.setMaxInactiveInterval(-1)` 且同一源码窗口可见 `getSession`/`HttpSession` 时报告 P1。有限的 `setMaxInactiveInterval(1800)` 对照保持 clean，避免把普通会话超时配置或仅缺少绝对超时的泛化建议升级为漏洞。该确定性命中仍只作为外部 tuning-source，不回填严格模型召回率。
+
+同轮对 `CWE321` 做了数据流收窄：模型单独请求返回 clean，但新增预检只接受当前变更中的非空字符串字面量赋值，并要求同一方法后续把该变量传入 `SecretKeySpec`；空初始化、`readLine()`、环境/密钥注入和普通明文变量保持 clean。真实 Juliet 样本定位到硬编码赋值行 `:37`，不复述密钥内容，也不把任意长字符串误报为密钥。

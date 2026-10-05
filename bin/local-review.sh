@@ -5501,6 +5501,74 @@ collect_java_hardcoded_db_password_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_hardcoded_crypto_key_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="$3"
+  local candidates candidate_path candidate_line source_file
+
+  candidates="$(mktemp "/tmp/local-review-java-hardcoded-key-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+          text ~ /[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[[:space:]]*"[^"]{8,}"/) {
+        print path "\t" line_no
+      }
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target="$candidate_line" '
+      { lines[NR] = $0 }
+      END {
+        assignment = lines[target]
+        sub(/\/\/.*$/, "", assignment)
+        if (assignment ~ /^[[:space:]]*(\/\/|\/\*|\*)/ ||
+            assignment !~ /[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[[:space:]]*"[^"]{8,}"/) exit 1
+        sub(/^[[:space:]]*/, "", assignment)
+        sub(/[[:space:]]*=.*$/, "", assignment)
+        field_count = split(assignment, fields, /[[:space:]]+/)
+        variable = fields[field_count]
+        if (variable == "") exit 1
+        start = target - 35
+        if (start < 1) start = 1
+        finish = target + 35
+        key_sink = 0
+        for (i = start; i <= finish; i++) {
+          context = lines[i]
+          sub(/\/\/.*$/, "", context)
+          if (context ~ /^[[:space:]]*(public|private|protected|static)[^;]*\(/ ||
+              context ~ /^[[:space:]]*[A-Za-z_$][A-Za-z0-9_$<>,.?]*[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*\{/) {
+            if (i > target) break
+            key_sink = 0
+          }
+          if (i > target && context ~ /new[[:space:]]+SecretKeySpec[[:space:]]*\(/ &&
+              index(context, variable) > 0) key_sink = 1
+        }
+        exit (key_sink ? 0 : 1)
+      }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 加密密钥由源码中的非空字面量提供。" \
+      '影响：密钥会随源码、构建产物或代码仓库暴露，攻击者可复现加解密过程并解密历史或新数据。' \
+      '修复建议：移除密钥字面量，改用受保护的密钥注入、密钥管理服务或运行时轮换机制，并轮换已经暴露的密钥。' \
+      '验证方式：检查源码、构建产物和部署配置不再包含该密钥，使用密钥轮换后的加解密兼容测试验证旧密钥被拒绝。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_java_external_security_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -11994,6 +12062,7 @@ collect_xxe_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_so
 collect_idor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_hardcoded_crypto_key_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_session_expiration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

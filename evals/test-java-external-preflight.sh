@@ -125,6 +125,57 @@ if printf '%s\n' "$safe_password_output" | grep -F 'Java 数据库连接使用�
   exit 1
 fi
 
+key_repo="$fixture_root/key-repo"
+git -C "$fixture_root" init -q key-repo
+git -C "$key_repo" config user.email test@example.invalid
+git -C "$key_repo" config user.name java-hardcoded-key-preflight
+git -C "$key_repo" commit --allow-empty -qm 基线
+mkdir -p "$key_repo/src/main/java/testcases"
+cat >"$key_repo/src/main/java/testcases/HardcodedKeyFixture.java" <<'EOF'
+package testcases;
+
+import javax.crypto.spec.SecretKeySpec;
+
+class HardcodedKeyFixture {
+    void bad() {
+        String key = "0123456789abcdef";
+        SecretKeySpec spec = new SecretKeySpec(key.getBytes(), "AES");
+    }
+}
+EOF
+key_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-key" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$key_repo")"
+printf '%s\n' "$key_output" | grep -F '加密密钥由源码中的非空字面量提供' >/dev/null
+
+rm "$key_repo/src/main/java/testcases/HardcodedKeyFixture.java"
+cat >"$key_repo/src/main/java/testcases/HardcodedKeyFixture.java" <<'EOF'
+package testcases;
+
+import javax.crypto.spec.SecretKeySpec;
+
+class HardcodedKeyFixture {
+    void safe() {
+        String key = System.getenv("ENCRYPTION_KEY");
+        SecretKeySpec spec = new SecretKeySpec(key.getBytes(), "AES");
+    }
+}
+EOF
+safe_key_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-key-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$key_repo")"
+if printf '%s\n' "$safe_key_output" | grep -F '加密密钥由源码中的非空字面量提供' >/dev/null; then
+  echo 'environment-injected crypto key was incorrectly reported as hardcoded' >&2
+  printf '%s\n' "$safe_key_output" >&2
+  exit 1
+fi
+
 weak_repo="$fixture_root/weak-repo"
 git -C "$fixture_root" init -q weak-repo
 git -C "$weak_repo" config user.email test@example.invalid
