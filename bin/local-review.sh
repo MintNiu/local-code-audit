@@ -5892,8 +5892,10 @@ collect_java_resource_shutdown_preflight() {
     /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
     /^\+/ {
       text = substr($0, 2)
+      code = text
+      gsub(/"([^"\\]|\\.)*"/, "", code)
       if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
-          text ~ /[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\.[[:space:]]*close[[:space:]]*\([[:space:]]*\)/) {
+          code ~ /[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\.[[:space:]]*close[[:space:]]*\([[:space:]]*\)/) {
         print path "\t" line_no
       }
     }
