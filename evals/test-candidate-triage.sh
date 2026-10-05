@@ -10,6 +10,8 @@ repo	commit	parent	feature_cluster	candidate_reason	status
 platform-a	abcdef1234567	123456789abcd	new-root	new	pending-human-label
 platform-a	abcdef1234567	123456789abcd	new-root	duplicate	pending-human-label
 platform-a	abcdef1234568	123456789abc1	scored-root	already scored	pending-human-label
+platform-a	abcdef1234568	123456789abc1	unclassified-abcdef1234568	discovered already scored	pending-human-label
+platform-a	abcdef1234569	123456789abc2	unclassified-abcdef1234569	discovered already reviewed	pending-human-label
 platform-a	abcdef1234569	123456789abc2	clean-root	already classified	exclude-clean
 EOF
 cat >"$test_root/scorecard.tsv" <<'EOF'
@@ -19,6 +21,7 @@ EOF
 cat >"$test_root/review.tsv" <<'EOF'
 repo	commit	feature_cluster	decision	evidence_confidence	reason
 platform-a	abcdef1234567	new-root	exclude-clean	high	already reviewed
+platform-a	abcdef1234569	clean-root	exclude-clean	high	already reviewed
 EOF
 
 python3 "$repo_root/scripts/triage-candidates.py" \
@@ -28,7 +31,7 @@ python3 "$repo_root/scripts/triage-candidates.py" \
   --out "$test_root/selected.tsv" \
   2>"$test_root/stderr"
 
-grep -F $'candidate triage: selected=0 skipped-status=1 skipped-scorecard=1 skipped-review=1 skipped-duplicate=1' "$test_root/stderr" >/dev/null
+grep -F $'candidate triage: selected=0 skipped-status=1 skipped-scorecard=2 skipped-review=2 skipped-duplicate=1' "$test_root/stderr" >/dev/null
 [[ "$(wc -l <"$test_root/selected.tsv" | tr -d ' ')" == 1 ]]
 
 printf 'bad-header\n' >"$test_root/bad-candidates.tsv"

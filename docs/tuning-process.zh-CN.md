@@ -1055,6 +1055,8 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 
 同日把补样流程再压缩为“自动发现 → 人工根因去重 → 风险排序 → 少量双跑”：新增只读 `scripts/discover-candidates.py`，从多个本地仓库的 `git log` 生成真实 parent、主题和待人工状态，跳过 root/merge 提交并支持重复传入多个 `--exclude`，按 `repo + commit` 合并排除评分卡和候选评审表；`rank-candidates.py` 同时修复了已有 `commit_subject` 列时的重复表头。发现器、筛选器和排序器的串联回归通过，真实 Platform 工作区在 2026-09-25 之后得到 22 条候选且排序后仍为 22 条；这一步只减少人工抄录和无效模型调用，不改变“所有有效模型问题必须可见”的输出门禁。
 
+候选筛选器随后补上自动发现占位簇的去重边界：对 `unclassified-*` 行按 `repo + commit` 检查已评分/已评审集合，避免同一提交因 feature cluster 尚未人工归类而再次进入队列；已人工归类的具体簇仍按三元键保留，防止误删同一提交中的独立根因。正向、重复、已评分和已评审夹具均通过。
+
 ### 2026-10-04：补齐退货跨类 helper 反向锁序漏报并缩短复测时间
 
 对 `platform-erp-service:81ab687949019e9a84a78974d5d1578371433fe3` 的源码核对发现新 P1：退货提交在 `SalesReturnApplication.java:176` 先锁销售订单，再经 `validateLines`/`returnedQuantityByOutboundLineForUpdate` 在约 `:851` 锁退货申请；收货确认和退款确认则分别在 `SalesReturnInspectionApplication`、`SalesReturnRefundApplication` 先锁退货申请，随后在状态重算方法中锁销售订单，形成可并发的反向锁序。两轮个人 profile 原始模型结果均为 clean，但第一次默认 6000 字节分片在 10 个分片预算下超时，不能计入完整结果；将私有复测的 `OLLAMA_REVIEW_MAX_DIFF_BYTES` 提高到 12000 后，两轮各 1 个分片、`exit=0`、结果哈希和 finding signature 一致，确认是稳定模型漏报而非随机失败。

@@ -117,6 +117,13 @@ def main() -> int:
 
     scored_keys = {key(row) for row in scored}
     reviewed_keys = {key(row) for row in reviewed}
+    # Discovery rows do not know the eventual feature cluster and therefore
+    # use an `unclassified-*` placeholder. If that same commit is already in
+    # either source, discard the placeholder; manually clustered rows remain
+    # keyed by repo+commit+feature_cluster so one commit can still contribute
+    # multiple independently reviewed roots.
+    scored_commits = {(row["repo"].strip().lower(), row["commit"].strip().lower()) for row in scored}
+    reviewed_commits = {(row["repo"].strip().lower(), row["commit"].strip().lower()) for row in reviewed}
     selected: list[dict[str, str]] = []
     seen_pending: set[tuple[str, str, str]] = set()
     skipped_status = 0
@@ -139,6 +146,14 @@ def main() -> int:
         if candidate_key in scored_keys:
             skipped_scored += 1
             continue
+        if row["feature_cluster"].strip().lower().startswith("unclassified-"):
+            commit_key = (row["repo"].strip().lower(), row["commit"].strip().lower())
+            if commit_key in reviewed_commits:
+                skipped_review += 1
+                continue
+            if commit_key in scored_commits:
+                skipped_scored += 1
+                continue
         selected.append(row)
 
     destination = args.out
