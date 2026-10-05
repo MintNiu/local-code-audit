@@ -2,6 +2,14 @@
 
 本文记录 `devstral-small-2-review-tuned` 从可运行基线到当前版本的完整调优过程、遇到的问题、修复方式和仍然存在的限制。
 
+### 2026-10-05～06：历史候选静态分流与评测提速
+
+为减少重复模型双跑，候选发现器现在支持多个 `--exclude` 来源，并在同一仓库内同时匹配完整 SHA 和至少 7 位的短 SHA 前缀；公开回归覆盖了“排除表写短 SHA、Git 日志输出完整 SHA”的路径。该修复已提交为 `3d591fd` 并推送到公开仓库。
+
+随后回溯 2026-08-01 以来 26 个 Platform 仓库的直接父提交，得到 636 条历史候选。排序仍保留全部候选，不静默删除；先对权限、租户、内部服务边界、生命周期和 SQL 兼容性做只读静态审计，再把确认有新独立 P0/P1 根因的少量提交送入 Ollama 双跑。当前私有分流已记录 11 条排除/同族结论，覆盖 HR 账号与生命周期、DAC-HR 停用人员语义、workflow 租户 collation、gateway publishing 路由和已知 Nacos 默认凭据族；这些结论只减少重复评测，不改变模型输出完整呈现规则。
+
+本阶段严格 scorecard 仍为 `gold_p0_p1=11`、`p0_p1_found=5`、严格召回 `45.5%`；输出完整、重复稳定和已命中问题的定位准确率保持 `14/14`、`14/14`、`5/5`。因此提速后的结论是“单位时间更聚焦”，不是模型能力已达到生产级高可用；后续仍需补充独立 P0/P1 holdout，并优先静态审计排名靠前的真实权限/跨服务候选。
+
 ### 2026-10-04：发布服务外部票据令牌预检
 
 新增 `collect_publishing_external_ticket_token_preflight`：仅当 `PlatformFileWorkspaceClient` 的差异新增 `X-Gateway-Token`，且当前 `resolveTicketUri` 接受未做主机 allowlist 的绝对 HTTPS 地址时报告 P1；带主机校验的负例保持 clean。正负 fixture 与完整 `test-preflight.sh` 已通过。真实 `platform-publishing-service:0ae0ffb` 首轮 16 个分片完整结束并返回 clean，确认该根因是模型漏报；该提交参与规则设计，结果只作为 tuning-source 回归，不计入独立 holdout。后续优先使用窄化差异和确定性规则验证，减少重复跑完整长提交。
