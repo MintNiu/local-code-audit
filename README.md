@@ -159,6 +159,17 @@ python3 scripts/validate-external-dataset.py /path/to/private/review-dataset.jso
 
 The validator checks source/license metadata, positive finding completeness, changed-file line locations, and repository/commit leakage across `train`, `dev`, and `holdout`. It never downloads data or prints source snippets.
 
+For a locally downloaded NIST Juliet Java archive, extract a small private audit smoke set (the archive itself is not committed):
+
+```bash
+python3 scripts/prepare-juliet-java.py \
+  /private/path/juliet-java-v1.3.zip \
+  /private/path/juliet-java-audit-smoke.jsonl \
+  --limit-per-cwe 2
+```
+
+The converter reads the archive manifest for CWE names and flaw lines, emits bad/good pairs, and keeps the generated JSONL outside this repository.
+
 The `examples/` directory contains only the public format specification. Real few-shot examples belong in the local private file `~/.local/share/local-review/examples.md`.
 
 The tuning history and known failure modes are documented in [docs/tuning-process.zh-CN.md](docs/tuning-process.zh-CN.md).

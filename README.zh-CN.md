@@ -129,6 +129,17 @@ python3 scripts/validate-external-dataset.py /path/to/private/review-dataset.jso
 ```
 
 校验器会检查来源/许可信息、正例问题完整性、文件行号，以及 `train`、`dev`、`holdout` 之间的仓库/提交泄漏；它不会自动下载数据，也不会输出源码片段。
+
+对于本机已下载的 NIST Juliet Java 压缩包，可以生成私有 Java 审计 smoke 集（压缩包和生成的源码 JSONL 都不提交）：
+
+```bash
+python3 scripts/prepare-juliet-java.py \
+  /private/path/juliet-java-v1.3.zip \
+  /private/path/juliet-java-audit-smoke.jsonl \
+  --limit-per-cwe 2
+```
+
+转换器从 manifest 读取 CWE 名称和缺陷行号，生成 bad/good 对照样本，并将结果保留在公开仓库之外。
 每个模板先填写 `# verdict`（`clean` 或 `findings`）和 `# review_status`（完成后填 `complete`），再逐条标记发现；未完成或 `uncertain` 的记录不应计入汇总指标。
 
 `examples/` 目录只保存公开的格式说明。真实 few-shot 示例放在本机私有文件 `~/.local/share/local-review/examples.md`。

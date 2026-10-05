@@ -37,6 +37,8 @@
 
 本轮已从 CodeReviewBench 的 `comment-generation/test` 公共接口抽取 195 条私有 smoke 样本，并通过 `scripts/validate-external-dataset.py` 校验。实际分布为 Java 78、JavaScript/TypeScript 45、Python 20、SQL 2，另含少量 C++、Swift 和 Shell。该数据集的字段是人工审查评论，不含我们要求的 P0/P1 结构化证据，因此只用于语言覆盖、评论质量和提示词格式实验，不进入严格召回分母；Java 安全根因仍需由 Juliet/OWASP 和 Platform 真实提交补充。
 
+随后从本机的 NIST Juliet Java 1.3 压缩包生成 43 条私有结构化审计 smoke 样本：33 条带 manifest 行号的 CWE 正例和 10 条 clean 对照，覆盖 17 个 CWE 类别。转换器已通过 malformed manifest 回归；样本只用于 Java 安全根因与行号输出实验，不进入 Platform 独立 P0/P1 评分。
+
 本阶段严格 scorecard 仍为 `gold_p0_p1=11`、`p0_p1_found=5`、严格召回 `45.5%`；输出完整、重复稳定和已命中问题的定位准确率保持 `14/14`、`14/14`、`5/5`。因此提速后的结论是“单位时间更聚焦”，不是模型能力已达到生产级高可用；后续仍需补充独立 P0/P1 holdout，并优先静态审计排名靠前的真实权限/跨服务候选。
 
 ### 2026-10-04：发布服务外部票据令牌预检
