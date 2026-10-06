@@ -6028,6 +6028,7 @@ collect_java_double_checked_locking_preflight() {
   local output_file="$2"
   local source_root="$3"
   local candidates candidate_path candidate_line source_file method_text field_names field_name structural_state
+  local candidate_field_name method_candidate_line
 
   # Only inspect changed Java lines that participate in the double-check
   # shape. The source must then show two null checks for the same static field
@@ -6057,6 +6058,19 @@ collect_java_double_checked_locking_preflight() {
     path_has_symlink_component "$candidate_path" && continue
     [[ -f "$source_file" ]] || continue
     method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" --masked 2>/dev/null || true)"
+    candidate_field_name=""
+    if [[ -z "$method_text" ]]; then
+      candidate_field_name="$(sed -n "${candidate_line}p" "$source_file" | grep -Eo '[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[[:space:]]*null' | sed -E 's/[[:space:]]*=.*//' | head -n 1 || true)"
+      [[ -n "$candidate_field_name" ]] || continue
+      while IFS= read -r method_candidate_line; do
+        [[ "$method_candidate_line" =~ ^[0-9]+$ ]] || continue
+        method_text="$(python3 "$java_method_window_script" "$source_file" "$method_candidate_line" --masked 2>/dev/null || true)"
+        if [[ -n "$method_text" ]] && printf '%s\n' "$method_text" | grep -Eq "if[[:space:]]*\\([[:space:]]*${candidate_field_name}[[:space:]]*==[[:space:]]*null"; then
+          break
+        fi
+        method_text=""
+      done < <(grep -nE "(^|[^A-Za-z0-9_$])${candidate_field_name}[[:space:]]*=" "$source_file" | cut -d: -f1)
+    fi
     [[ -n "$method_text" ]] || continue
     printf '%s\n' "$method_text" | grep -Eq 'synchronized[[:space:]]*\(' || continue
     if printf '%s\n' "$method_text" | awk '
@@ -6070,6 +6084,9 @@ collect_java_double_checked_locking_preflight() {
       continue
     fi
     field_names="$(printf '%s\n' "$method_text" | grep -Eo 'if[[:space:]]*\([[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*==[[:space:]]*null' | sed -E 's/.*if[[:space:]]*\([[:space:]]*([A-Za-z_$][A-Za-z0-9_$]*)[[:space:]]*==.*/\1/' | LC_ALL=C sort -u)"
+    if [[ -z "$field_names" && -n "$candidate_field_name" ]]; then
+      field_names="$candidate_field_name"
+    fi
     [[ -n "$field_names" ]] || continue
     while IFS= read -r field_name; do
       [[ -n "$field_name" ]] || continue

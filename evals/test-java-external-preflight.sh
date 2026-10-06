@@ -722,6 +722,34 @@ if printf '%s\n' "$safe_double_check_output" | grep -F '未声明 volatile 的�
   exit 1
 fi
 
+git -C "$double_check_repo" add src/main/java/testcases/DoubleCheckFixture.java
+git -C "$double_check_repo" commit -qm 基线
+cat >"$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java" <<'EOF'
+package testcases;
+
+class DoubleCheckFixture {
+    private static Object value = null;
+
+    static Object removedVolatile() {
+        if (value == null) {
+            synchronized (DoubleCheckFixture.class) {
+                if (value == null) {
+                    value = new Object();
+                }
+            }
+        }
+        return value;
+    }
+}
+EOF
+field_removal_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-double-check-field-removal" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$double_check_repo")"
+printf '%s\n' "$field_removal_output" | grep -F '未声明 volatile 的双重检查锁' >/dev/null
+
 rm "$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java"
 cat >"$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java" <<'EOF'
 package testcases;
