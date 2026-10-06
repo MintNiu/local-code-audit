@@ -564,10 +564,26 @@ package testcases;
 import java.util.concurrent.locks.ReentrantLock;
 
 class LockFixture {
-    private final ReentrantLock lock = new ReentrantLock();
+    private final ReentrantLock a = new ReentrantLock();
+    private final ReentrantLock b = new ReentrantLock();
 
     void bad() {
-        lock.lock();
+        a.lock();
+        b.unlock();
+    }
+
+    void duplicateAcquire() {
+        a.lock();
+        a.lock();
+        a.unlock();
+    }
+
+    void crossMethodAcquire() {
+        a.lock();
+    }
+
+    void crossMethodRelease() {
+        a.unlock();
         work();
     }
 
@@ -580,7 +596,7 @@ lock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
   OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
-printf '%s\n' "$lock_output" | grep -F '锁获取后在当前方法内没有对应 unlock' >/dev/null
+printf '%s\n' "$lock_output" | grep -F '锁获取后在当前方法内未观察到同一接收者的完整 unlock 对应关系' >/dev/null
 
 rm "$lock_repo/src/main/java/testcases/LockFixture.java"
 cat >"$lock_repo/src/main/java/testcases/LockFixture.java" <<'EOF'
@@ -609,9 +625,155 @@ safe_lock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
   OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
-if printf '%s\n' "$safe_lock_output" | grep -F '锁获取后在当前方法内没有对应 unlock' >/dev/null; then
+if printf '%s\n' "$safe_lock_output" | grep -F '锁获取后在当前方法内未观察到同一接收者的完整 unlock 对应关系' >/dev/null; then
   echo 'finally-protected lock was incorrectly reported as leaked' >&2
   printf '%s\n' "$safe_lock_output" >&2
+  exit 1
+fi
+
+rm "$lock_repo/src/main/java/testcases/LockFixture.java"
+cat >"$lock_repo/src/main/java/testcases/LockFixture.java" <<'EOF'
+package testcases;
+
+class LockFixture {
+    private final MyLock lock = new MyLock();
+
+    void safe() {
+        lock.lock();
+    }
+}
+
+class MyLock {
+    void lock() {}
+}
+EOF
+custom_lock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-custom-lock" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
+if printf '%s\n' "$custom_lock_output" | grep -F '锁获取后在当前方法内未观察到同一接收者的完整 unlock 对应关系' >/dev/null; then
+  echo 'custom lock-like class was incorrectly reported as an unmanaged Java lock' >&2
+  printf '%s\n' "$custom_lock_output" >&2
+  exit 1
+fi
+
+double_check_repo="$fixture_root/double-check-repo"
+git -C "$fixture_root" init -q double-check-repo
+git -C "$double_check_repo" config user.email test@example.invalid
+git -C "$double_check_repo" config user.name java-double-check-preflight
+git -C "$double_check_repo" commit --allow-empty -qm 基线
+mkdir -p "$double_check_repo/src/main/java/testcases"
+cat >"$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java" <<'EOF'
+package testcases;
+
+class DoubleCheckFixture {
+    private static Object value = null;
+
+    static Object bad() {
+        if (value == null) {
+            synchronized (DoubleCheckFixture.class) {
+                if (value == null) {
+                    value = new Object();
+                }
+            }
+        }
+        return value;
+    }
+}
+EOF
+double_check_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-double-check" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$double_check_repo")"
+printf '%s\n' "$double_check_output" | grep -F '未声明 volatile 的双重检查锁' >/dev/null
+
+rm "$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java"
+cat >"$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java" <<'EOF'
+package testcases;
+
+class DoubleCheckFixture {
+    private volatile static Object value = null;
+
+    static Object safe() {
+        if (value == null) {
+            synchronized (DoubleCheckFixture.class) {
+                if (value == null) {
+                    value = new Object();
+                }
+            }
+        }
+        return value;
+    }
+}
+EOF
+safe_double_check_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-double-check-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$double_check_repo")"
+if printf '%s\n' "$safe_double_check_output" | grep -F '未声明 volatile 的双重检查锁' >/dev/null; then
+  echo 'volatile double-checked field was incorrectly reported as unsafe' >&2
+  printf '%s\n' "$safe_double_check_output" >&2
+  exit 1
+fi
+
+rm "$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java"
+cat >"$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java" <<'EOF'
+package testcases;
+
+class DoubleCheckFixture {
+    private static Object value = null;
+
+    static synchronized Object methodGuarded() {
+        if (value == null) {
+            synchronized (DoubleCheckFixture.class) {
+                if (value == null) {
+                    value = new Object();
+                }
+            }
+        }
+        return value;
+    }
+
+    static Object noAssignment() {
+        if (value == null) {
+            synchronized (DoubleCheckFixture.class) {
+                if (value == null) {
+                    audit();
+                }
+            }
+        }
+        return value;
+    }
+
+    static Object shadow(Object value) {
+        if (value == null) {
+            synchronized (DoubleCheckFixture.class) {
+                if (value == null) {
+                    value = new Object();
+                }
+            }
+        }
+        return value;
+    }
+
+    private static void audit() {}
+}
+EOF
+safe_dcl_boundary_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-double-check-boundary" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$double_check_repo")"
+if printf '%s\n' "$safe_dcl_boundary_output" | grep -F '未声明 volatile 的双重检查锁' >/dev/null; then
+  echo 'method-synchronized, no-assignment, or shadowed DCL was incorrectly reported' >&2
+  printf '%s\n' "$safe_dcl_boundary_output" >&2
   exit 1
 fi
 
