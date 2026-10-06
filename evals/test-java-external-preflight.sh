@@ -578,6 +578,10 @@ class LockFixture {
         a.unlock();
     }
 
+    void interruptibleAcquire() throws InterruptedException {
+        a.lockInterruptibly();
+    }
+
     void crossMethodAcquire() {
         a.lock();
     }
@@ -597,6 +601,7 @@ lock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
 printf '%s\n' "$lock_output" | grep -F '锁获取后在当前方法内未观察到同一接收者的完整 unlock 对应关系' >/dev/null
+printf '%s\n' "$lock_output" | grep -F 'LockFixture.java:21 - Java 锁获取后' >/dev/null
 
 rm "$lock_repo/src/main/java/testcases/LockFixture.java"
 cat >"$lock_repo/src/main/java/testcases/LockFixture.java" <<'EOF'

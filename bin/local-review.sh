@@ -5947,7 +5947,8 @@ collect_java_lock_lifecycle_preflight() {
   local source_root="$3"
   local candidates candidate_path candidate_line receiver source_file method_text
 
-  # A newly added ReentrantLock/Lock acquisition with no matching release in
+  # A newly added ReentrantLock/Lock acquisition (lock or
+  # lockInterruptibly) with no matching release in
   # the containing Java method is a high-confidence resource leak. Keep the
   # check method-local: a later helper method may legitimately release a
   # different lock, while try/finally and try-with-resources-like wrappers
@@ -5963,9 +5964,9 @@ collect_java_lock_lifecycle_preflight() {
       sub(/\/\/.*$/, "", code)
       gsub(/"([^"\\]|\\.)*"/, "", code)
       if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
-          match(code, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\.[[:space:]]*lock[[:space:]]*\([[:space:]]*\)/)) {
+          match(code, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\.[[:space:]]*(lock|lockInterruptibly)[[:space:]]*\([[:space:]]*\)/)) {
         expression = substr(code, RSTART, RLENGTH)
-        sub(/[[:space:]]*\.[[:space:]]*lock[[:space:]]*\([[:space:]]*\)$/, "", expression)
+        sub(/[[:space:]]*\.[[:space:]]*(lock|lockInterruptibly)[[:space:]]*\([[:space:]]*\)$/, "", expression)
         gsub(/[[:space:]]+/, "", expression)
         if (expression != "") print path "\t" line_no "\t" expression
       }
@@ -6003,7 +6004,7 @@ collect_java_lock_lifecycle_preflight() {
     fi
     if printf '%s\n' "$method_text" | awk -v receiver="$receiver" '
       {
-        lock_pattern = receiver "[[:space:]]*[.][[:space:]]*lock[[:space:]]*[(]"
+        lock_pattern = receiver "[[:space:]]*[.][[:space:]]*(lock|lockInterruptibly)[[:space:]]*[(]"
         unlock_pattern = receiver "[[:space:]]*[.][[:space:]]*unlock[[:space:]]*[(]"
         if ($0 ~ lock_pattern) lock_count++
         if ($0 ~ unlock_pattern) unlock_count++
