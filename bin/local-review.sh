@@ -5941,6 +5941,58 @@ collect_java_resource_shutdown_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_lock_lifecycle_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="$3"
+  local candidates candidate_path candidate_line source_file method_text
+
+  # A newly added ReentrantLock/Lock acquisition with no matching release in
+  # the containing Java method is a high-confidence resource leak. Keep the
+  # check method-local: a later helper method may legitimately release a
+  # different lock, while try/finally and try-with-resources-like wrappers
+  # remain visible in the same method and therefore stay clean.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-lock-lifecycle-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      code = text
+      sub(/\/\/.*$/, "", code)
+      gsub(/"([^"\\]|\\.)*"/, "", code)
+      if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+          code ~ /\.[[:space:]]*lock[[:space:]]*\([[:space:]]*\)/) {
+        print path "\t" line_no
+      }
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != "" && $1 ~ /\.java$/' | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    grep -Eq '(^|[^[:alnum:]_])(ReentrantLock|java[.]util[.]concurrent[.]locks[.]Lock)([^[:alnum:]_]|$)' "$source_file" || continue
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" --masked 2>/dev/null || true)"
+    [[ -n "$method_text" ]] || continue
+    printf '%s\n' "$method_text" | grep -Eq '[.]lock[[:space:]]*\([[:space:]]*\)' || continue
+    if printf '%s\n' "$method_text" | grep -Eq '[.]unlock[[:space:]]*\([[:space:]]*\)'; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - Java 锁获取后在当前方法内没有对应 unlock，异常路径或重复调用可能永久占用锁。" \
+      '影响：线程在锁持有期间抛出异常或提前返回后，后续请求可能永久阻塞，逐步耗尽线程池并造成拒绝服务。' \
+      '修复建议：将 lock() 放入 try/finally，并在 finally 中释放同一个锁；优先使用有界 tryLock 或封装好的锁生命周期工具，确保异常、取消和超时路径也会释放。' \
+      '验证方式：在临界区和业务调用分别注入异常、取消和超时，确认 finally 始终执行 unlock；并发压测后检查线程转储没有长期等待同一锁。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_cors_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -12129,6 +12181,7 @@ collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_f
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_session_expiration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_resource_shutdown_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_lock_lifecycle_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_cors_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_weak_password_hash_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_hr_default_password_policy_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

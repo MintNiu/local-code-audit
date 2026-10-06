@@ -552,4 +552,67 @@ if printf '%s\n' "$safe_shutdown_output" | grep -F '文件资源仅在成功路�
   exit 1
 fi
 
+lock_repo="$fixture_root/lock-repo"
+git -C "$fixture_root" init -q lock-repo
+git -C "$lock_repo" config user.email test@example.invalid
+git -C "$lock_repo" config user.name java-lock-lifecycle-preflight
+git -C "$lock_repo" commit --allow-empty -qm 基线
+mkdir -p "$lock_repo/src/main/java/testcases"
+cat >"$lock_repo/src/main/java/testcases/LockFixture.java" <<'EOF'
+package testcases;
+
+import java.util.concurrent.locks.ReentrantLock;
+
+class LockFixture {
+    private final ReentrantLock lock = new ReentrantLock();
+
+    void bad() {
+        lock.lock();
+        work();
+    }
+
+    private void work() {}
+}
+EOF
+lock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-lock" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
+printf '%s\n' "$lock_output" | grep -F '锁获取后在当前方法内没有对应 unlock' >/dev/null
+
+rm "$lock_repo/src/main/java/testcases/LockFixture.java"
+cat >"$lock_repo/src/main/java/testcases/LockFixture.java" <<'EOF'
+package testcases;
+
+import java.util.concurrent.locks.ReentrantLock;
+
+class LockFixture {
+    private final ReentrantLock lock = new ReentrantLock();
+
+    void safe() {
+        lock.lock();
+        try {
+            work();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void work() {}
+}
+EOF
+safe_lock_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-lock-safe" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$lock_repo")"
+if printf '%s\n' "$safe_lock_output" | grep -F '锁获取后在当前方法内没有对应 unlock' >/dev/null; then
+  echo 'finally-protected lock was incorrectly reported as leaked' >&2
+  printf '%s\n' "$safe_lock_output" >&2
+  exit 1
+fi
+
 echo 'Java external security preflight passed'
