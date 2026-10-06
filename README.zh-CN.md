@@ -144,6 +144,7 @@ python3 scripts/prepare-juliet-java.py \
 每个模板先填写 `# verdict`（`clean` 或 `findings`）和 `# review_status`（完成后填 `complete`），再逐条标记发现；未完成或 `uncertain` 的记录不应计入汇总指标。
 
 `examples/` 目录只保存公开的格式说明。真实 few-shot 示例放在本机私有文件 `~/.local/share/local-review/examples.md`。
+该私有文件会进入每次请求并计入 fail-closed 输入预算，应保持短小并定期去重；如果示例过大导致默认 16K 上下文无法容纳，应先精简示例，而不是允许静默截断或盲目提高上下文。
 
 完整调优过程和期间遇到的问题记录在 [docs/tuning-process.zh-CN.md](docs/tuning-process.zh-CN.md)。
 
