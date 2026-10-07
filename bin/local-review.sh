@@ -11760,7 +11760,11 @@ collect_transaction_lock_preflight() {
   local candidate_paths_file candidate_dedup_file lock_scan_status
   local java_path java_file matches sequence receiver_pattern changed_marker receiver_name related_receiver_count
   local scanned_files=0 emitted_changed_files=0 emitted_related_files=0
-  local max_changed_files=8 max_related_files=8 max_lines=24
+  # This block is prompt-only context. Keep it deliberately small so a large
+  # transaction-heavy diff still leaves room for the changed shards under the
+  # default 16K context; deterministic lock-order findings are collected
+  # separately and are not weakened by this cap.
+  local max_changed_files=4 max_related_files=2 max_lines=12
 
   render_transaction_lock_context() {
     local context_file="$1"
