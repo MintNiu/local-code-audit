@@ -130,6 +130,8 @@ python3 scripts/validate-external-dataset.py /path/to/private/review-dataset.jso
 
 校验器会检查来源/许可信息、正例问题完整性、文件行号，以及 `train`、`dev`、`holdout` 之间的仓库/提交泄漏；它不会自动下载数据，也不会输出源码片段。
 
+当前数据集优先级、许可证边界、切分规则，以及“模型原生发现”和“确定性预检补齐”的指标口径，见[外部数据集使用边界](docs/external-datasets-plan.zh-CN.md)。
+
 对于本机已下载的 NIST Juliet Java 压缩包，可以生成私有 Java 审计 smoke 集（压缩包和生成的源码 JSONL 都不提交）：
 
 ```bash

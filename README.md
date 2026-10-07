@@ -159,6 +159,8 @@ python3 scripts/validate-external-dataset.py /path/to/private/review-dataset.jso
 
 The validator checks source/license metadata, positive finding completeness, changed-file line locations, and repository/commit leakage across `train`, `dev`, and `holdout`. It never downloads data or prints source snippets.
 
+See [docs/external-datasets-plan.zh-CN.md](docs/external-datasets-plan.zh-CN.md) for the current dataset priority, license boundaries, split policy, and model-native versus deterministic-preflight metrics.
+
 For a locally downloaded NIST Juliet Java archive, extract a small private audit smoke set (the archive itself is not committed):
 
 ```bash
