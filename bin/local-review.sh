@@ -11648,6 +11648,110 @@ collect_schema_snapshot_migration_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sql_menu_delivery_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local delivery_file baseline_file delivery_line
+  local menu_restore=false relation_restore=false
+
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+  delivery_file="$source_root/sql/platform_ai_basic_rag_wiki_delivery.sql"
+  baseline_file="$source_root/sql/platform_system.sql"
+  [[ -f "$delivery_file" && -f "$baseline_file" ]] || return 0
+
+  # This is deliberately tied to the standalone delivery script.  If an older
+  # version of that same script deleted 22011 and the current diff merely
+  # removes it from the deletion list, an existing database can still retain
+  # the old soft-deleted row and its revoked relationships.  Fresh-install
+  # bootstrap SQL is not evidence that the standalone upgrade path is safe.
+  if ! awk '
+    /^diff --git / {
+      in_file = ($0 ~ /a\/sql\/platform_ai_basic_rag_wiki_delivery\.sql b\/sql\/platform_ai_basic_rag_wiki_delivery\.sql/)
+      next
+    }
+    /^--- / || /^\+\+\+ / { next }
+    in_file && /^-/ && $0 ~ /22011/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file"; then
+    return 0
+  fi
+
+  # The child page is only useful through this parent, and the delivery script
+  # still contains the generic relationship-revocation statements.  These
+  # source checks keep unrelated SQL list edits out of the rule.
+  grep -Eq '\([[:space:]]*22003,[^[:cntrl:]]*22011' "$baseline_file" || return 0
+  grep -Eq 'UPDATE[[:space:]]+`sys_(tenant|role)_menu`' "$delivery_file" || return 0
+
+  # Accept an explicit menu restoration as counter-evidence.
+  if awk '
+    function finish(    flat) {
+      if (!in_stmt) return
+      flat = block
+      gsub(/\n/, " ", flat)
+      if (flat ~ /22011/ && flat ~ /`?is_deleted`?[[:space:]]*=[[:space:]]*0/ && flat ~ /`?visible`?[[:space:]]*=[[:space:]]*1/) found = 1
+      in_stmt = 0
+      block = ""
+    }
+    !in_stmt && $0 ~ /^[[:space:]]*(UPDATE|INSERT[[:space:]]+INTO)[[:space:]]+`?sys_menu`?/ {
+      block = $0
+      in_stmt = 1
+      if ($0 ~ /;/) finish()
+      next
+    }
+    in_stmt {
+      block = block "\n" $0
+      if ($0 ~ /;/) finish()
+    }
+    END { finish(); exit(found ? 0 : 1) }
+  ' "$delivery_file"; then
+    menu_restore=true
+  fi
+
+  # Accept an explicit relationship restoration or a narrow idempotent
+  # relation upsert that is visibly driven by active menu rows.  A bootstrap
+  # INSERT in platform_system.sql is intentionally not treated as restoration
+  # for the standalone delivery script.
+  if awk '
+    function finish(    flat, explicit, generic) {
+      if (!in_stmt) return
+      flat = block
+      gsub(/\n/, " ", flat)
+      explicit = (flat ~ /22011/ && flat ~ /`?is_deleted`?[[:space:]]*=[[:space:]]*0/)
+      generic = (flat ~ /sys_menu/ && flat ~ /`?is_deleted`?[[:space:]]*=[[:space:]]*0/ && flat ~ /ON[[:space:]]+DUPLICATE[[:space:]]+KEY[[:space:]]+UPDATE/)
+      if (explicit || generic) found = 1
+      in_stmt = 0
+      block = ""
+    }
+    !in_stmt && $0 ~ /^[[:space:]]*(UPDATE|INSERT[[:space:]]+INTO)[[:space:]]+`?sys_(tenant|role)_menu`?/ {
+      block = $0
+      in_stmt = 1
+      if ($0 ~ /;/) finish()
+      next
+    }
+    in_stmt {
+      block = block "\n" $0
+      if ($0 ~ /;/) finish()
+    }
+    END { finish(); exit(found ? 0 : 1) }
+  ' "$delivery_file"; then
+    relation_restore=true
+  fi
+
+  [[ "$menu_restore" == true && "$relation_restore" == true ]] && return 0
+
+  delivery_line="$(grep -n -m1 '22012,22013' "$delivery_file" | cut -d: -f1 || true)"
+  [[ "$delivery_line" =~ ^[0-9]+$ ]] || delivery_line=1
+  {
+    printf '%s\n' "P1 ${delivery_file#"$source_root/"}:$delivery_line - 独立交付脚本只把基础聊天父菜单 22011 从历史软删除列表移除，没有恢复已有库中的菜单状态及租户/角色关联。"
+    printf '%s\n' '影响：旧库若已执行父版本脚本，22011 仍可能保持 is_deleted=1/visible=0，且 sys_tenant_menu/sys_role_menu 关系仍为删除状态；其子菜单 22003 明确挂在 22011 下，基础聊天入口可能从存量租户菜单树中消失。'
+    printf '%s\n' '修复建议：在收敛高级菜单前，用限定 AI 应用和目标租户/角色的幂等 UPDATE/UPSERT 恢复 22011 及必要的 tenant_menu/role_menu 关系；不要只修改软删除 ID 列表。'
+    printf '%s\n' '验证方式：从已执行父版本脚本的旧库快照升级，执行 delivery 一次并重复执行，断言 22011 active/visible、22003 的父子菜单树和目标租户/管理员关系均恢复，且高级菜单仍保持软删除。'
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_transaction_lock_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -12418,6 +12522,7 @@ collect_log_tenant_audit_preflight "$chunk_input_file" "$build_preflight_file" "
 collect_sql_schema_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_trigger_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_credential_preflight "$chunk_input_file" "$build_preflight_file"
+collect_sql_menu_delivery_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_mybatis_raw_substitution_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file" "$exact_rename_context_file"
 collect_schema_snapshot_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
