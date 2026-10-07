@@ -75,6 +75,12 @@ max_untracked_total_bytes="${OLLAMA_REVIEW_MAX_UNTRACKED_TOTAL_BYTES:-52428800}"
 untracked_diff_timeout_seconds="${OLLAMA_REVIEW_UNTRACKED_DIFF_TIMEOUT_SECONDS:-30}"
 chunk_timeout_seconds="${OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS:-180}"
 chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
+# Deterministic preflight is always merged in full after the model call, but
+# only a bounded set of complete paragraphs is copied into each shard prompt.
+# Without this cap, a large commit can spend the whole 16K context on repeated
+# preflight evidence before the model sees the actual diff.
+chunk_preflight_context_bytes="${OLLAMA_REVIEW_CHUNK_PREFLIGHT_BYTES:-4000}"
+chunk_preflight_prompt_enabled=true
 retry_attempts="${OLLAMA_REVIEW_RETRY_ATTEMPTS:-2}"
 # Reserve part of the model context for tokenizer variance, request metadata,
 # and a small amount of runtime overhead.  The guard below rejects an
@@ -325,6 +331,11 @@ fi
 
 if [[ ! "$chunk_num_predict" =~ ^[0-9]+$ ]] || (( chunk_num_predict < 128 )); then
   echo "OLLAMA_REVIEW_CHUNK_NUM_PREDICT 必须是至少 128 的整数。" >&2
+  exit 2
+fi
+
+if [[ ! "$chunk_preflight_context_bytes" =~ ^[0-9]+$ ]] || (( chunk_preflight_context_bytes < 1000 )); then
+  echo "OLLAMA_REVIEW_CHUNK_PREFLIGHT_BYTES 必须是至少 1000 字节的整数。" >&2
   exit 2
 fi
 
@@ -3534,11 +3545,43 @@ write_chunk_budget_metadata() {
   fi
 }
 
+bound_preflight_prompt_file() {
+  local source_file="$1"
+  local target_file="$2"
+  local max_bytes="$3"
+
+  : >"$target_file"
+  [[ -s "$source_file" ]] || return 0
+  # Keep whole finding paragraphs only.  The target is prompt-only context;
+  # the caller retains the unbounded source file for the final user-visible
+  # merge, so dropping a paragraph here cannot hide a deterministic finding.
+  LC_ALL=C awk -v max_bytes="$max_bytes" '
+    function append_block(block, block_bytes) {
+      block_bytes = length(block) + 2
+      if (total + block_bytes > max_bytes) return
+      print block
+      total += block_bytes
+    }
+    BEGIN { RS = ""; ORS = "\n\n"; total = 0; priority_count = 0; other_count = 0 }
+    {
+      # Keep prompt-only cross-file lock evidence ahead of ordinary preflight
+      # paragraphs; it is the one context block that may need unchanged files
+      # to reason about a transaction-wide sequence.
+      if (index($0, "跨事务/行锁文本序列") > 0) priority[++priority_count] = $0
+      else other[++other_count] = $0
+    }
+    END {
+      for (i = 1; i <= priority_count; i++) append_block(priority[i])
+      for (i = 1; i <= other_count; i++) append_block(other[i])
+    }
+  ' "$source_file" >"$target_file"
+}
+
 resolve_chunk_budget() {
   local configured_bytes="$1"
   local available_tokens probe_tokens remaining_tokens budget_bytes
   local probe_prompt probe_body probe_base_prompt probe_variable_prompt
-  local probe_base_tokens probe_variable_tokens dynamic_reserve_tokens budget_preflight_file
+  local probe_base_tokens probe_variable_tokens dynamic_reserve_tokens budget_preflight_file budget_prompt_preflight_file
   local adjusted=false
 
   effective_max_diff_bytes="$configured_bytes"
@@ -3591,8 +3634,10 @@ $(cat "$changed_paths_file")
     index($0, "排版质量门禁允许人工把 ERROR/BLOCKER") == 0 { print }
   ' \
     "$build_preflight_file" >"$budget_preflight_file"
-  probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$budget_preflight_file")"
-  rm -f "$budget_preflight_file"
+  budget_prompt_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-prompt-preflight.XXXXXX")"
+  bound_preflight_prompt_file "$budget_preflight_file" "$budget_prompt_preflight_file" "$chunk_preflight_context_bytes"
+  probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$budget_prompt_preflight_file")"
+  rm -f "$budget_preflight_file" "$budget_prompt_preflight_file"
   probe_base_tokens="$(estimate_prompt_tokens "$probe_base_prompt")"
   probe_variable_tokens=$(( $(estimate_prompt_tokens "$probe_variable_prompt") - probe_base_tokens ))
   if (( probe_variable_tokens < 0 )); then probe_variable_tokens=0; fi
@@ -3625,6 +3670,24 @@ $(cat "$changed_paths_file")
     chunk_budget_preflight_reserve_tokens="$dynamic_reserve_tokens"
     remaining_tokens=$((available_tokens - probe_tokens - chunk_budget_preflight_reserve_tokens))
     echo "本地代码审查：输入预算不足以携带跨文件符号文本索引，已跳过该可选证据并继续分片审查。" >&2
+  fi
+  # Prompt-only deterministic evidence is useful for model cross-checking, but
+  # it must never prevent the actual diff shards from being reviewed. If the
+  # bounded block still consumes the remaining budget, recompute once without
+  # that optional section. The complete preflight file is still merged after
+  # every successful model call.
+  if (( remaining_tokens < 400 )); then
+    budget_prompt_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-prompt-preflight-empty.XXXXXX")"
+    : >"$budget_prompt_preflight_file"
+    probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$budget_prompt_preflight_file")"
+    rm -f "$budget_prompt_preflight_file"
+    probe_variable_tokens=$(( $(estimate_prompt_tokens "$probe_variable_prompt") - probe_base_tokens ))
+    if (( probe_variable_tokens < 0 )); then probe_variable_tokens=0; fi
+    chunk_preflight_prompt_enabled=false
+    dynamic_reserve_tokens=$((probe_variable_tokens + 128))
+    chunk_budget_preflight_reserve_tokens="$dynamic_reserve_tokens"
+    remaining_tokens=$((available_tokens - probe_tokens - chunk_budget_preflight_reserve_tokens))
+    echo "本地代码审查：输入预算仍不足以携带可选确定性预检上下文，已从模型分片提示中移除；完整预检结果仍会在模型完成后合并。" >&2
   fi
   budget_bytes=$((remaining_tokens * 3))
   if (( budget_bytes < 1000 )); then
@@ -11797,13 +11860,21 @@ collect_transaction_lock_preflight() {
 
   render_transaction_lock_sequence() {
     local sequence_file="$1"
-    # Keep a compact, complete list of lock calls even when context windows
-    # are capped.  This prevents an early method in a large service from
-    # hiding a later confirmation path that reverses the lock order.
-    awk '/@Lock|PESSIMISTIC_WRITE|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/ {
+    # Keep a compact list of lock calls even when context windows are capped.
+    # This prevents an early method in a large service from hiding a later
+    # confirmation path that reverses the lock order. The block is prompt-only
+    # evidence, so cap it before the whole paragraph consumes the shard budget.
+    awk -v max_sequence_lines=32 '/@Lock|PESSIMISTIC_WRITE|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*ForUpdate[[:space:]]*\(|FOR[[:space:]]+UPDATE/ {
+      matched++
+      if (matched > max_sequence_lines) next
       text = $0
       sub(/^[[:space:]]+/, "", text)
       printf "  %d: %s\n", NR, text
+    }
+    END {
+      if (matched > max_sequence_lines) {
+        printf "  … 已省略 %d 条锁调用，仅供模型核验；完整锁序由确定性预检独立扫描。\n", matched - max_sequence_lines
+      }
     }' "$sequence_file"
   }
 
@@ -12569,7 +12640,12 @@ fi
 if [[ "$needs_split" != true ]]; then
   initial_status=0
   initial_start="$(date +%s)"
-  run_one_prompt "$(build_prompt "$diff_material")" "$response_file" "$response_output_file" "$response_kind_file" "$changed_paths_file" "$timeout_seconds" || initial_status=$?
+  if [[ "$chunk_preflight_prompt_enabled" == true ]]; then
+    initial_prompt="$(build_prompt "$diff_material")"
+  else
+    initial_prompt="$(build_prompt "$diff_material" with-examples "" /dev/null)"
+  fi
+  run_one_prompt "$initial_prompt" "$response_file" "$response_output_file" "$response_kind_file" "$changed_paths_file" "$timeout_seconds" || initial_status=$?
   printf -v trace_line 'initial_status\t%s\t%s' "$initial_status" "$(( $(date +%s) - initial_start ))"
   write_review_trace "$trace_line"
   if [[ "$initial_status" -eq 0 ]]; then
@@ -12762,7 +12838,14 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
        index($0, "排版任务证据写入端点仅受普通 execute 权限保护") > 0 ||
        index($0, "排版质量门禁允许人工把 ERROR/BLOCKER") > 0 { print }' \
     "$build_preflight_file" >>"$chunk_merge_preflight_file"
-  chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_preflight_file")"
+  chunk_prompt_preflight_file="$chunk_output_dir/$chunk_name.prompt-preflight"
+  if [[ "$chunk_preflight_prompt_enabled" == true ]]; then
+    bound_preflight_prompt_file "$chunk_preflight_file" "$chunk_prompt_preflight_file" "$chunk_preflight_context_bytes"
+  else
+    : >"$chunk_prompt_preflight_file"
+  fi
+  chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_prompt_preflight_file")"
+  rm -f "$chunk_prompt_preflight_file"
   # Give each shard the complete changed-path inventory as scope metadata.
   # This is intentionally paths-only (no extra source content): it prevents
   # the model from treating a type shown in another shard as a missing type,
