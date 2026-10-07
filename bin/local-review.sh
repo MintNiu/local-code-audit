@@ -11847,6 +11847,97 @@ collect_erp_export_mutable_cursor_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_sales_fulfillment_stale_order_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local application_file helper_line helper_block dispatch_line dispatch_block
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+  grep -Eq '^\+\+\+ b/.*/SalesFulfillmentApplication\.java$' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/SalesOrderRepository\.java$' "$diff_file" || return 0
+  awk '
+    /^\+\+\+ b\// { next }
+    /^\+[^+]/ {
+      line = substr($0, 2)
+      sub(/[[:space:]]*\/\/.*$/, "", line)
+      if (line ~ /listLines|updateOrderDispatchStatus|dispatch/) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file" || return 0
+  awk '
+    /^\+\+\+ b\// { in_repository = ($0 ~ /SalesOrderRepository\.java$/); next }
+    /^diff --git / { in_repository = ($0 ~ / b\/[^[:space:]]*SalesOrderRepository\.java$/); next }
+    /^\+[^+]/ {
+      line = substr($0, 2)
+      sub(/[[:space:]]*\/\/.*$/, "", line)
+      if (in_repository && line ~ /listLines|update\(/) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file" || return 0
+  application_file="$(find "$source_root/src/main/java" -type f -name 'SalesFulfillmentApplication.java' -print -quit 2>/dev/null || true)"
+  [[ -f "$application_file" ]] || return 0
+  dispatch_line="$(grep -n -m1 -E 'public[[:space:]]+[^[:space:]]+[[:space:]]+dispatch[[:space:]]*\(' "$application_file" | cut -d: -f1)"
+  helper_line="$(grep -n -m1 'updateOrderDispatchStatus' "$application_file" | cut -d: -f1)"
+  [[ "$dispatch_line" =~ ^[0-9]+$ && "$helper_line" =~ ^[0-9]+$ ]] || return 0
+  dispatch_block="$(python3 "$java_method_window_script" "$application_file" "$dispatch_line" 2>/dev/null || true)"
+  helper_block="$(python3 "$java_method_window_script" "$application_file" "$helper_line" 2>/dev/null || true)"
+  [[ -n "$dispatch_block" && -n "$helper_block" ]] || return 0
+  grep -Eq 'salesOrderRepository\.listLines\(orderId\)' <<<"$dispatch_block" || return 0
+  grep -Eq 'updateOrderDispatchStatus\(order\)' <<<"$dispatch_block" || return 0
+  grep -Eq 'salesOrderRepository\.listLines\(|salesOrderRepository\.update\(order\)' <<<"$helper_block" || return 0
+  if grep -Eiq 'ForUpdate|selectForUpdate|lockOrder|pessimistic|version|CAS|compare[[:space:]-]*and[[:space:]-]*set' <<<"$dispatch_block$helper_block"; then
+    return 0
+  fi
+  {
+    printf '%s\n' "P1 ${application_file#"$source_root/"}:$helper_line - 履约派单按普通查询读取订单/明细后，在事务末尾整行回写旧订单聚合，缺少锁或版本条件保护。"
+    printf '%s\n' '影响：两个请求并发派不同明细时，各自基于未提交/旧快照计算 dispatch_status；后完成的事务可能覆盖前一个事务的状态或数量事实，导致订单显示 PARTIAL、DONE 与明细实际派单不一致。'
+    printf '%s\n' '修复建议：在同一事务中按固定顺序锁定订单和全部相关明细，或使用版本/CAS 条件更新并依据数据库最新聚合结果回写；禁止把普通查询得到的旧实体无条件 updateById 覆盖并发结果。'
+    printf '%s\n' '验证方式：并发派送同一订单的不同明细，注入事务暂停并检查最终明细数量、订单派单状态和版本；确认失败事务回滚且重试不会覆盖已提交状态。'
+    printf '%s\n' "证据行：${application_file#"$source_root/"}:$dispatch_line 派单入口；${application_file#"$source_root/"}:$helper_line 旧聚合 listLines 后 update(order)。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_sales_fulfillment_lock_order_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local application_file normalize_line normalize_block dispatch_line dispatch_block
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+  grep -Eq '^\+\+\+ b/.*/SalesFulfillmentApplication\.java$' "$diff_file" || return 0
+  awk '
+    /^\+\+\+ b\// { next }
+    /^\+[^+]/ {
+      line = substr($0, 2)
+      sub(/[[:space:]]*\/\/.*$/, "", line)
+      if (line ~ /normalizeDispatchLines|increaseLineDispatched|reserve.*Stock|saveLine/) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$diff_file" || return 0
+  application_file="$(find "$source_root/src/main/java" -type f -name 'SalesFulfillmentApplication.java' -print -quit 2>/dev/null || true)"
+  [[ -f "$application_file" ]] || return 0
+  normalize_line="$(grep -n -m1 -E 'normalizeDispatchLines[[:space:]]*\([^;]*\)[[:space:]]*\{' "$application_file" | cut -d: -f1)"
+  dispatch_line="$(grep -n -m1 -E 'public[[:space:]]+[^[:space:]]+[[:space:]]+dispatch[[:space:]]*\(' "$application_file" | cut -d: -f1)"
+  [[ "$normalize_line" =~ ^[0-9]+$ && "$dispatch_line" =~ ^[0-9]+$ ]] || return 0
+  normalize_block="$(python3 "$java_method_window_script" "$application_file" "$normalize_line" 2>/dev/null || true)"
+  dispatch_block="$(python3 "$java_method_window_script" "$application_file" "$dispatch_line" 2>/dev/null || true)"
+  [[ -n "$normalize_block" && -n "$dispatch_block" ]] || return 0
+  grep -Eq 'result\.add\(|getLines\(\)' <<<"$normalize_block" || return 0
+  grep -Eq 'for[[:space:]]*\([^)]*DispatchLine|DispatchLine[[:space:]]+dispatchLine' <<<"$dispatch_block" || return 0
+  grep -Eq 'increaseLineDispatched|reserve.*Stock|saveLine' <<<"$dispatch_block" || return 0
+  grep -Eiq '\.sort\(|\.sorted\(|Comparator|orderBy.*line|sortByLine' <<<"$normalize_block" && return 0
+  {
+    printf '%s\n' "P1 ${application_file#"$source_root/"}:$normalize_line - 履约派单按客户端明细顺序逐行更新/加锁，没有固定行锁顺序，反向请求可能形成死锁。"
+    printf '%s\n' '影响：两个并发请求分别提交 [A,B] 与 [B,A] 时，会以相反顺序锁定同一销售订单明细；数据库可能互相等待并回滚其中一个派单事务，放大重试、重复请求和库存占用不一致风险。'
+    printf '%s\n' '修复建议：在进入事务写入前按不可变的 salesOrderLineId/SKU 顺序排序并统一加锁；把顺序约束放在应用和数据库层，不能依赖前端数组顺序。'
+    printf '%s\n' '验证方式：并发提交相同明细的相反排列，开启数据库死锁日志并重复压测；确认所有事务按同一顺序取得锁，失败重试保持 requestNo 幂等且库存/明细回滚一致。'
+    printf '%s\n' "证据行：${application_file#"$source_root/"}:$normalize_line normalizeDispatchLines 保留输入顺序；${application_file#"$source_root/"}:$dispatch_line 逐行写入/占用库存。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_schema_snapshot_migration_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -12937,6 +13028,8 @@ collect_erp_export_task_migration_preflight "$chunk_input_file" "$build_prefligh
 collect_erp_export_running_lease_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_erp_export_empty_workbook_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_erp_export_mutable_cursor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sales_fulfillment_stale_order_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_sales_fulfillment_lock_order_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_schema_snapshot_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then
   echo "本地代码审查失败：跨事务/行锁文本索引扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2

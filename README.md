@@ -186,6 +186,16 @@ The converter reads the archive manifest for CWE names and flaw lines, emits bad
 The runner also has narrow Java external-security preflights: it deterministically reports a literal password flowing into `DriverManager.getConnection` within one method, a non-empty literal flowing into `SecretKeySpec`, `readLine()` data flowing directly into `sendRedirect`, weak cryptographic algorithms, password fields submitted by GET forms, sensitive cookies without `Secure`, external counts used as unbounded loop bounds, modulo counters paired with provably-true `do/while` conditions, `HttpSession.setMaxInactiveInterval(-1)`, file resources closed only on the success path, `ReentrantLock`/`Lock` `lock()` or `lockInterruptibly()` acquisitions without a matching release for the same receiver in the same method, and a non-volatile static field used in a structurally nested double-checked initialization; fixed redirects, environment/secret injection, modern AES, POST forms, secured cookies, bounded loops, loops with reachable `break`, finite session timeouts, `finally`/try-with-resources or explicit lock-release protection, `volatile` DCL fields, method-synchronized initialization, and incomplete/non-nested null checks remain clean. The regression entry point is `evals/test-java-external-preflight.sh`; it neither downloads nor commits external source.
 The runner also checks a narrow SQL delivery-upgrade boundary: when a standalone delivery script removes a parent menu ID that an older version deleted, but provides no scoped restoration for the menu and its tenant/role relations, it reports the existing-database migration risk; fresh-install bootstrap SQL is not treated as upgrade evidence. The regression entry point is `evals/test-sql-menu-delivery-preflight.sh`.
 
+The personal profile also contains two narrow ERP fulfillment concurrency
+preflights: stale aggregate rewrites after ordinary order/line reads, and
+client-controlled line iteration order before row updates or stock reservation.
+They require evidence from the changed `SalesFulfillmentApplication` and its
+repository, emit complete P1 findings with impact/fix/verification/evidence
+fields, and stay silent when lock/version/CAS protection or deterministic line
+sorting is visible. These are deterministic safeguards, not claims that the
+model itself learned the pattern. The regression entry point is
+`evals/test-sales-fulfillment-preflight.sh`.
+
 The `examples/` directory contains only the public format specification. Real few-shot examples belong in the local private file `~/.local/share/local-review/examples.md`.
 Keep that private file concise: its contents are included in every prompt and are counted by the fail-closed input-budget check. If the examples grow beyond the default 16k context budget, reduce or curate them instead of silently increasing context or allowing truncation.
 
