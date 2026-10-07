@@ -5527,6 +5527,9 @@ bash "$repo_root/evals/test-sales-payment-confirmation-race-preflight.sh"
 # ERP large-export tasks must cover migration, lease recovery, empty output,
 # and stable cursor semantics in one deterministic fixture.
 bash "$repo_root/evals/test-erp-export-preflight.sh"
+# JavaVFC metadata is candidate-only until a human supplies line-level labels;
+# keep normalization and no-source-copy boundaries regression-tested.
+bash "$repo_root/evals/test-javavfc-candidates.sh"
 
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed

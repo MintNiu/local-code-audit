@@ -1192,3 +1192,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 运行器新增窄范围 ERP 导出预检，并接入 `evals/test-erp-export-preflight.sh`：正例四条全部定位到文件/方法，版本化 migration、RUNNING 租约恢复、显式空 sheet 写入和不可变 ID 游标四类反例均保持 clean。完整 `test-preflight.sh`、shell 语法和 diff 检查通过。该规则命中只作为确定性保护，不计入模型原生召回；下一步对新功能簇做小差异双跑，只有完整且重复稳定的结果才进入人工评分卡。
 
 同轮将 `platform-system:57e86246` 的两次个人 profile 复测写入私有账本：五个分片均完整结束（75/43 秒），输出哈希一致但都返回 clean，稳定漏掉“既有 XXL-JOB 周期未迁移”和“AI_PILOT 缺少 API 授权”两个独立 P1。按时间线审计，这两条现在属于独立 holdout，严格口径更新为 11 个 P0/P1、模型命中 3 个、召回 27.3%，输出完整与双轮稳定 14/14；确定性预检命中不计入这三个模型命中。该指标下降是去除调优泄漏后的真实校准，不代表此前已报告的模型结果被删除。
+
+同日复核外部数据边界：AACR 的人工评论可作为 `external-smoke` 格式样本；JavaVFC 只含漏洞修复提交元数据和 diff，不含独立逐行 finding 标签。新增 `scripts/prepare-javavfc-candidates.py`，从 JavaVFC 去重提取 Java 变更文件和 hunk 行号，稳定切分 train/dev/external-smoke，并明确写入 `pending-human-label`；它不复制源码，也不把修复提交伪装成正例。私有 200 条候选的切分为 train 156、dev 24、external-smoke 20，后续需人工确认后才可进入 few-shot 或评测标签。
