@@ -512,3 +512,5 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 2026-10-07：对冻结 scorecard 做规则时间线审计，发现 `platform-bafan:f895a223` 的路径穿越预检和 `platform-erp-service:4451b5b` 的权限注解预检均是在对应样本之后设计；两条记录从 `manual-confirmed` 改为 `tuning-source`，不再计入独立 holdout。严格口径由 11 个 gold/命中 5 个修正为 9 个 gold/命中 3 个，召回率 33.3%，输出完整与双轮稳定为 12/12，定位准确为 3/3。该修正移除了调优泄漏，后续必须用新的未见根因补足分母；外部数据只进入 train/dev/external-smoke，不回填独立 scorecard。
 
 同日下载并私有保存 AACR-Bench 正/负审查样本、Vul4J 元数据和 JavaVFC 人工 JSONL，记录来源、许可证、版本和 SHA-256；只做完整性核验，不直接改动 few-shot 或独立 holdout。外部数据下一步先规范化、去重、切分，再作为 train/dev/external-smoke 使用。
+
+2026-10-07：为 `platform-erp-service:a942bb4f` 增加三条确定性回归保护：作废报量串码计数缺少有效订单状态、五张报量持久化表缺少存量库版本化 migration、销量查询把订单/明细/串码全量加载后在 Java 中分页。规则要求完整的应用、仓储、控制器和查询对象证据，并对作废清理、状态关联、版本化 migration、数据库分页和 keyset 分页提供安全反例。`evals/test-erp-report-quantity-preflight.sh` 已接入完整预检套件，正负回归、完整预检和分片回归均通过。该提交的 Ollama 大差异盲跑未在总预算内完成，记录为 fail-closed 的调优源，不计入模型原生召回；当前严格独立口径仍为 9 个 gold P0/P1、命中 3 个、召回 33.3%，输出完整与双轮稳定 12/12。个人版尚未达到最终高可用验收，后续继续补未见独立根因并冻结复测。

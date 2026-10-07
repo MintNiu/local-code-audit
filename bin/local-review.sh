@@ -11568,6 +11568,150 @@ collect_migration_delete_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_report_quantity_void_serial_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local app_file repository_file void_line void_start void_block sale_line return_line sale_end return_end sale_block return_block
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # A VOIDED report order must not continue to reserve a serial number. Keep
+  # this project-shaped: require the visible void transition plus both serial
+  # counting queries, and suppress it when either query already joins/checks
+  # the order status.
+  grep -Eq '^\+.*orderStatus.*VOIDED|^\+.*setOrderStatus\([[:space:]]*VOIDED[[:space:]]*\)' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/ReportQuantityApplication\.java$' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/ReportQuantityRepository\.java$' "$diff_file" || return 0
+  app_file="$(find "$source_root/src/main/java" -type f -name 'ReportQuantityApplication.java' -print -quit 2>/dev/null || true)"
+  repository_file="$(find "$source_root/src/main/java" -type f -name 'ReportQuantityRepository.java' -print -quit 2>/dev/null || true)"
+  [[ -f "$app_file" && -f "$repository_file" ]] || return 0
+  grep -Eq 'setOrderStatus\([[:space:]]*VOIDED[[:space:]]*\)' "$app_file" || return 0
+  grep -Eq 'repository\.countSaleSerial\(' "$app_file" || return 0
+  grep -Eq 'repository\.countReturnSerial\(' "$app_file" || return 0
+  void_start="$(grep -n -m1 -E 'public[[:space:]]+[^[:space:]]+[[:space:]]+voidOrder[[:space:]]*\(' "$app_file" | cut -d: -f1)"
+  [[ "$void_start" =~ ^[0-9]+$ ]] || return 0
+  void_block="$(python3 "$java_method_window_script" "$app_file" "$void_start" 2>/dev/null || true)"
+  [[ -n "$void_block" ]] || void_block="$(sed -n "${void_start},$((void_start + 100))p" "$app_file")"
+  grep -Eiq 'deleteChildren|deleteSerial|deleteByOrder|softDelete|invalidate' <<<"$void_block" && return 0
+  sale_line="$(grep -n -m1 'public long countSaleSerial' "$repository_file" | cut -d: -f1)"
+  return_line="$(grep -n -m1 'public long countReturnSerial' "$repository_file" | cut -d: -f1)"
+  [[ "$sale_line" =~ ^[0-9]+$ && "$return_line" =~ ^[0-9]+$ ]] || return 0
+  sale_end=$((return_line - 1))
+  sale_block="$(sed -n "${sale_line},${sale_end}p" "$repository_file")"
+  return_end="$(awk -v start="$return_line" 'NR > start && /public (List|Erp|long|void|int|boolean)/ { print NR; exit }' "$repository_file")"
+  [[ "$return_end" =~ ^[0-9]+$ ]] || return_end=$((return_line + 80))
+  return_block="$(sed -n "${return_line},${return_end}p" "$repository_file")"
+  grep -Eq 'countSaleSerial|eventType' <<<"$sale_block" || return 0
+  grep -Eq 'countReturnSerial|eventType' <<<"$return_block" || return 0
+  grep -Eiq 'orderStatus|orderMapper|join[[:space:]]+erp_report_quantity_order|status[[:space:]]*=' <<<"$sale_block" && return 0
+  grep -Eiq 'orderStatus|orderMapper|join[[:space:]]+erp_report_quantity_order|status[[:space:]]*=' <<<"$return_block" && return 0
+
+  void_line="$(grep -n -m1 'setOrderStatus([[:space:]]*VOIDED' "$app_file" | cut -d: -f1)"
+  [[ "$void_line" =~ ^[0-9]+$ ]] || void_line=1
+  {
+    printf '%s\n' "P1 ${app_file#"$source_root/"}:$void_line - 报量单作废后，串码占用统计仍只按串码关系和 SALE/RETURN 事件计数，没有排除已作废报量。"
+    printf '%s\n' '影响：作废销售报量留下的 SALE 串码关系仍会让后续销售报量认为串码已使用；作废销量退货留下的 RETURN 关系仍可能让原串码持续显示不可退，导致业务状态与实际作废结果不一致。'
+    printf '%s\n' '修复建议：串码占用查询按关系所属订单关联 erp_report_quantity_order，并限定订单状态为有效状态；作废时同步删除/失效关系也必须与占用校验使用同一事务语义。'
+    printf '%s\n' '验证方式：创建含串码的销售报量和退货关系，分别作废后重复创建销售/退货，确认作废关系不再阻断；同时验证已生效关系仍然阻断重复使用。'
+    printf '%s\n' "证据行：${repository_file#"$source_root/"}:$sale_line/$return_line 串码计数；${app_file#"$source_root/"}:$void_line 作废状态转换。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_report_quantity_table_migration_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local schema_file migration_contract_file schema_line app_path table_name migration_dir
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # These are new persisted report-quantity tables.  The full snapshot is
+  # enough for a new database but cannot upgrade an existing ERP database;
+  # require the repository's explicit versioned-migration contract and the
+  # absence of a migration that creates the same tables.
+  for table_name in order order_line serial validation_error operation_log; do
+    table_pattern="erp_report_quantity_${table_name}"
+    grep -E '^\+[[:space:]]*CREATE TABLE IF NOT EXISTS' "$diff_file" | grep -F "$table_pattern" >/dev/null || return 0
+  done
+  grep -Eq '^\+\+\+ b/.*/ReportQuantityRepository\.java$' "$diff_file" || return 0
+  app_path="$(grep -E '^\+\+\+ b/.*/ReportQuantityApplication\.java$' "$diff_file" | head -n 1 | sed 's/^+++ b\///')"
+  [[ -n "$app_path" ]] || return 0
+  if grep -Eq '^\+\+\+ b/(sql|db)/(migration|migrations)/' "$diff_file"; then
+    if grep -Eq '^\+.*erp_report_quantity_(order|order_line|serial)' "$diff_file"; then
+      return 0
+    fi
+  fi
+  schema_file="$source_root/sql/platform_erp.sql"
+  [[ -f "$schema_file" ]] || return 0
+  for table_name in order order_line serial validation_error operation_log; do
+    grep -F 'CREATE TABLE IF NOT EXISTS' "$schema_file" | grep -F "erp_report_quantity_${table_name}" >/dev/null || return 0
+  done
+  migration_contract_file="$(rg -l --glob 'README*' 'sql/migration|db/migration|已有数据库.*升级|已有.*ERP.*库|全新数据库只执行完整建库脚本' "$source_root" 2>/dev/null | head -n 1 || true)"
+  [[ -n "$migration_contract_file" ]] || return 0
+  while IFS= read -r migration_dir; do
+    [[ -n "$migration_dir" ]] || continue
+    if rg -n 'erp_report_quantity_(order|order_line|serial|validation_error|operation_log)' "$migration_dir" 2>/dev/null; then
+      return 0
+    fi
+  done < <(find "$source_root" -type d \( -path '*/sql/migration*' -o -path '*/db/migration*' \) -print 2>/dev/null)
+  schema_line="$(grep -n -m1 'CREATE TABLE IF NOT EXISTS.*erp_report_quantity_order' "$schema_file" | cut -d: -f1)"
+  [[ "$schema_line" =~ ^[0-9]+$ ]] || schema_line=1
+  {
+    printf '%s\n' "P1 ${schema_file#"$source_root/"}:$schema_line - 报量/销量新增持久化表只出现在全量初始化 schema，当前提交没有对应的版本化 migration。"
+    printf '%s\n' '影响：新库执行完整建库脚本可以创建这些表，但已有 ERP 库不会因 CREATE TABLE IF NOT EXISTS 自动补齐；部署代码后报量、销量和退货接口可能因缺表直接失败。'
+    printf '%s\n' '修复建议：为报量单、明细、串码及其关联表新增幂等版本化 migration，并与全量 schema 保持结构、索引和执行顺序一致；不要把全量初始化脚本当作存量升级方案。'
+    printf '%s\n' '验证方式：从上一版本已有数据的 ERP 库执行升级，检查所有报量表和索引存在后运行创建、提交、作废、退货和销量查询；重复执行 migration 并验证新库初始化结果一致。'
+    printf '%s\n' "证据行：${schema_file#"$source_root/"}:${schema_line}；${app_path}:新增报量业务入口；迁移契约：${migration_contract_file#"$source_root/"}"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_report_quantity_pagination_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local app_file repository_file controller_file query_file sales_line repo_line sales_block repo_block
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+  grep -Eq '^\+\+\+ b/.*/ReportQuantityApplication\.java$' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/ReportQuantityRepository\.java$' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/ReportSalesController\.java$' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/ReportSalesQuery\.java$' "$diff_file" || return 0
+  app_file="$(find "$source_root/src/main/java" -type f -name 'ReportQuantityApplication.java' -print -quit 2>/dev/null || true)"
+  repository_file="$(find "$source_root/src/main/java" -type f -name 'ReportQuantityRepository.java' -print -quit 2>/dev/null || true)"
+  controller_file="$(find "$source_root/src/main/java" -type f -name 'ReportSalesController.java' -print -quit 2>/dev/null || true)"
+  query_file="$(find "$source_root/src/main/java" -type f -name 'ReportSalesQuery.java' -print -quit 2>/dev/null || true)"
+  [[ -f "$app_file" && -f "$repository_file" && -f "$controller_file" && -f "$query_file" ]] || return 0
+  grep -Eq '@GetMapping\("/report-sales"\)' "$controller_file" || return 0
+  grep -Eq 'application\.salesPage\(' "$controller_file" || return 0
+  grep -Eq 'extends[[:space:]]+PageQuery' "$query_file" || return 0
+  grep -Eq 'public Page<ReportSalesVO>[[:space:]]+salesPage|Page<ReportSalesVO>[[:space:]]+salesPage' "$app_file" || return 0
+  grep -Eq 'repository\.salesOrders\([^;]*\)' "$app_file" || return 0
+  grep -Eq 'records\.sort\(|records\.subList\(' "$app_file" || return 0
+  sales_line="$(grep -n -m1 'salesPage' "$app_file" | cut -d: -f1)"
+  repo_line="$(grep -n -m1 -E '[[:space:]]salesOrders[[:space:]]*\(' "$repository_file" | cut -d: -f1)"
+  [[ "$sales_line" =~ ^[0-9]+$ && "$repo_line" =~ ^[0-9]+$ ]] || return 0
+  sales_block="$(python3 "$java_method_window_script" "$app_file" "$sales_line" 2>/dev/null || true)"
+  [[ -n "$sales_block" ]] || sales_block="$(sed -n "${sales_line},$((sales_line + 100))p" "$app_file")"
+  repo_block="$(python3 "$java_method_window_script" "$repository_file" "$repo_line" 2>/dev/null || true)"
+  [[ -n "$repo_block" ]] || repo_block="$(sed -n "${repo_line},$((repo_line + 100))p" "$repository_file")"
+  grep -Eq 'getPageNum\(|getPageSize\(|subList\(' <<<"$sales_block" || return 0
+  grep -Eq 'repository\.salesLines\(' <<<"$sales_block" || return 0
+  grep -Eq 'repository\.serialsByOrderLineIds\(' <<<"$sales_block" || return 0
+  grep -Eq 'orderMapper\.selectList\(' <<<"$repo_block" || return 0
+  grep -Eq 'selectPage\(|LIMIT[[:space:]]|OFFSET[[:space:]]|setMaxResults\(|keyset|seek[[:space:]]+pagination' <<<"$repo_block" && return 0
+  {
+    printf '%s\n' "P1 ${app_file#"$source_root/"}:$sales_line - 销量分页先加载整租户报量/明细/串码结果到内存，再在 Java 中过滤、排序和 subList 分页。"
+    printf '%s\n' '影响：数据量增长时查询会同时占用与租户销量规模相关的内存和网络带宽，可能造成长尾延迟、Full GC 甚至 OOM；深分页还会重复扫描和排序大量历史数据。'
+    printf '%s\n' '修复建议：把租户、状态、串码、排序和 page/size 条件下推到 SQL，使用稳定排序的数据库分页查询；串码过滤用 EXISTS/关联或专用分页投影，避免先加载全部订单、明细和串码。'
+    printf '%s\n' '验证方式：用百万级报量明细和串码数据执行浅分页、深分页及串码筛选，观察 SQL 返回行数、峰值堆、GC 和 P95/P99；确认结果总数与分页边界稳定。'
+    printf '%s\n' "证据行：${app_file#"$source_root/"}:$sales_line Java 分页；${repository_file#"$source_root/"}:$repo_line salesOrders 使用 selectList。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_schema_snapshot_migration_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -12651,6 +12795,9 @@ collect_sql_credential_preflight "$chunk_input_file" "$build_preflight_file"
 collect_sql_menu_delivery_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_mybatis_raw_substitution_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file" "$exact_rename_context_file"
+collect_report_quantity_void_serial_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_report_quantity_table_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_report_quantity_pagination_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_schema_snapshot_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then
   echo "本地代码审查失败：跨事务/行锁文本索引扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2

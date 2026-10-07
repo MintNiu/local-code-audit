@@ -6,6 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$repo_root/evals/test-publishing-external-ticket-token-preflight.sh"
 "$repo_root/evals/test-publishing-pdf-render-resource-preflight.sh"
 "$repo_root/evals/test-sql-menu-delivery-preflight.sh"
+"$repo_root/evals/test-erp-report-quantity-preflight.sh"
 # Actuator metrics must not be exposed on the unauthenticated application port.
 bash "$repo_root/evals/test-public-actuator-metrics-preflight.sh"
 # Keep this deterministic regression hermetic; a user's private few-shot file

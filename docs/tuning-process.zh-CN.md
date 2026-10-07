@@ -1178,3 +1178,11 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同日按外部数据边界下载了 AACR-Bench 的正/负审查样本、Vul4J 数据集元数据和 JavaVFC 人工 JSONL，均保存到 `~/.local/share/local-review/datasets/`，并记录版本、许可证和 SHA-256 私有 manifest。AACR 的评论包含 LLM 增强内容，Vul4J 需要区分 PoV 与 SpotBugs-only，JavaVFC 主要是修复 diff 而非人工 finding；因此本轮只完成归档和完整性核验，没有直接写入 few-shot、没有把它们加入 Platform holdout，也没有把外部样本冒充 P0/P1 金标。下一步先做规范化字段映射和仓库/提交谱系去重，再从 train/dev 抽取少量短样本。
 
 随后新增 `scripts/prepare-aacr-review-dataset.py`，仅保留 AACR 的人工评论，按仓库/提交/文件/行号去重并生成 40 条十语言均衡的 `external-smoke` JSONL；转换回归和 `scripts/validate-external-dataset.py` 均通过。该转换器只证明字段、来源和定位元数据完整，不把“评论存在”解释成漏洞金标，也没有把结果自动塞入本机 few-shot。
+
+### 2026-10-07：补齐 ERP 报量串码、迁移和销量分页预检
+
+针对 `platform-erp-service:a942bb4f24ef88c7cca0034c065f8eb98c07b0db` 的源码复核，新增三条窄范围确定性预检：作废报量仍通过未关联订单状态的 SALE/RETURN 串码计数阻断后续操作；报量相关五张持久化表只进入全量初始化 schema、没有对应版本化 migration；销量接口先用 `selectList` 加载订单、明细和串码，再在 Java 中排序和 `subList` 分页。每条规则都要求应用层、仓储层和接口路径的完整证据，并分别抑制作废时清理关系、查询已关联订单状态、版本化 migration、数据库分页或 keyset 分页等安全形态。
+
+新增 `evals/test-erp-report-quantity-preflight.sh`，覆盖三条正例和三条反例，并接入 `evals/test-preflight.sh`。本轮 `bash -n`、`git diff --check`、ERP 定向回归、完整预检回归和分片回归均通过。规则输出仍包含严重程度、文件位置、影响、修复建议和验证方式，完整证据会保留在最终合并结果中。
+
+该提交的多次大差异 Ollama 盲跑在当前本机容量下均未完成，因整次超时按 fail-closed 处理；因此没有把这次结果当作 clean，也没有把确定性预检命中计入模型原生召回率。三条发现记录为调优源和工程回归保护，当前严格独立 scorecard 仍按去除调优泄漏后的口径统计（9 个 gold P0/P1、命中 3 个、严格召回 33.3%，输出完整和双轮稳定 12/12）。下一步仍需从未参与规则设计的新根因补足独立盲测，再重新冻结并双轮验收。
