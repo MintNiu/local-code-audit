@@ -81,6 +81,7 @@ chunk_num_predict="${OLLAMA_REVIEW_CHUNK_NUM_PREDICT:-2048}"
 # preflight evidence before the model sees the actual diff.
 chunk_preflight_context_bytes="${OLLAMA_REVIEW_CHUNK_PREFLIGHT_BYTES:-4000}"
 chunk_preflight_prompt_enabled=true
+chunk_prompt_examples_enabled=true
 retry_attempts="${OLLAMA_REVIEW_RETRY_ATTEMPTS:-2}"
 # Reserve part of the model context for tokenizer variance, request metadata,
 # and a small amount of runtime overhead.  The guard below rejects an
@@ -2766,6 +2767,14 @@ chunk_prompt_prefix="$(
   }
 )"
 
+chunk_prompt_prefix_no_examples="$({
+  printf '%s\n' "$prompt_prefix_common"
+  if [[ "$include_readme" == true && -f "$repo_root/README.md" ]]; then
+    printf '\n--- 项目说明 README.md ---\n'
+    cat "$repo_root/README.md"
+  fi
+})"
+
 diff_material="$(
   {
     print_file_if_exists "Staged diff（已暂存）" "$staged_file"
@@ -2783,6 +2792,9 @@ build_prompt() {
   local mybatis_clues=""
   if [[ "${2:-with-examples}" == "without-examples" ]]; then
     prefix="$chunk_prompt_prefix"
+    if [[ "$chunk_prompt_examples_enabled" != true ]]; then
+      prefix="$chunk_prompt_prefix_no_examples"
+    fi
   fi
   printf '%s\n' "$prefix"
   if [[ "${2:-with-examples}" == "without-examples" && -n "$chunk_status_file" ]]; then
@@ -3671,12 +3683,48 @@ $(cat "$changed_paths_file")
     remaining_tokens=$((available_tokens - probe_tokens - chunk_budget_preflight_reserve_tokens))
     echo "本地代码审查：输入预算不足以携带跨文件符号文本索引，已跳过该可选证据并继续分片审查。" >&2
   fi
+  # Human examples improve calibration but are optional context. If the fixed
+  # rules plus routed evidence still leave no room for a useful shard, rebuild
+  # the probe without examples before dropping deterministic evidence. This
+  # keeps the normal review semantics while avoiding dozens of tiny shards on
+  # a large commit.
+  # A shard with only a few hundred tokens is technically sendable but causes
+  # a large commit to explode into dozens of requests. Prefer dropping the
+  # optional examples once less than ~4.5K input tokens remain for diff text;
+  # the examples are calibration context, not review rules.
+  if (( remaining_tokens < 4500 )) && [[ "$chunk_prompt_examples_enabled" == true ]]; then
+    chunk_prompt_examples_enabled=false
+    probe_base_prompt="$(build_prompt "$probe_body" without-examples "" /dev/null)"
+    probe_prompt="$probe_base_prompt
+--- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
+$(cat "$changed_paths_file")
+--- 变更路径元数据结束；未出现在当前分片的文件均视为未知，不得据此报告缺失 ---"
+    probe_tokens="$(estimate_prompt_tokens "$probe_prompt")"
+    budget_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-preflight-examples-off.XXXXXX")"
+    awk 'BEGIN { RS = ""; ORS = "\n\n" }
+      index($0, "声明式权限注解被注释/删除") == 0 &&
+      index($0, "第三方登录绑定按外部身份查询未带租户边界") == 0 &&
+      index($0, "排版任务证据写入端点仅受普通 execute 权限保护") == 0 &&
+      index($0, "排版质量门禁允许人工把 ERROR/BLOCKER") == 0 { print }
+    ' "$build_preflight_file" >"$budget_preflight_file"
+    budget_prompt_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-prompt-preflight-examples-off.XXXXXX")"
+    bound_preflight_prompt_file "$budget_preflight_file" "$budget_prompt_preflight_file" "$chunk_preflight_context_bytes"
+    probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$budget_prompt_preflight_file")"
+    rm -f "$budget_preflight_file" "$budget_prompt_preflight_file"
+    probe_base_tokens="$(estimate_prompt_tokens "$probe_base_prompt")"
+    probe_variable_tokens=$(( $(estimate_prompt_tokens "$probe_variable_prompt") - probe_base_tokens ))
+    if (( probe_variable_tokens < 0 )); then probe_variable_tokens=0; fi
+    dynamic_reserve_tokens=$((probe_variable_tokens + 128))
+    chunk_budget_preflight_reserve_tokens="$dynamic_reserve_tokens"
+    remaining_tokens=$((available_tokens - probe_tokens - chunk_budget_preflight_reserve_tokens))
+    echo "本地代码审查：输入预算不足，已从分片提示中移除人工示例；系统规则、差异和完整预检合并不变。" >&2
+  fi
   # Prompt-only deterministic evidence is useful for model cross-checking, but
   # it must never prevent the actual diff shards from being reviewed. If the
   # bounded block still consumes the remaining budget, recompute once without
   # that optional section. The complete preflight file is still merged after
   # every successful model call.
-  if (( remaining_tokens < 400 )); then
+  if (( remaining_tokens < 4500 )); then
     budget_prompt_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-prompt-preflight-empty.XXXXXX")"
     : >"$budget_prompt_preflight_file"
     probe_variable_prompt="$(build_prompt "$probe_body" without-examples "$chunk_budget_status_file" "$budget_prompt_preflight_file")"
@@ -12640,10 +12688,12 @@ fi
 if [[ "$needs_split" != true ]]; then
   initial_status=0
   initial_start="$(date +%s)"
-  if [[ "$chunk_preflight_prompt_enabled" == true ]]; then
+  if [[ "$chunk_preflight_prompt_enabled" == true && "$chunk_prompt_examples_enabled" == true ]]; then
     initial_prompt="$(build_prompt "$diff_material")"
+  elif [[ "$chunk_preflight_prompt_enabled" == true ]]; then
+    initial_prompt="$(build_prompt "$diff_material" without-examples "" "$build_preflight_file")"
   else
-    initial_prompt="$(build_prompt "$diff_material" with-examples "" /dev/null)"
+    initial_prompt="$(build_prompt "$diff_material" without-examples "" /dev/null)"
   fi
   run_one_prompt "$initial_prompt" "$response_file" "$response_output_file" "$response_kind_file" "$changed_paths_file" "$timeout_seconds" || initial_status=$?
   printf -v trace_line 'initial_status\t%s\t%s' "$initial_status" "$(( $(date +%s) - initial_start ))"
