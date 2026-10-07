@@ -517,3 +517,4 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 2026-10-07：新增 ERP 大数据导出确定性预检，覆盖新导出任务表缺少存量 migration、RUNNING 任务无租约回收、空结果成功上传以及可变 status+id 游标四类高置信根因；`evals/test-erp-export-preflight.sh` 正负回归通过并接入总套件。`platform-system:57e86246` 两轮个人 profile 完整稳定但漏掉两个独立 P1，已写入私有账本；严格模型 holdout 更新为 11 个 gold、3 个命中、27.3% 召回，输出完整/双轮稳定 14/14。确定性规则命中不计入模型原生召回，后续继续补未见功能簇。
 同日补齐 JavaVFC 的候选规范化边界：它没有独立逐行 review 金标，新增脚本仅生成 `pending-human-label` 的 Java 提交候选，不复制源码、不写入 positive 标签；私有 200 条候选稳定切分为 train 156、dev 24、external-smoke 20。AACR 人工评论与 JavaVFC 候选保持分离，避免外部数据污染 Platform 严格 holdout。
 同日完成 `platform-erp-service:5b5b2262` 履约派单双跑：11/11 分片两轮完整稳定但漏掉锁/旧状态回写、明细锁顺序和业务主体状态复核三个独立 P1，已计入严格 holdout。当前严格模型分母为 14 个 P0/P1、命中 3 个、召回 21.4%，输出完整/双轮稳定 17/17；确定性规则命中不计入模型原生召回，继续补充未见并发、权限和跨服务契约样本。
+随后进行 few-shot A/B 诊断：为本机 examples 增加四类脱敏并发/异步边界后，同一提交的结果哈希与 finding 集合不变，仍漏报三个 P1；该样本不重新计分，说明下一步应优先做跨文件确定性证据和新根因 holdout，而不是继续堆叠相似示例。
