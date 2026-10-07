@@ -11841,6 +11841,7 @@ collect_transaction_lock_preflight() {
   # never add unrelated files unless a changed receiver gives us a concrete
   # relationship to follow.
   if [[ -z "$receivers" ]]; then
+    candidate_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-candidates.XXXXXX")" || return 11
     has_changed_lock=false
     while IFS= read -r changed_path; do
       [[ -n "$changed_path" ]] || continue
@@ -11861,7 +11862,9 @@ collect_transaction_lock_preflight() {
   printf '%s\n' '--- 构建预检（确定性证据：跨事务/行锁文本序列；仅供模型核验） ---' >>"$output_file"
   printf '%s\n' '说明：以下仅表示源码中的事务注解与 FOR UPDATE 调用文本，不能单独证明同表、同事务或可达并发；不得仅凭此段自动升级为问题。' >>"$output_file"
 
-  candidate_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-candidates.XXXXXX")"
+  if [[ -z "${candidate_paths_file:-}" ]]; then
+    candidate_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-candidates.XXXXXX")" || return 11
+  fi
   lock_scan_status=0
   {
     printf '%s\n' "$changed_java_paths"
