@@ -5524,6 +5524,9 @@ bash "$repo_root/evals/test-sales-return-refund-schema-migration-preflight.sh"
 # Sales-order payment confirmation must serialize voucher state and fund
 # recharge/freeze side effects; check-then-act paths stay visible.
 bash "$repo_root/evals/test-sales-payment-confirmation-race-preflight.sh"
+# ERP large-export tasks must cover migration, lease recovery, empty output,
+# and stable cursor semantics in one deterministic fixture.
+bash "$repo_root/evals/test-erp-export-preflight.sh"
 
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed

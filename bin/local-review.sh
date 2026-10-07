@@ -11712,6 +11712,141 @@ collect_report_quantity_pagination_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_erp_export_task_migration_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local schema_file migration_contract_file schema_line migration_dir
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # A new asynchronous export task table must have an upgrade path for
+  # existing ERP databases.  Keep this scoped to the export task feature and
+  # suppress it when the same diff or repository already contains a matching
+  # versioned migration.
+  grep -Eq '^\+\+\+ b/.*/(ExportTaskApplication|ExportTaskRepository|ErpExportTask|RetailerExportHandler)\.java$' "$diff_file" || return 0
+  grep -Eq '^\+[[:space:]]*CREATE TABLE IF NOT EXISTS.*erp_export_task' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/(sql|db)/(migration|migrations)/' "$diff_file" &&
+    grep -Eq '^\+.*erp_export_task' "$diff_file" && return 0
+  schema_file="$source_root/sql/platform_erp.sql"
+  [[ -f "$schema_file" ]] || return 0
+  grep -F 'CREATE TABLE IF NOT EXISTS' "$schema_file" | grep -F 'erp_export_task' >/dev/null || return 0
+  migration_contract_file="$(rg -l --glob 'README*' 'sql/migration|db/migration|已有数据库.*升级|已有.*ERP.*库|全新数据库只执行完整建库脚本' "$source_root" 2>/dev/null | head -n 1 || true)"
+  [[ -n "$migration_contract_file" ]] || return 0
+  while IFS= read -r migration_dir; do
+    [[ -n "$migration_dir" ]] || continue
+    rg -l 'erp_export_task' "$migration_dir" >/dev/null 2>&1 && return 0
+  done < <(find "$source_root" -type d \( -path '*/sql/migration*' -o -path '*/db/migration*' \) -print 2>/dev/null)
+  schema_line="$(grep -n -m1 'CREATE TABLE IF NOT EXISTS.*erp_export_task' "$schema_file" | cut -d: -f1)"
+  [[ "$schema_line" =~ ^[0-9]+$ ]] || schema_line=1
+  {
+    printf '%s\n' "P1 ${schema_file#"$source_root/"}:${schema_line} - 异步导出任务表只出现在全量初始化 schema，当前提交没有对应的版本化 migration。"
+    printf '%s\n' '影响：已有 ERP 数据库不会因初始化脚本中的 CREATE TABLE IF NOT EXISTS 自动补齐 erp_export_task；代码发布后导出提交、状态查询和异步执行可能因缺表失败。'
+    printf '%s\n' '修复建议：新增幂等版本化 migration，完整创建导出任务表、索引和状态字段，并与全量 schema 保持一致；不要把初始化快照当作存量升级方案。'
+    printf '%s\n' '验证方式：从上一版本已有数据的 ERP 库执行升级，确认表和索引存在后提交、执行、查询和清理导出任务；重复执行 migration 并验证新库初始化结果一致。'
+    printf '%s\n' "证据行：${schema_file#"$source_root/"}:${schema_line}；迁移契约：${migration_contract_file#"$source_root/"}；导出任务 Java 文件已在本次提交变更。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_erp_export_running_lease_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local application_file repository_file status_file run_line run_block
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+  grep -Eq '^\+\+\+ b/.*/ExportTaskApplication\.java$' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/ExportTaskRepository\.java$' "$diff_file" || return 0
+  application_file="$(find "$source_root/src/main/java" -type f -name 'ExportTaskApplication.java' -print -quit 2>/dev/null || true)"
+  repository_file="$(find "$source_root/src/main/java" -type f -name 'ExportTaskRepository.java' -print -quit 2>/dev/null || true)"
+  status_file="$(find "$source_root/src/main/java" -type f -name 'ExportTaskStatus.java' -print -quit 2>/dev/null || true)"
+  [[ -f "$application_file" && -f "$repository_file" ]] || return 0
+  grep -Eq 'markRunning\(' "$application_file" || return 0
+  grep -Eq 'findById\(taskId\)' "$application_file" || return 0
+  grep -Eq 'markRunning\(' "$repository_file" || return 0
+  grep -Eq 'getStatus, ExportTaskStatus\.PENDING|PENDING\.name\(\)' "$repository_file" || return 0
+  grep -Eq 'heartbeat|Heartbeat' "$repository_file" || return 0
+  grep -Eq 'listExpiredSuccess|ExportTaskStatus\.SUCCESS' "$repository_file" || return 0
+  if rg -qi 'recover|reclaim|stale|lease|heartbeat[^\n]*(before|lt|older|超时)' "$application_file" "$repository_file" "$status_file" 2>/dev/null; then
+    return 0
+  fi
+  run_line="$(grep -n -m1 'markRunning(taskId)' "$application_file" | cut -d: -f1)"
+  [[ "$run_line" =~ ^[0-9]+$ ]] || run_line=1
+  run_block="$(python3 "$java_method_window_script" "$application_file" "$run_line" 2>/dev/null || true)"
+  [[ -n "$run_block" ]] || run_block="$(sed -n "${run_line},$((run_line + 90))p" "$application_file")"
+  grep -Eq 'findById\(taskId\)' <<<"$run_block" || return 0
+  {
+    printf '%s\n' "P1 ${application_file#"$source_root/"}:$run_line - 异步导出任务置为 RUNNING 后没有超时租约回收路径，任务可能永久卡在执行中。"
+    printf '%s\n' '影响：节点宕机、OOM、XXL-JOB 超时，或置为 RUNNING 后的第二次查询失败时，异常可能绕过 markFailed；activeValues 仍会把该任务视为进行中，重复提交被拒绝且清理任务只处理 SUCCESS，最终形成永久 RUNNING 和不可重试的导出。'
+    printf '%s\n' '修复建议：把 heartbeat 作为租约实现，增加按租户安全回收超时 RUNNING 任务的原子状态迁移；执行入口、失败处理和回收都要区分任务所有权，避免旧节点覆盖新节点。'
+    printf '%s\n' '验证方式：模拟进程在 markRunning 后退出、心跳超时、数据库瞬时异常和 XXL-JOB 超时，确认回收任务可将其标记 FAILED/可重试且不会回收仍在运行的任务；重复提交和并发执行保持幂等。'
+    printf '%s\n' "证据行：${application_file#"$source_root/"}:$run_line markRunning 后执行；${repository_file#"$source_root/"}:RUNNING 心跳更新但无 stale/lease 回收。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_erp_export_empty_workbook_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local handler_file method_line method_block
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+  grep -Eq '^\+\+\+ b/.*/RetailerExportHandler\.java$' "$diff_file" || return 0
+  handler_file="$(find "$source_root/src/main/java" -type f -name 'RetailerExportHandler.java' -print -quit 2>/dev/null || true)"
+  [[ -f "$handler_file" ]] || return 0
+  method_line="$(grep -n -m1 'long writeAsync' "$handler_file" | cut -d: -f1)"
+  [[ "$method_line" =~ ^[0-9]+$ ]] || return 0
+  method_block="$(python3 "$java_method_window_script" "$handler_file" "$method_line" 2>/dev/null || true)"
+  [[ -n "$method_block" ]] || method_block="$(sed -n "${method_line},$((method_line + 120))p" "$handler_file")"
+  grep -Eq 'ExcelWriter|writerSheet|batch\.isEmpty\(\)|writer\.write' <<<"$method_block" || return 0
+  grep -F 'batch.isEmpty()' <<<"$method_block" >/dev/null || return 0
+  grep -Eq 'break[[:space:]]*;' <<<"$method_block" || return 0
+  grep -Eiq 'writer\.write[[:space:]]*\([[:space:]]*(Collections\.emptyList|List\.of|java\.util\.Collections\.emptyList)' <<<"$method_block" && return 0
+  {
+    printf '%s\n' "P1 ${handler_file#"$source_root/"}:$method_line - 异步导出在首批查询为空时直接结束，可能生成没有任何 sheet 数据的无效 XLSX。"
+    printf '%s\n' '影响：精确 count 为 0 或数据在 count 与写入之间被删除时，while 首次拿到空批次就 break，writer 从未写入表头/空行；任务却继续上传并标记 SUCCESS，用户下载后可能得到 Excel 无法打开或没有工作表的文件。'
+    printf '%s\n' '修复建议：显式处理空结果，至少写入一个合法的空 sheet/表头；同时让导出行数、文件校验和 SUCCESS 状态以实际生成的可解析 XLSX 为准。'
+    printf '%s\n' '验证方式：覆盖 count=0、count>0 但首批为空、以及最后一批为空三种路径，下载文件后用 Apache POI/EasyExcel 解析，确认 sheet、表头和任务状态均正确。'
+    printf '%s\n' "证据行：${handler_file#"$source_root/"}:$method_line writeAsync 首批为空即 break；方法内没有显式空 sheet 写入。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_erp_export_mutable_cursor_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local repository_file application_file cursor_line cursor_block
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+  grep -Eq '^\+\+\+ b/.*/RetailerRepository\.java$' "$diff_file" || return 0
+  grep -Eq '^\+\+\+ b/.*/RetailerExportHandler\.java$' "$diff_file" || return 0
+  repository_file="$(find "$source_root/src/main/java" -type f -name 'RetailerRepository.java' -print -quit 2>/dev/null || true)"
+  application_file="$(find "$source_root/src/main/java" -type f -name 'RetailerApplication.java' -print -quit 2>/dev/null || true)"
+  [[ -f "$repository_file" ]] || return 0
+  cursor_line="$(grep -n -m1 'listExportBatch' "$repository_file" | cut -d: -f1)"
+  [[ "$cursor_line" =~ ^[0-9]+$ ]] || return 0
+  cursor_block="$(python3 "$java_method_window_script" "$repository_file" "$cursor_line" 2>/dev/null || true)"
+  [[ -n "$cursor_block" ]] || cursor_block="$(sed -n "${cursor_line},$((cursor_line + 80))p" "$repository_file")"
+  grep -Eq 'lastStatus|getStatus|status' <<<"$cursor_block" || return 0
+  grep -Eq 'lastId|getId' <<<"$cursor_block" || return 0
+  grep -Eq 'orderByAsc\([^)]*getStatus|orderByAsc[[:space:]]*\([^\n]*status' "$repository_file" || return 0
+  [[ -f "$application_file" ]] && grep -Eq 'setStatus\(|retailerRepository\.update\(' "$application_file" || return 0
+  if grep -Eiq 'snapshot|createdAt|statusAt|immutable[[:space:]]+cursor' <<<"$cursor_block"; then
+    return 0
+  fi
+  {
+    printf '%s\n' "P1 ${repository_file#"$source_root/"}:$cursor_line - 大数据导出使用可变 status+id 游标，导出期间状态更新可能导致零售商重复或漏行。"
+    printf '%s\n' '影响：游标按 status ASC、id DESC 推进，但零售商启用/停用会改变 status；同一记录可能跳到已扫描区间而被跳过，也可能重新落入后续区间，导出的快照不完整且不可复现。'
+    printf '%s\n' '修复建议：使用不可变快照边界（例如创建导出批次时固定版本/ID 集合或固定一致性时间点），或只按不可变主键做稳定 keyset 分页；不要把业务状态作为跨批次游标。'
+    printf '%s\n' '验证方式：导出分批执行时并发启用/停用记录，比较导出 ID 与事务开始时快照，确认每条符合条件的记录恰好一次且不会因状态变化重复/丢失。'
+    printf '%s\n' "证据行：${repository_file#"$source_root/"}:$cursor_line status+id keyset；${application_file#"$source_root/"}:状态更新入口与导出并发。"
+    printf '\n'
+  } >>"$output_file"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_schema_snapshot_migration_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -12798,6 +12933,10 @@ collect_migration_delete_preflight "$chunk_input_file" "$build_preflight_file" "
 collect_report_quantity_void_serial_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_report_quantity_table_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_report_quantity_pagination_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_erp_export_task_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_erp_export_running_lease_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_erp_export_empty_workbook_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_erp_export_mutable_cursor_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_schema_snapshot_migration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 if ! collect_transaction_lock_preflight "$chunk_input_file" "$build_preflight_file" "$repo_root"; then
   echo "本地代码审查失败：跨事务/行锁文本索引扫描超时或失败，拒绝把不完整证据当作 clean；请缩小 diff、提高总超时或人工复核后重试。" >&2

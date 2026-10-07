@@ -514,3 +514,4 @@ system 角色/API 真实复测又暴露一个共性协议缺陷：角色/API 确
 同日下载并私有保存 AACR-Bench 正/负审查样本、Vul4J 元数据和 JavaVFC 人工 JSONL，记录来源、许可证、版本和 SHA-256；只做完整性核验，不直接改动 few-shot 或独立 holdout。外部数据下一步先规范化、去重、切分，再作为 train/dev/external-smoke 使用。
 
 2026-10-07：为 `platform-erp-service:a942bb4f` 增加三条确定性回归保护：作废报量串码计数缺少有效订单状态、五张报量持久化表缺少存量库版本化 migration、销量查询把订单/明细/串码全量加载后在 Java 中分页。规则要求完整的应用、仓储、控制器和查询对象证据，并对作废清理、状态关联、版本化 migration、数据库分页和 keyset 分页提供安全反例。`evals/test-erp-report-quantity-preflight.sh` 已接入完整预检套件，正负回归、完整预检和分片回归均通过。该提交的 Ollama 大差异盲跑未在总预算内完成，记录为 fail-closed 的调优源，不计入模型原生召回；当前严格独立口径仍为 9 个 gold P0/P1、命中 3 个、召回 33.3%，输出完整与双轮稳定 12/12。个人版尚未达到最终高可用验收，后续继续补未见独立根因并冻结复测。
+2026-10-07：新增 ERP 大数据导出确定性预检，覆盖新导出任务表缺少存量 migration、RUNNING 任务无租约回收、空结果成功上传以及可变 status+id 游标四类高置信根因；`evals/test-erp-export-preflight.sh` 正负回归通过并接入总套件。`platform-system:57e86246` 两轮个人 profile 完整稳定但漏掉两个独立 P1，已写入私有账本；严格模型 holdout 更新为 11 个 gold、3 个命中、27.3% 召回，输出完整/双轮稳定 14/14。确定性规则命中不计入模型原生召回，后续继续补未见功能簇。
