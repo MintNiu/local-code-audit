@@ -132,6 +132,18 @@ python3 scripts/validate-external-dataset.py /path/to/private/review-dataset.jso
 
 当前数据集优先级、许可证边界、切分规则，以及“模型原生发现”和“确定性预检补齐”的指标口径，见[外部数据集使用边界](docs/external-datasets-plan.zh-CN.md)。
 
+对于 AACR-Bench 的审查表达 smoke 数据，下载的 JSON 仍放在仓库之外，只转换人工评论：
+
+```bash
+python3 scripts/prepare-aacr-review-dataset.py \
+  /private/path/positive_samples.json /private/path/negative_samples.json \
+  --limit-per-language 4 \
+  --output /private/path/aacr-human-external-smoke.jsonl
+python3 scripts/validate-external-dataset.py /private/path/aacr-human-external-smoke.jsonl
+```
+
+转换器默认排除 LLM 增强评论，也不会把 AACR 评论当作 Platform 的 P0/P1 金标。
+
 对于本机已下载的 NIST Juliet Java 压缩包，可以生成私有 Java 审计 smoke 集（压缩包和生成的源码 JSONL 都不提交）：
 
 ```bash

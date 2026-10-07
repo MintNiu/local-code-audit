@@ -161,6 +161,18 @@ The validator checks source/license metadata, positive finding completeness, cha
 
 See [docs/external-datasets-plan.zh-CN.md](docs/external-datasets-plan.zh-CN.md) for the current dataset priority, license boundaries, split policy, and model-native versus deterministic-preflight metrics.
 
+For AACR-Bench review-format smoke data, keep the downloaded JSON outside this repository and normalize only human comments:
+
+```bash
+python3 scripts/prepare-aacr-review-dataset.py \
+  /private/path/positive_samples.json /private/path/negative_samples.json \
+  --limit-per-language 4 \
+  --output /private/path/aacr-human-external-smoke.jsonl
+python3 scripts/validate-external-dataset.py /private/path/aacr-human-external-smoke.jsonl
+```
+
+The converter excludes LLM-enhanced comments by default and does not treat AACR review comments as Platform P0/P1 gold.
+
 For a locally downloaded NIST Juliet Java archive, extract a small private audit smoke set (the archive itself is not committed):
 
 ```bash

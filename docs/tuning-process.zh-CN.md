@@ -1176,3 +1176,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 随后做了独立 scorecard 的规则时间线审计。`platform-bafan:f895a223` 的路径穿越预检和 `platform-erp-service:4451b5b` 的权限注解预检都在对应样本之后才设计，虽然两次运行都稳定可见，但不能继续留在未见 holdout；两行私有标签已改为 `tuning-source`，由新的未参与规则设计样本替补。严格表因此从 11 个 gold/命中 5 个修正为 9 个 gold/命中 3 个，召回率为 33.3%，输出完整和双轮稳定为 12/12，定位准确为 3/3。这个下调是去除调优泄漏，不是模型回归；当前 scorecard 也仍未拆出 `model_native` 与 `preflight` 两个独立列，后续补标前不把 33.3%解释成纯模型原生能力。
 
 同日按外部数据边界下载了 AACR-Bench 的正/负审查样本、Vul4J 数据集元数据和 JavaVFC 人工 JSONL，均保存到 `~/.local/share/local-review/datasets/`，并记录版本、许可证和 SHA-256 私有 manifest。AACR 的评论包含 LLM 增强内容，Vul4J 需要区分 PoV 与 SpotBugs-only，JavaVFC 主要是修复 diff 而非人工 finding；因此本轮只完成归档和完整性核验，没有直接写入 few-shot、没有把它们加入 Platform holdout，也没有把外部样本冒充 P0/P1 金标。下一步先做规范化字段映射和仓库/提交谱系去重，再从 train/dev 抽取少量短样本。
+
+随后新增 `scripts/prepare-aacr-review-dataset.py`，仅保留 AACR 的人工评论，按仓库/提交/文件/行号去重并生成 40 条十语言均衡的 `external-smoke` JSONL；转换回归和 `scripts/validate-external-dataset.py` 均通过。该转换器只证明字段、来源和定位元数据完整，不把“评论存在”解释成漏洞金标，也没有把结果自动塞入本机 few-shot。
