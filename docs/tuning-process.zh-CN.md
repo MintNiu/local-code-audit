@@ -1218,3 +1218,7 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同日把 Vul4J 的方向性限制写入评测纪律：`human_patch` 指向修复提交，不能直接作为“引入漏洞的代码 review diff”。对 `VUL4J-6` 的真实修复提交 smoke，高性能 profile 返回 clean，而保守 baseline 给出无效 P2；按 profile 不一致 fail-closed，不计入外部召回或误报率。新增的整数循环溢出预检只以合成正/负夹具验收。后续只有拿到漏洞引入提交、可复现 PoV 和独立文件/行号标签，才会把 Vul4J 记录提升为 external-smoke 金标。
 
 同日针对该 smoke 暴露的 baseline 语义误报，在固定 SYSTEM 规则中增加 Java 类型/编译问题的证据门槛：必须在当前文件或显式 context 中核对两侧真实声明和可达赋值，不能凭循环表达式或缺少字段定义猜测“类型不匹配”。A/B 复测同一 16K 修复 diff 后，baseline 从无效 P2 变为唯一 clean 结果，高性能 profile 保持 clean；同步 `config/Modelfile` 并重建 `devstral-small-2-review-tuned:latest`，`scripts/verify-runtime.sh` 通过，运行态 SYSTEM SHA-256 为 `9fbd6ae7cf23e5fa4503c9cdfe1d5e97dfea6419f91583b2bf5e53bd06d95de8`。该调整降低语义误报，不回填严格 scorecard 的模型召回率。
+
+2026-10-08：根据 Vul4J 的 CWE 分布补充 Java 命令注入的窄范围确定性预检。规则只在当前变更新增 `Runtime.getRuntime().exec` 或 `ProcessBuilder` 动态命令、同一方法明确把 `command`/`cmd`/`args`/`script` 变量从请求参数、请求头、查询串或路径参数赋值时报告 P1；常量命令、仅来自环境配置的命令、注释和不同方法的请求读取保持 clean。新增正负夹具保留 `throws Exception` 方法声明，覆盖方法边界解析、重复输出和 `影响/修复建议/验证方式` 字段；独立回归与完整 `test-preflight.sh` 均通过。该预检用于在小模型漏报或超时期间保留高置信证据，不计入模型原生召回率；仍需人工确认具体命令语义和部署权限。
+
+同日完成 Bafan 最近提交空窗复核：`85da9946` 的 metrics 暴露属于已知 Actuator 根因族，`4bce2f7` 的异常内容协商、`8c6feda` 的开发 CORS 白名单、`65c0e823` 的测试种子修复和 `99c0143` 的 DDL 注释/列定义均没有差异支持的独立 P0/P1，因此不重复加入 holdout，也没有启动昂贵模型双跑。该审计结果只更新候选分流证据，不改变当前严格 scorecard（17 个 gold P0/P1、模型命中 3 个、召回 17.6%，输出完整与双轮稳定 20/20）。

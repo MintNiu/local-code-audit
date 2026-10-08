@@ -6000,6 +6000,80 @@ collect_java_external_control_flow_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_command_injection_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  local candidates candidate_path candidate_line source_file
+
+  # Only flag a changed Java command sink when the same method visibly reads
+  # request-controlled data and constructs a dynamic command. Constant
+  # ProcessBuilder/exec calls, configuration-only commands, and comments stay
+  # out of this deterministic rule.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-command-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+          text ~ /(Runtime[.]getRuntime\(\)[[:space:]]*[.]?[[:space:]]*exec|new[[:space:]]+ProcessBuilder)[[:space:]]*\(/ &&
+          text ~ /(\+|String[.]format|String[.]join|command|cmd|args|script)/) {
+        print path "\t" line_no
+      }
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target="$candidate_line" '
+      { lines[NR] = $0 }
+      END {
+        line = lines[target]
+        sub(/\/\/.*$/, "", line)
+        if (line ~ /^[[:space:]]*(\/\/|\/\*|\*)/ ||
+            line !~ /(Runtime[.]getRuntime\(\)[[:space:]]*[.]?[[:space:]]*exec|new[[:space:]]+ProcessBuilder)[[:space:]]*\(/ ||
+            line !~ /(\+|String[.]format|String[.]join|command|cmd|args|script)/) exit 1
+        start = target - 40
+        if (start < 1) start = 1
+        request_input = 0
+        method_boundary = 0
+        for (i = start; i <= target; i++) {
+          context = lines[i]
+          sub(/\/\/.*$/, "", context)
+          if (context ~ /\)[^;{}]*\{/ &&
+              context !~ /^[[:space:]]*(if|for|while|switch|catch)[[:space:]]*\(/) {
+            method_boundary++
+            request_input = 0
+          }
+          if (context ~ /(^|[^A-Za-z0-9_$])(command|cmd|args|script)[[:space:]]*=[^;]*(getParameter[[:space:]]*\(|getHeader[[:space:]]*\(|getQueryString[[:space:]]*\(|@RequestParam|@PathVariable|@RequestHeader|request[[:space:]]*[.]?[[:space:]]*get[A-Z])/) {
+            request_input = 1
+          }
+          if (i == target && context ~ /getParameter[[:space:]]*\(|getHeader[[:space:]]*\(|getQueryString[[:space:]]*\(|@RequestParam|@PathVariable|@RequestHeader|request[[:space:]]*[.]?[[:space:]]*get[A-Z]/) {
+            request_input = 1
+          }
+        }
+        exit (method_boundary > 0 && request_input) ? 0 : 1
+      }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 不可信请求输入进入 Runtime.exec/ProcessBuilder 动态命令，存在命令注入风险。" \
+      '影响：攻击者可通过请求参数、请求头或路径变量注入额外参数/命令，使服务进程执行超出业务允许范围的操作，进而读取或篡改数据、访问内网或接管运行账户。' \
+      '修复建议：避免把请求数据拼接为操作系统命令；改用固定的参数化 API 或严格的命令/参数 allowlist，并在进程边界前拒绝 shell 元字符和越权参数。' \
+      '验证方式：使用空格、引号、分号、管道、重定向和换行等输入做黑盒测试，确认它们不会改变执行的程序或参数；同时验证 allowlist 外的命令会在执行前被拒绝。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_java_session_expiration_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -13030,6 +13104,7 @@ collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflig
 collect_java_hardcoded_crypto_key_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_command_injection_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_session_expiration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_resource_shutdown_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_lock_lifecycle_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

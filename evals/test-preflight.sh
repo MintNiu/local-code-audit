@@ -5533,6 +5533,10 @@ bash "$repo_root/evals/test-erp-export-preflight.sh"
 bash "$repo_root/evals/test-javavfc-candidates.sh"
 # A 32-bit loop over an unbounded archive long must not be allowed to wrap.
 bash "$repo_root/evals/test-java-integer-loop-preflight.sh"
+# Request-controlled commands must not reach Java OS-process sinks without a
+# fixed command/argument boundary; keep constant and configuration-only calls
+# as clean negative fixtures.
+bash "$repo_root/evals/test-java-command-injection-preflight.sh"
 # Vul4J CVE/CWE metadata is also candidate-only until a human supplies
 # line-level labels; keep patch-URL filtering and split hygiene covered.
 bash "$repo_root/evals/test-vul4j-candidates.sh"
