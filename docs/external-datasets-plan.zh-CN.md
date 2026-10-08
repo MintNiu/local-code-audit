@@ -7,10 +7,11 @@
 | 优先级 | 数据集 | 主要用途 | 当前处理方式 |
 | --- | --- | --- | --- |
 | 1 | [AACR-Bench](https://github.com/alibaba/aacr-bench) | 真实 PR 的评论、定位、类别和多语言审查表达 | 先抽取少量 Java/TS/SQL/配置样本做 external-smoke；原始 PR 和引用仓库许可证逐项记录 |
-| 2 | [VCC-Eval](https://github.com/tuhh-softsec/VCC-Eval-A-Manually-Curated-Dataset-of-Vulnerability-Introducing-Commits-in-Java) | Java 漏洞引入提交、CVE/CWE 和精确引入行 | 先做 metadata-only 候选；数据仓库未声明可复用许可证，必须人工核对 intro parent、diff、触发证据和引用仓库许可后才能进入训练/holdout |
-| 3 | [Vul4J](https://github.com/tuhh-softsec/Vul4J) | 真实 Java 漏洞、修复补丁和 PoV 测试 | 优先使用有 PoV 的子集；PoV 与仅静态告警样本分层统计，不混成一个金标 |
-| 4 | [JavaVFC](https://zenodo.org/records/13731781) | 人工核验的 Java 修复提交 | 784 条人工集用于 train/dev 候选；extended 启发式集只能做 smoke，按仓库和提交谱系去重 |
-| 5 | [NIST Juliet/SARD](https://www.nist.gov/publications/juliet-11-cc-and-java-test-suite) | CWE 正负对照、行号和输出协议回归 | 只抽取小型 Java 子集；合成样本不代表真实世界召回率 |
+| 2 | [ReviewBench](https://github.com/review-bench/ReviewBench) | 真实 PR 语境、定位、排序和跨语言审查格式 | 只做 metadata-only external-smoke；仓库当前 219 条、Java 7 条，不能作为 Java P0/P1 严格召回金标 |
+| 3 | [VCC-Eval](https://github.com/tuhh-softsec/VCC-Eval-A-Manually-Curated-Dataset-of-Vulnerability-Introducing-Commits-in-Java) | Java 漏洞引入提交、CVE/CWE 和精确引入行 | 先做 metadata-only 候选；数据仓库未声明可复用许可证，必须人工核对 intro parent、diff、触发证据和引用仓库许可后才能进入训练/holdout |
+| 4 | [Vul4J](https://github.com/tuhh-softsec/Vul4J) | 真实 Java 漏洞、修复补丁和 PoV 测试 | 优先使用有 PoV 的子集；PoV 与仅静态告警样本分层统计，不混成一个金标 |
+| 5 | [JavaVFC](https://zenodo.org/records/13731781) | 人工核验的 Java 修复提交 | 784 条人工集用于 train/dev 候选；extended 启发式集只能做 smoke，按仓库和提交谱系去重 |
+| 6 | [NIST Juliet/SARD](https://www.nist.gov/publications/juliet-11-cc-and-java-test-suite) | CWE 正负对照、行号和输出协议回归 | 只抽取小型 Java 子集；合成样本不代表真实世界召回率 |
 
 暂缓 OWASP BenchmarkJava、MegaVul、PrimeVul、GitBug-Java 和 Defects4J：前几项存在 GPL/数据许可或标签质量边界，后几项体量大、偏通用缺陷或下载成本高。任何重新引入都必须先完成许可证和磁盘成本复核。
 
@@ -45,6 +46,8 @@ few-shot 每次只检索 2–4 条短、脱敏、行号稳定的示例，优先�
 Platform 真实提交仍是最终独立 holdout。评测时间线审计后，4451 的权限注解预检和 f895 的路径穿越预检均从独立表移入 tuning-source；截至 2026-10-08，新增 HR/幼教、配置和小程序身份样本后，严格 scorecard 为 17 个 gold P0/P1、模型命中 3 个、召回 17.6%，输出完整与双轮稳定 20/20。外部数据的改善不能直接写入这个分母。
 
 当前已将 AACR-Bench 两个原始 JSON 按人工评论转换为 40 条 `external-smoke` 记录（10 种语言各 4 条），并通过 `validate-external-dataset.py`；转换器默认剔除 `is_ai_comment=true` 的 LLM 增强评论。该集只用于评论格式、定位和多语言覆盖实验，不直接写入 few-shot，也不进入 Platform 召回分母。
+
+2026-10-08：新增 `scripts/prepare-reviewbench-candidates.py` 和 `evals/test-reviewbench-candidates.sh`。规范化器读取 ReviewBench 固定 revision 的 `corpus/manifest.json`，只输出仓库、PR、base/head、语言、变更规模、来源和许可证元数据；所有记录标记为 `pending-human-label`，明确 `golden_status=not-loaded`，不复制源码、diff、评论或 golden finding。实际 revision `66df3f3` 转换为 219 条候选，其中 Java 7 条；Java 数量不足以构成独立高危门禁，ReviewBench 仅用于真实 PR 语境、行号格式、跨语言 smoke 和误报分析。仓库虽为 MIT，引用项目和评审内容仍需逐项审查许可证。
 
 2026-10-08：新增 `scripts/prepare-vul4j-candidates.py` 和 `evals/test-vul4j-candidates.sh`。规范化器读取 Vul4J CSV，只接受 GitHub `commit/<sha>` 修复链接，跳过 compare 链接和重复仓库/提交，保留 CVE/CWE、受影响模块、PoV 测试名和许可证来源，并将所有记录标记为 `pending-human-label`。Vul4J 的漏洞类别和修复提交不能直接证明 review 文件/行号，因此不自动生成 `positive`、不复制源码或补丁文本，也不写入 Platform 严格 holdout；人工确认后才可进入 external-smoke 或独立评测。该回归已接入完整 `test-preflight.sh`，用于防止数据标签泄漏。
 

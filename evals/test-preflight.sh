@@ -5535,6 +5535,9 @@ bash "$repo_root/evals/test-javavfc-candidates.sh"
 # source/diff lineage still require human verification before any gold label.
 bash "$repo_root/evals/test-vcc-eval-candidates.sh"
 bash "$repo_root/evals/test-vcc-eval-verifier.sh"
+# ReviewBench is metadata-only external smoke; never import source, diff, or
+# golden review text into the public repository.
+bash "$repo_root/evals/test-reviewbench-candidates.sh"
 # A 32-bit loop over an unbounded archive long must not be allowed to wrap.
 bash "$repo_root/evals/test-java-integer-loop-preflight.sh"
 # Request-controlled commands must not reach Java OS-process sinks without a

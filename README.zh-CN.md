@@ -144,6 +144,17 @@ python3 scripts/validate-external-dataset.py /private/path/aacr-human-external-s
 
 转换器默认排除 LLM 增强评论，也不会把 AACR 评论当作 Platform 的 P0/P1 金标。
 
+对于 ReviewBench 的真实 PR 语境和跨语言 smoke，下载的 manifest 与引用仓库仍放在公开仓库之外，只规范化固定版本的元数据：
+
+```bash
+python3 scripts/prepare-reviewbench-candidates.py \
+  /private/path/reviewbench/corpus/manifest.json \
+  --revision 66df3f322d0d85ea133ea9fa777f5d1a8c933c4e \
+  --output /private/path/reviewbench-candidates.jsonl
+```
+
+输出只包含仓库、PR、base/head、语言和变更规模；每条记录保持 `pending-human-label`，并写入 `golden_status=not-loaded`。不会复制源码、diff、评论或 golden finding。ReviewBench 当前只有 7 条 Java PR，不能作为 Java P0/P1 严格召回门禁，只用于真实 PR 语境、定位格式、多语言 smoke 和误报分析。对应无模型回归为 `bash evals/test-reviewbench-candidates.sh`。
+
 对于 VCC-Eval 的 Java 漏洞引入提交元数据，先生成不含源码和补丁的私有候选索引：
 
 ```bash

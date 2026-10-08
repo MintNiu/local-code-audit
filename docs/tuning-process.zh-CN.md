@@ -1236,3 +1236,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 随后只提取 Armeria 与 Undertow 的标注文件做窄差异个人 tuned smoke，两次都完整返回 clean；整仓库 archive 的 promisor blob 网络断开则按 fail-closed 保留。该结果没有进入召回率或误报率，说明外部数据导入和模型能力诊断必须继续与正式 scorecard 分离。
 
 对 Armeria 追加一条泛化的动态 HTTP header 名称 CR/LF 校验 few-shot 做隔离 A/B，输出仍与无追加示例一致，因此没有改动默认私有 examples；没有可复现收益时不把外部样本强行塞入提示词。
+
+2026-10-08：完成 ReviewBench 外部数据接入的只读边界。先核对固定 revision `66df3f3` 的 manifest 与官方结构：全量 219 条 PR、19 种语言，Java 7 条；Java 测试集只有 1 条，不能支撑独立高危召回门禁。新增 `scripts/prepare-reviewbench-candidates.py`，只输出 canonical 仓库、PR 号、base/head、语言、变更规模、来源 revision 和许可证元数据，所有行保持 `pending-human-label`，`golden_status=not-loaded`；不复制源码、完整 diff、评论或 golden finding，也不把修复提交当成 review gold。实际 manifest 转换为 219 条候选、Java 过滤为 7 条，重复仓库表示、非法 SHA、语言过滤和 no-leakage 回归均通过。ReviewBench 仅进入 external-smoke，用于真实 PR 语境、行号/定位格式、跨语言覆盖和误报分析；引用项目与评审内容的许可证仍需逐项核对。该接入没有修改默认 few-shot，也没有改变当前严格 scorecard（17 个 gold P0/P1、模型命中 3 个、召回 17.6%，输出完整与重复稳定 20/20）。

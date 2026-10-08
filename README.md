@@ -173,6 +173,24 @@ python3 scripts/validate-external-dataset.py /private/path/aacr-human-external-s
 
 The converter excludes LLM-enhanced comments by default and does not treat AACR review comments as Platform P0/P1 gold.
 
+For ReviewBench PR-context smoke data, keep the downloaded manifest and all
+referenced repositories outside this public repository. Normalize only the
+fixed-revision metadata:
+
+```bash
+python3 scripts/prepare-reviewbench-candidates.py \
+  /private/path/reviewbench/corpus/manifest.json \
+  --revision 66df3f322d0d85ea133ea9fa777f5d1a8c933c4e \
+  --output /private/path/reviewbench-candidates.jsonl
+```
+
+The converter emits repository, PR, base/head, language, and size metadata;
+every row remains `pending-human-label` with `golden_status=not-loaded`. It
+does not copy source, diffs, review text, or golden findings. ReviewBench is
+useful for multilingual review context and location smoke, but its seven Java
+PRs are not a Java P0/P1 recall gate. Run
+`bash evals/test-reviewbench-candidates.sh` for the no-leakage regression.
+
 For VCC-Eval Java vulnerability-introduction metadata, create a private
 metadata-only candidate index:
 
