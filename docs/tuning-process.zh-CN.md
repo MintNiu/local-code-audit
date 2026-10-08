@@ -1224,3 +1224,7 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同日完成 Bafan 最近提交空窗复核：`85da9946` 的 metrics 暴露属于已知 Actuator 根因族，`4bce2f7` 的异常内容协商、`8c6feda` 的开发 CORS 白名单、`65c0e823` 的测试种子修复和 `99c0143` 的 DDL 注释/列定义均没有差异支持的独立 P0/P1，因此不重复加入 holdout，也没有启动昂贵模型双跑。该审计结果只更新候选分流证据，不改变当前严格 scorecard（17 个 gold P0/P1、模型命中 3 个、召回 17.6%，输出完整与双轮稳定 20/20）。
 
 同轮运行个人高性能合成门禁 `./evals/run-synthetic.sh`：115 个正例和 110 个 clean 全部退出 0，新增命令注入类别 5/5，其他 Java 安全、SQL、租户、迁移和输出截断场景均保持通过；每个场景 5 轮 finding signature 一致，显式截断仍按失败处理。该结果只证明运行器协议、确定性预检和重复稳定性没有回归，不替代真实历史提交的独立召回评测。
+
+同日重新核对 Platform 候选时间窗：`platform-system:16c3fa3` 已在严格表中作为双跑稳定的 clean holdout，后续 `45d1f0c` 暴露的存量菜单恢复缺陷已作为 tuning-source 并由 `collect_sql_menu_delivery_preflight` 覆盖；`b359b2b`、`81ab687`、`060c0d9` 也已有既有分类。因此 2026-10-01 之后没有新的未覆盖 P0/P1，未重复启动模型或修改 scorecard；同时保留了其他工作区已有用户改动不触碰的边界。
+
+外部 Vul4J 方向性复核进一步确认：`VUL4J-33`（Struts/CVE-2016-3081）和 `VUL4J-42`（Plexus Utils/CVE-2017-1000487）都能从修复提交的 parent、PoV 测试和修复差异确认表达式链/OS 命令注入根因，但当前数据仍没有可靠的漏洞引入提交。`human_patch` 或其 parent 只能作为 external-smoke 方向证据，不能直接写入 positive 或严格 holdout；待找到 introduction commit、可复现 PoV 和精确变更行后再提升标签等级。
