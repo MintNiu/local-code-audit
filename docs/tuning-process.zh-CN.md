@@ -1210,3 +1210,7 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 对 `platform-auth:9dbcc0c5` 的在线会话候选启动个人 profile 后，第一轮 3 个分片在总预算内未完成，运行器按 fail-closed 退出；不能把它解释为 clean 或漏报率。失败输出仍保留全部确定性证据：URL 参数承载 token、在线用户响应回传原始 session token，以及在线会话读取/踢下线未绑定租户。该提交被记录为模型尾延迟/容量样本，预检回归继续保证这些问题在模型超时时可见；不写入严格模型召回率。
 
 外部数据边界保持不变：AACR-Bench 的人工评论已规范化为 40 条多语言 `external-smoke`，其中 Java 条目仅用于格式/定位回归；JavaVFC 生成 200 条 Java 提交候选但全部标记 `pending-human-label`，因为其元数据没有独立逐行 review 金标；CodeReviewBench 只作为评论风格与误报分析 smoke。三者均不直接写入 few-shot 或严格 Platform holdout，避免把修复提交、AI 评论或未复核建议伪装成漏洞标签。
+
+2026-10-08：完成对 2026-09-25 之后 Platform 直接父提交的第二轮空窗审计。候选发现器得到 24 条记录，人工根因去重后只有 9 条进入待审队列，全部来自 `platform-erp-front`。逐提交核对结果为：8 条纯前端展示/交互变更，1 条与已审计的 ERP 报量后端族相关但没有新增独立 P0/P1；因此全部写入私有 `blind-candidate-review.tsv`，分别标记为 `exclude-frontend-only` 或 `exclude-no-p1-evidence`，没有启动 Ollama 双跑。重新运行候选筛选后 `selected=0`，证明当前本地候选窗已闭合，下一批必须来自新的功能簇或外部数据人工标注，而不是反复评测这些前端提交。
+
+同轮核对上一轮被用户中断的完整无模型回归：`/tmp/local-review-full-suite.out` 最后一行明确为 `preflight regression passed`，跟踪进程已退出；候选、外部数据规范化、所有确定性预检和 shell 语法检查均保留成功证据。私有 scorecard 当前仍为 17 个严格 P0/P1 gold、模型原生命中 3 个、严格召回率 17.6%，输出完整 20/20、重复稳定 20/20、命中定位准确 3/3。这个数字仍远低于个人版高可用门禁；前端空窗审计只提高补样效率，不改变模型能力评分。
