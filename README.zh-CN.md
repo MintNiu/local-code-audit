@@ -155,6 +155,7 @@ python3 scripts/prepare-juliet-java.py \
 
 转换器从 manifest 读取 CWE 名称和缺陷行号，生成 bad/good 对照样本，并将结果保留在公开仓库之外。
 运行器还包含窄范围 Java 外部安全预检：对同一方法内字面量密码流入 `DriverManager.getConnection`、非空字面量流入 `SecretKeySpec`、`readLine()` 数据直接进入 `sendRedirect`、弱加密算法、GET 表单提交密码、敏感 Cookie 未设置 `Secure`、外部计数直接控制无上限循环、取模计数器配合永真 `do/while`、`HttpSession.setMaxInactiveInterval(-1)`、文件资源只在成功路径关闭、`ReentrantLock`/`Lock` 的 `lock()` 或 `lockInterruptibly()` 获取后同一方法没有同一接收者释放，以及非 `volatile` 的 static 字段形成结构化嵌套双重检查初始化的证据先给出确定性 finding；固定字符串重定向、环境/密钥注入、现代 AES、POST 表单、已设置 `Secure` 的 Cookie、有明确上限的循环、带可达 `break` 的循环、有限会话超时、`finally`/try-with-resources 或显式释放锁的保护、`volatile` 双重检查字段、方法级同步和不完整/非嵌套空判断保持 clean。回归入口为 `evals/test-java-external-preflight.sh`，不会下载或提交外部源码。
+Java 命令注入预检单独检查变更中的 `Runtime.getRuntime().exec`/`ProcessBuilder`：只有当同一方法内的 `command`/`cmd`/`args`/`script` 变量明确来自请求参数、请求头、查询串或路径参数时才报告；常量命令和仅来自环境配置的命令保持 clean。正负回归为 `bash evals/test-java-command-injection-preflight.sh`，并已接入 `test-preflight.sh`。
 运行器还检查一个窄范围 SQL 交付升级边界：独立 delivery 脚本从旧版本的软删除父菜单列表移除 ID，但没有同时按应用、租户和角色范围恢复菜单及关系时，报告已有库升级风险；新库初始化脚本不能替代该升级证据。回归入口为 `evals/test-sql-menu-delivery-preflight.sh`。
 个人高性能入口还包含两条窄范围 ERP 履约并发预检：普通查询读取订单/明细后整行回写旧订单聚合，以及客户端明细顺序直接决定逐行更新或库存占用顺序。规则要求变更的 `SalesFulfillmentApplication` 与仓储实现同时提供代码证据，输出完整的 P1、影响、修复建议、验证方式和证据行；当可见锁/版本/CAS 保护或确定性明细排序时保持静默。这是确定性工程保护，不代表模型已经学会该模式。回归入口为 `evals/test-sales-fulfillment-preflight.sh`。
 每个模板先填写 `# verdict`（`clean` 或 `findings`）和 `# review_status`（完成后填 `complete`），再逐条标记发现；未完成或 `uncertain` 的记录不应计入汇总指标。
