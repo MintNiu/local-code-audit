@@ -1238,3 +1238,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 对 Armeria 追加一条泛化的动态 HTTP header 名称 CR/LF 校验 few-shot 做隔离 A/B，输出仍与无追加示例一致，因此没有改动默认私有 examples；没有可复现收益时不把外部样本强行塞入提示词。
 
 2026-10-08：完成 ReviewBench 外部数据接入的只读边界。先核对固定 revision `66df3f3` 的 manifest 与官方结构：全量 219 条 PR、19 种语言，Java 7 条；Java 测试集只有 1 条，不能支撑独立高危召回门禁。新增 `scripts/prepare-reviewbench-candidates.py`，只输出 canonical 仓库、PR 号、base/head、语言、变更规模、来源 revision 和许可证元数据，所有行保持 `pending-human-label`，`golden_status=not-loaded`；不复制源码、完整 diff、评论或 golden finding，也不把修复提交当成 review gold。实际 manifest 转换为 219 条候选、Java 过滤为 7 条，重复仓库表示、非法 SHA、语言过滤和 no-leakage 回归均通过。ReviewBench 仅进入 external-smoke，用于真实 PR 语境、行号/定位格式、跨语言覆盖和误报分析；引用项目与评审内容的许可证仍需逐项核对。该接入没有修改默认 few-shot，也没有改变当前严格 scorecard（17 个 gold P0/P1、模型命中 3 个、召回 17.6%，输出完整与重复稳定 20/20）。
+
+随后对 ReviewBench 唯一 Java 测试 PR 做私有 base/head 盲测：19 个文件、409 行新增、28 行删除，两轮个人高性能 profile 均完整返回 `未发现阻塞问题`，结果 SHA-256 完全一致。上游该样本包含 2 条 high gold，模型原生命中 0/2；该结果作为稳定漏报记录在私有账本，不回填严格 scorecard，也没有把 golden 文本、源码或 diff 写入公开仓库。它说明当前瓶颈不是单纯采样波动，下一步应优先补充未见根因的模型能力和跨文件语义证据，而不是把外部 gold 直接塞进 few-shot。
