@@ -1234,3 +1234,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同日对 VCC-Eval external-smoke 做 parent/diff 方向性核验：Armeria 和 Undertow 的引入行均为实际新增行，JSPWiki 的原始标签路径则在引入提交不存在，未自动修正。验证器只保留证据状态，尚未把任何样本转为 gold；后续还需人工确认触发条件、根因严重度、许可证和与当前 Platform holdout 的功能簇隔离。
 
 随后只提取 Armeria 与 Undertow 的标注文件做窄差异个人 tuned smoke，两次都完整返回 clean；整仓库 archive 的 promisor blob 网络断开则按 fail-closed 保留。该结果没有进入召回率或误报率，说明外部数据导入和模型能力诊断必须继续与正式 scorecard 分离。
+
+对 Armeria 追加一条泛化的动态 HTTP header 名称 CR/LF 校验 few-shot 做隔离 A/B，输出仍与无追加示例一致，因此没有改动默认私有 examples；没有可复现收益时不把外部样本强行塞入提示词。
