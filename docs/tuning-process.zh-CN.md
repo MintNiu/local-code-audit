@@ -1230,3 +1230,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同日重新核对 Platform 候选时间窗：`platform-system:16c3fa3` 已在严格表中作为双跑稳定的 clean holdout，后续 `45d1f0c` 暴露的存量菜单恢复缺陷已作为 tuning-source 并由 `collect_sql_menu_delivery_preflight` 覆盖；`b359b2b`、`81ab687`、`060c0d9` 也已有既有分类。因此 2026-10-01 之后没有新的未覆盖 P0/P1，未重复启动模型或修改 scorecard；同时保留了其他工作区已有用户改动不触碰的边界。
 
 外部 Vul4J 方向性复核进一步确认：`VUL4J-33`（Struts/CVE-2016-3081）和 `VUL4J-42`（Plexus Utils/CVE-2017-1000487）都能从修复提交的 parent、PoV 测试和修复差异确认表达式链/OS 命令注入根因，但当前数据仍没有可靠的漏洞引入提交。`human_patch` 或其 parent 只能作为 external-smoke 方向证据，不能直接写入 positive 或严格 holdout；待找到 introduction commit、可复现 PoV 和精确变更行后再提升标签等级。
+
+同日对 VCC-Eval external-smoke 做 parent/diff 方向性核验：Armeria 和 Undertow 的引入行均为实际新增行，JSPWiki 的原始标签路径则在引入提交不存在，未自动修正。验证器只保留证据状态，尚未把任何样本转为 gold；后续还需人工确认触发条件、根因严重度、许可证和与当前 Platform holdout 的功能簇隔离。

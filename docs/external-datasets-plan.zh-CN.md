@@ -52,4 +52,6 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 
 2026-10-08：新增 `scripts/prepare-vcc-eval-candidates.py`，读取 VCC-Eval 的 100 条 Java 元数据，规范化引入/修复 SHA、CVE/CWE、仓库镜像和 `172`/`172-177;181` 行范围，按 canonical repo+CVE 谱系切分并全部标记 `pending-human-label`。没有引入行的记录保留为不可进入逐行评测的候选；工具不复制源码/补丁，也不把 introducing commit 自动标成 positive。GitHub/Apache 镜像去重、行范围解析、缺失/非法引入行和无源码输出均由 `evals/test-vcc-eval-candidates.sh` 覆盖，并接入完整 `test-preflight.sh`。
 
+同日对 external-smoke 中 3 条有引入行的候选做了本地 Git 对象方向性核验：Armeria 的 1 行和 Undertow 的 2 行均落在引入提交相对 parent 的真实新增行，且引入提交是修复提交祖先；JSPWiki 的元数据路径在引入提交不存在，实际历史路径属于批量 trunk 同步，因此保留为路径/谱系不匹配，不自动修正、不计入 gold。该核验只证明 parent/diff 方向，尚未完成触发验证、许可证审核或人工严重度标注，3 条记录继续保持 `pending-human-label`。
+
 同日修正 Juliet Java 预处理器的 manifest 关联：优先使用归一化的相对路径，只有 basename 全局唯一时才允许回退。这样可以避免不同 CWE 目录中的同名测试文件共享错误的缺陷行号或标签；Windows 风格路径也会先统一为 `/`。重复 basename、路径分隔符和精确行号均由回归夹具覆盖，数据质量错误不得进入训练或外部 smoke。
