@@ -46,3 +46,5 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 当前已将 AACR-Bench 两个原始 JSON 按人工评论转换为 40 条 `external-smoke` 记录（10 种语言各 4 条），并通过 `validate-external-dataset.py`；转换器默认剔除 `is_ai_comment=true` 的 LLM 增强评论。该集只用于评论格式、定位和多语言覆盖实验，不直接写入 few-shot，也不进入 Platform 召回分母。
 
 2026-10-08：新增 `scripts/prepare-vul4j-candidates.py` 和 `evals/test-vul4j-candidates.sh`。规范化器读取 Vul4J CSV，只接受 GitHub `commit/<sha>` 修复链接，跳过 compare 链接和重复仓库/提交，保留 CVE/CWE、受影响模块、PoV 测试名和许可证来源，并将所有记录标记为 `pending-human-label`。Vul4J 的漏洞类别和修复提交不能直接证明 review 文件/行号，因此不自动生成 `positive`、不复制源码或补丁文本，也不写入 Platform 严格 holdout；人工确认后才可进入 external-smoke 或独立评测。该回归已接入完整 `test-preflight.sh`，用于防止数据标签泄漏。
+
+同日对 `VUL4J-6`（CWE-835，Commons Compress）做了方向性 smoke：修复提交把 `int` 循环计数器改为 `long`，但它是漏洞修复本身，不是引入漏洞的 review diff；因此不能据此计算代码审计召回。个人高性能 profile 返回 clean，而保守 baseline 对同一修复 diff 给出无效的类型不匹配 P2，按 profile 不一致 fail-closed，不计入任何外部指标。针对该根因新增的 `ZipLong` 外部 long 值与变更 `int` 循环组合预检，只用合成正/负夹具验证，避免把修复补丁或模型误报写成金标。

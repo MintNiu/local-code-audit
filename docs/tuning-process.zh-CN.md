@@ -1214,3 +1214,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 2026-10-08：完成对 2026-09-25 之后 Platform 直接父提交的第二轮空窗审计。候选发现器得到 24 条记录，人工根因去重后只有 9 条进入待审队列，全部来自 `platform-erp-front`。逐提交核对结果为：8 条纯前端展示/交互变更，1 条与已审计的 ERP 报量后端族相关但没有新增独立 P0/P1；因此全部写入私有 `blind-candidate-review.tsv`，分别标记为 `exclude-frontend-only` 或 `exclude-no-p1-evidence`，没有启动 Ollama 双跑。重新运行候选筛选后 `selected=0`，证明当前本地候选窗已闭合，下一批必须来自新的功能簇或外部数据人工标注，而不是反复评测这些前端提交。
 
 同轮核对上一轮被用户中断的完整无模型回归：`/tmp/local-review-full-suite.out` 最后一行明确为 `preflight regression passed`，跟踪进程已退出；候选、外部数据规范化、所有确定性预检和 shell 语法检查均保留成功证据。私有 scorecard 当前仍为 17 个严格 P0/P1 gold、模型原生命中 3 个、严格召回率 17.6%，输出完整 20/20、重复稳定 20/20、命中定位准确 3/3。这个数字仍远低于个人版高可用门禁；前端空窗审计只提高补样效率，不改变模型能力评分。
+
+同日把 Vul4J 的方向性限制写入评测纪律：`human_patch` 指向修复提交，不能直接作为“引入漏洞的代码 review diff”。对 `VUL4J-6` 的真实修复提交 smoke，高性能 profile 返回 clean，而保守 baseline 给出无效 P2；按 profile 不一致 fail-closed，不计入外部召回或误报率。新增的整数循环溢出预检只以合成正/负夹具验收。后续只有拿到漏洞引入提交、可复现 PoV 和独立文件/行号标签，才会把 Vul4J 记录提升为 external-smoke 金标。

@@ -5872,6 +5872,73 @@ collect_java_external_control_flow_preflight() {
   done <"$candidates"
   rm -f "$candidates"
 
+  # A 32-bit loop counter compared with a long value decoded from an archive
+  # field can wrap at Integer.MAX_VALUE and become an infinite loop. Keep this
+  # detector narrow to ZipLong values and require the changed loop itself; a
+  # long counter or an explicit upper-bound clamp remains clean.
+  candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-integer-loop-candidates.XXXXXX")"
+  awk '
+    /^diff --git / { path = $4; sub(/^b\//, "", path); next }
+    /^\+\+\+ b\// { path = substr($0, 7); sub(/[[:space:]]+$/, "", path); next }
+    /^@@ / { hunk = $0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/, "", hunk); sub(/ .*/, "", hunk); line_no = hunk + 0; next }
+    /^\+/ {
+      text = substr($0, 2)
+      if (text !~ /^\+/ && text !~ /^[[:space:]]*(\/\/|\/\*|\*)/ &&
+          text ~ /for[[:space:]]*\([^;]*int[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[^;]*;[^;]*<[^;]*;[^)]*\+\+[[:space:]]*\)/) {
+        print path "\t" line_no
+      }
+    }
+    { if (substr($0, 1, 1) == "+" || substr($0, 1, 1) == " ") line_no++ }
+  ' "$diff_file" | awk -F '\t' '$1 != "" && $2 != ""' | LC_ALL=C sort -u >"$candidates"
+  while IFS=$'\t' read -r candidate_path candidate_line; do
+    [[ -n "$candidate_path" && -n "$candidate_line" && -n "$source_root" ]] || continue
+    source_file="$source_root/$candidate_path"
+    path_has_symlink_component "$candidate_path" && continue
+    [[ -f "$source_file" ]] || continue
+    if ! awk -v target="$candidate_line" '
+      { lines[NR] = $0 }
+      END {
+        line = lines[target]
+        if (line !~ /for[[:space:]]*\([^;]*int[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[^;]*;[^;]*<[^;]*;[^)]*\+\+[[:space:]]*\)/) exit 1
+        condition = line
+        sub(/^[^(]*\(/, "", condition)
+        split(condition, clauses, ";")
+        bound = clauses[2]
+        sub(/^.*<[[:space:]]*/, "", bound)
+        gsub(/[[:space:];].*$/, "", bound)
+        sub(/^this\./, "", bound)
+        if (bound == "") exit 1
+        start = target - 35
+        if (start < 1) start = 1
+        zip_value = 0
+        bounded = 0
+        for (i = start; i <= target; i++) {
+          context = lines[i]
+          sub(/\/\/.*$/, "", context)
+          sub(/\/\*.*\*\//, "", context)
+          if (context ~ /^[[:space:]]*(public|private|protected|static)[^;]*\(/ ||
+              context ~ /^[[:space:]]*[A-Za-z_$][A-Za-z0-9_$<>,.?]*[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*\{/) {
+            zip_value = 0
+            bounded = 0
+          }
+          if (context ~ /ZipLong[.]getValue[[:space:]]*\(/ &&
+              context ~ ("(^|[^A-Za-z0-9_$])" bound "[[:space:]]*=")) zip_value = 1
+          if (context ~ /(Math[.]min|Integer[.]MAX_VALUE|Long[.]MAX_VALUE)/ && index(context, bound) > 0) bounded = 1
+        }
+        exit (zip_value && !bounded) ? 0 : 1
+      }
+    ' "$source_file"; then
+      continue
+    fi
+    printf '%s\n' \
+      "P1 $candidate_path:$candidate_line - 32 位循环计数器直接比较外部 long 值，可能整数溢出后形成无限循环。" \
+      '影响：归档或协议中的超大计数可令 int 计数器回绕，线程持续占用 CPU 并造成拒绝服务。' \
+      '修复建议：使用 long 计数器，或在循环前把外部计数限制到明确的非负上限并拒绝超限值；不要只依赖数组长度或解析成功。' \
+      '验证方式：覆盖零、负数、Integer.MAX_VALUE、MAX_VALUE+1 和超大计数，确认循环可终止且超限输入在执行前被拒绝。' \
+      '' >>"$output_file"
+  done <"$candidates"
+  rm -f "$candidates"
+
   # A modulo counter with a non-negative do/while condition is a narrow,
   # high-confidence infinite-loop pattern. A nearby break/return/throw keeps
   # the sample out of this deterministic rule.
