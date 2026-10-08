@@ -173,6 +173,16 @@ python3 scripts/validate-external-dataset.py /private/path/aacr-human-external-s
 
 The converter excludes LLM-enhanced comments by default and does not treat AACR review comments as Platform P0/P1 gold.
 
+For private Vul4J CSV metadata, generate Java-only candidates without turning CVE/CWE metadata into labels:
+
+```bash
+python3 scripts/prepare-vul4j-candidates.py \
+  /private/path/vul4j_dataset.csv \
+  --output /private/path/vul4j-candidates.jsonl
+```
+
+The converter accepts GitHub commit patch URLs, skips compare links and duplicate repository/commit identities, preserves CWE/CVE provenance, and marks every record `pending-human-label`. It does not copy source or patch text; line-level findings must be independently verified before a record can enter a review scorecard.
+
 For a locally downloaded NIST Juliet Java archive, extract a small private audit smoke set (the archive itself is not committed):
 
 ```bash

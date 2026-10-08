@@ -5531,6 +5531,9 @@ bash "$repo_root/evals/test-erp-export-preflight.sh"
 # JavaVFC metadata is candidate-only until a human supplies line-level labels;
 # keep normalization and no-source-copy boundaries regression-tested.
 bash "$repo_root/evals/test-javavfc-candidates.sh"
+# Vul4J CVE/CWE metadata is also candidate-only until a human supplies
+# line-level labels; keep patch-URL filtering and split hygiene covered.
+bash "$repo_root/evals/test-vul4j-candidates.sh"
 
 # Configuration report retention uses a fresh fixture. The add-dto commit
 # above already committed earlier config files, so they are not valid changed
