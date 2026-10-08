@@ -1216,3 +1216,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同轮核对上一轮被用户中断的完整无模型回归：`/tmp/local-review-full-suite.out` 最后一行明确为 `preflight regression passed`，跟踪进程已退出；候选、外部数据规范化、所有确定性预检和 shell 语法检查均保留成功证据。私有 scorecard 当前仍为 17 个严格 P0/P1 gold、模型原生命中 3 个、严格召回率 17.6%，输出完整 20/20、重复稳定 20/20、命中定位准确 3/3。这个数字仍远低于个人版高可用门禁；前端空窗审计只提高补样效率，不改变模型能力评分。
 
 同日把 Vul4J 的方向性限制写入评测纪律：`human_patch` 指向修复提交，不能直接作为“引入漏洞的代码 review diff”。对 `VUL4J-6` 的真实修复提交 smoke，高性能 profile 返回 clean，而保守 baseline 给出无效 P2；按 profile 不一致 fail-closed，不计入外部召回或误报率。新增的整数循环溢出预检只以合成正/负夹具验收。后续只有拿到漏洞引入提交、可复现 PoV 和独立文件/行号标签，才会把 Vul4J 记录提升为 external-smoke 金标。
+
+同日针对该 smoke 暴露的 baseline 语义误报，在固定 SYSTEM 规则中增加 Java 类型/编译问题的证据门槛：必须在当前文件或显式 context 中核对两侧真实声明和可达赋值，不能凭循环表达式或缺少字段定义猜测“类型不匹配”。A/B 复测同一 16K 修复 diff 后，baseline 从无效 P2 变为唯一 clean 结果，高性能 profile 保持 clean；同步 `config/Modelfile` 并重建 `devstral-small-2-review-tuned:latest`，`scripts/verify-runtime.sh` 通过，运行态 SYSTEM SHA-256 为 `9fbd6ae7cf23e5fa4503c9cdfe1d5e97dfea6419f91583b2bf5e53bd06d95de8`。该调整降低语义误报，不回填严格 scorecard 的模型召回率。
