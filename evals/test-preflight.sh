@@ -5534,6 +5534,7 @@ bash "$repo_root/evals/test-javavfc-candidates.sh"
 # VCC-Eval has introducing-commit line metadata, but its repository license and
 # source/diff lineage still require human verification before any gold label.
 bash "$repo_root/evals/test-vcc-eval-candidates.sh"
+bash "$repo_root/evals/test-vcc-eval-verifier.sh"
 # A 32-bit loop over an unbounded archive long must not be allowed to wrap.
 bash "$repo_root/evals/test-java-integer-loop-preflight.sh"
 # Request-controlled commands must not reach Java OS-process sinks without a

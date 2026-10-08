@@ -190,6 +190,21 @@ trigger evidence must stay out of strict gold. No source or patch text is
 copied and no row is labeled `positive`; the regression is
 `bash evals/test-vcc-eval-candidates.sh`.
 
+After preparing local read-only Git mirrors, verify parent commits and exact
+added lines with a private repository map:
+
+```bash
+python3 scripts/verify-vcc-eval-candidates.py \
+  /private/path/vcc-eval-candidates.jsonl \
+  --repo-map /private/path/vcc-eval-repo-map.json \
+  --output /private/path/vcc-eval-verified.jsonl
+```
+
+The verifier never fetches, checks out, or applies patches. Missing mirrors,
+parents, exact added lines, or current source remain explicit failures and
+`pending-human-label`; its regression is
+`bash evals/test-vcc-eval-verifier.sh`.
+
 For private Vul4J CSV metadata, generate Java-only candidates without turning CVE/CWE metadata into labels:
 
 ```bash

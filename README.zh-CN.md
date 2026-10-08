@@ -154,6 +154,17 @@ python3 scripts/prepare-vcc-eval-candidates.py \
 
 该转换器会按 canonical 仓库、CVE 和引入提交谱系去重，解析引入/修复行范围，并把记录标成 `pending-human-label`。VCC-Eval 数据仓库未声明可复用许可证；没有引入行号、没有父提交差异复核或没有触发证据的记录不能进入严格 gold，也不会自动写成 `positive`。对应回归为 `bash evals/test-vcc-eval-candidates.sh`。
 
+准备好本地只读 Git 镜像后，可用私有 JSON map 验证父提交和新增行：
+
+```bash
+python3 scripts/verify-vcc-eval-candidates.py \
+  /private/path/vcc-eval-candidates.jsonl \
+  --repo-map /private/path/vcc-eval-repo-map.json \
+  --output /private/path/vcc-eval-verified.jsonl
+```
+
+验证器不会 fetch、切换分支或应用补丁；缺少本地仓库、父提交、精确新增行或当前源码时保留失败状态和 `pending-human-label`。对应无模型回归为 `bash evals/test-vcc-eval-verifier.sh`。
+
 对于本机已下载的 NIST Juliet Java 压缩包，可以生成私有 Java 审计 smoke 集（压缩包和生成的源码 JSONL 都不提交）：
 
 ```bash
