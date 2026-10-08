@@ -144,6 +144,16 @@ python3 scripts/validate-external-dataset.py /private/path/aacr-human-external-s
 
 转换器默认排除 LLM 增强评论，也不会把 AACR 评论当作 Platform 的 P0/P1 金标。
 
+对于 VCC-Eval 的 Java 漏洞引入提交元数据，先生成不含源码和补丁的私有候选索引：
+
+```bash
+python3 scripts/prepare-vcc-eval-candidates.py \
+  /private/path/tool_assisted_manual_dataset.json \
+  --output /private/path/vcc-eval-candidates.jsonl
+```
+
+该转换器会按 canonical 仓库、CVE 和引入提交谱系去重，解析引入/修复行范围，并把记录标成 `pending-human-label`。VCC-Eval 数据仓库未声明可复用许可证；没有引入行号、没有父提交差异复核或没有触发证据的记录不能进入严格 gold，也不会自动写成 `positive`。对应回归为 `bash evals/test-vcc-eval-candidates.sh`。
+
 对于本机已下载的 NIST Juliet Java 压缩包，可以生成私有 Java 审计 smoke 集（压缩包和生成的源码 JSONL 都不提交）：
 
 ```bash

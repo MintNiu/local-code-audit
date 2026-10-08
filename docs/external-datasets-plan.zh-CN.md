@@ -7,9 +7,10 @@
 | 优先级 | 数据集 | 主要用途 | 当前处理方式 |
 | --- | --- | --- | --- |
 | 1 | [AACR-Bench](https://github.com/alibaba/aacr-bench) | 真实 PR 的评论、定位、类别和多语言审查表达 | 先抽取少量 Java/TS/SQL/配置样本做 external-smoke；原始 PR 和引用仓库许可证逐项记录 |
-| 2 | [Vul4J](https://github.com/tuhh-softsec/Vul4J) | 真实 Java 漏洞、修复补丁和 PoV 测试 | 优先使用有 PoV 的子集；PoV 与仅静态告警样本分层统计，不混成一个金标 |
-| 3 | [JavaVFC](https://zenodo.org/records/13731781) | 人工核验的 Java 修复提交 | 784 条人工集用于 train/dev 候选；extended 启发式集只能做 smoke，按仓库和提交谱系去重 |
-| 4 | [NIST Juliet/SARD](https://www.nist.gov/publications/juliet-11-cc-and-java-test-suite) | CWE 正负对照、行号和输出协议回归 | 只抽取小型 Java 子集；合成样本不代表真实世界召回率 |
+| 2 | [VCC-Eval](https://github.com/tuhh-softsec/VCC-Eval-A-Manually-Curated-Dataset-of-Vulnerability-Introducing-Commits-in-Java) | Java 漏洞引入提交、CVE/CWE 和精确引入行 | 先做 metadata-only 候选；数据仓库未声明可复用许可证，必须人工核对 intro parent、diff、触发证据和引用仓库许可后才能进入训练/holdout |
+| 3 | [Vul4J](https://github.com/tuhh-softsec/Vul4J) | 真实 Java 漏洞、修复补丁和 PoV 测试 | 优先使用有 PoV 的子集；PoV 与仅静态告警样本分层统计，不混成一个金标 |
+| 4 | [JavaVFC](https://zenodo.org/records/13731781) | 人工核验的 Java 修复提交 | 784 条人工集用于 train/dev 候选；extended 启发式集只能做 smoke，按仓库和提交谱系去重 |
+| 5 | [NIST Juliet/SARD](https://www.nist.gov/publications/juliet-11-cc-and-java-test-suite) | CWE 正负对照、行号和输出协议回归 | 只抽取小型 Java 子集；合成样本不代表真实世界召回率 |
 
 暂缓 OWASP BenchmarkJava、MegaVul、PrimeVul、GitBug-Java 和 Defects4J：前几项存在 GPL/数据许可或标签质量边界，后几项体量大、偏通用缺陷或下载成本高。任何重新引入都必须先完成许可证和磁盘成本复核。
 
@@ -48,3 +49,7 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 2026-10-08：新增 `scripts/prepare-vul4j-candidates.py` 和 `evals/test-vul4j-candidates.sh`。规范化器读取 Vul4J CSV，只接受 GitHub `commit/<sha>` 修复链接，跳过 compare 链接和重复仓库/提交，保留 CVE/CWE、受影响模块、PoV 测试名和许可证来源，并将所有记录标记为 `pending-human-label`。Vul4J 的漏洞类别和修复提交不能直接证明 review 文件/行号，因此不自动生成 `positive`、不复制源码或补丁文本，也不写入 Platform 严格 holdout；人工确认后才可进入 external-smoke 或独立评测。该回归已接入完整 `test-preflight.sh`，用于防止数据标签泄漏。
 
 同日对 `VUL4J-6`（CWE-835，Commons Compress）做了方向性 smoke：修复提交把 `int` 循环计数器改为 `long`，但它是漏洞修复本身，不是引入漏洞的 review diff；因此不能据此计算代码审计召回。个人高性能 profile 返回 clean，而保守 baseline 对同一修复 diff 给出无效的类型不匹配 P2，按 profile 不一致 fail-closed，不计入任何外部指标。针对该根因新增的 `ZipLong` 外部 long 值与变更 `int` 循环组合预检，只用合成正/负夹具验证，避免把修复补丁或模型误报写成金标。
+
+2026-10-08：新增 `scripts/prepare-vcc-eval-candidates.py`，读取 VCC-Eval 的 100 条 Java 元数据，规范化引入/修复 SHA、CVE/CWE、仓库镜像和 `172`/`172-177;181` 行范围，按 canonical repo+CVE 谱系切分并全部标记 `pending-human-label`。没有引入行的记录保留为不可进入逐行评测的候选；工具不复制源码/补丁，也不把 introducing commit 自动标成 positive。GitHub/Apache 镜像去重、行范围解析、缺失/非法引入行和无源码输出均由 `evals/test-vcc-eval-candidates.sh` 覆盖，并接入完整 `test-preflight.sh`。
+
+同日修正 Juliet Java 预处理器的 manifest 关联：优先使用归一化的相对路径，只有 basename 全局唯一时才允许回退。这样可以避免不同 CWE 目录中的同名测试文件共享错误的缺陷行号或标签；Windows 风格路径也会先统一为 `/`。重复 basename、路径分隔符和精确行号均由回归夹具覆盖，数据质量错误不得进入训练或外部 smoke。

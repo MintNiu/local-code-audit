@@ -173,6 +173,23 @@ python3 scripts/validate-external-dataset.py /private/path/aacr-human-external-s
 
 The converter excludes LLM-enhanced comments by default and does not treat AACR review comments as Platform P0/P1 gold.
 
+For VCC-Eval Java vulnerability-introduction metadata, create a private
+metadata-only candidate index:
+
+```bash
+python3 scripts/prepare-vcc-eval-candidates.py \
+  /private/path/tool_assisted_manual_dataset.json \
+  --output /private/path/vcc-eval-candidates.jsonl
+```
+
+The converter canonicalizes repository mirrors, groups by repository/CVE/
+introduction lineage, parses introduction and fix line ranges, and marks every
+row `pending-human-label`. VCC-Eval does not declare a reusable dataset
+license; records without introduction lines, parent-diff verification, or
+trigger evidence must stay out of strict gold. No source or patch text is
+copied and no row is labeled `positive`; the regression is
+`bash evals/test-vcc-eval-candidates.sh`.
+
 For private Vul4J CSV metadata, generate Java-only candidates without turning CVE/CWE metadata into labels:
 
 ```bash

@@ -27,6 +27,8 @@
 3. CodeQL 官方查询与规则作为确定性预检或标签参考，不作为模型唯一答案；
 4. Platform 真实提交继续作为最终独立 holdout，不能被外部数据覆盖或反向泄漏。
 
+外部数据按三层管理：VCC-Eval 只有在人工确认引入 parent、引入 diff、触发证据和许可证后，才可作为 Java 安全 review 候选；AACR-Bench、ReviewBench 和 SWE-PRBench 只做真实 review 结构、定位和多语言 external holdout；Defects4J、GitBug-Java 与 Juliet 只验证一般缺陷、边界和可复现行为，不计入安全 P0/P1 召回。修复提交、patch hunk 或 oracle 行号都不能直接当作引入缺陷金标。
+
 后续只保留带许可和来源元数据的 JSONL/索引，按语言、根因和严重度检索 2–4 个短示例进入 prompt，避免大批量 few-shot 重新触发上下文预算。外部样本先进入 `external-smoke`，确认格式、去重、定位和误报门禁后，才允许进入训练候选；原始公开数据和私有 Platform 代码均不提交到公开仓库。
 
 ### 多语言目标与采样配比

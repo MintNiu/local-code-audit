@@ -54,6 +54,16 @@ def cwe_for_path(path: str) -> str | None:
     return match.group(1) if match else None
 
 
+def normalize_manifest_path(value: str) -> str:
+    """Normalize Juliet manifest paths without collapsing distinct files."""
+    normalized = value.replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized.startswith("Java/"):
+        normalized = normalized[5:]
+    return normalized
+
+
 def read_manifest(archive: zipfile.ZipFile) -> dict[str, list[tuple[int, str]]]:
     manifest_name = next(
         (name for name in archive.namelist() if name.endswith("/manifest.xml")), None
@@ -61,6 +71,7 @@ def read_manifest(archive: zipfile.ZipFile) -> dict[str, list[tuple[int, str]]]:
     if not manifest_name:
         raise ValueError("archive does not contain a Juliet manifest.xml")
     result: dict[str, list[tuple[int, str]]] = {}
+    basename_entries: dict[str, list[list[tuple[int, str]]]] = {}
     # The published Juliet manifest contains legacy malformed XML near the end
     # of the file. Parse only its stable file/flaw line records instead of
     # silently repairing the document with a permissive XML parser.
@@ -68,14 +79,27 @@ def read_manifest(archive: zipfile.ZipFile) -> dict[str, list[tuple[int, str]]]:
     for raw_line in archive.read(manifest_name).decode("utf-8", errors="replace").splitlines():
         file_match = re.search(r'<file\s+path="([^"]+)"', raw_line)
         if file_match:
-            current = Path(file_match.group(1)).name
+            current = normalize_manifest_path(file_match.group(1))
             result.setdefault(current, [])
+            basename_entries.setdefault(Path(current).name, []).append(result[current])
         flaw_match = re.search(r'<flaw\s+line="([0-9]+)"\s+name="([^"]*)"', raw_line)
         if current and flaw_match:
             result[current].append((int(flaw_match.group(1)), flaw_match.group(2)))
         if "</file>" in raw_line:
             current = None
+    # Keep a basename fallback only when it is unambiguous.  Juliet contains
+    # repeated testcase names in different CWE directories; a plain basename
+    # lookup would otherwise attach one file's flaw lines to another file.
+    for basename, entries in basename_entries.items():
+        if len(entries) == 1:
+            result.setdefault(basename, entries[0])
     return result
+
+
+def manifest_flaws(manifest: dict[str, list[tuple[int, str]]], path: str) -> list[tuple[int, str]]:
+    """Return flaws for an archive path, with a safe unique-basename fallback."""
+    normalized = normalize_manifest_path(path)
+    return manifest.get(normalized, manifest.get(Path(normalized).name, []))
 
 
 def record(source_name: str, source_url: str, split: str, path: str, code: str,
@@ -151,14 +175,14 @@ def main() -> int:
         source_url = "https://samate.nist.gov/SARD/test-suites/111"
         for cwe in sorted(wanted):
             files = by_cwe.get(cwe, [])
-            bad = [name for name in files if "_good" not in Path(name).name and manifest.get(Path(name).name)]
+            bad = [name for name in files if "_good" not in Path(name).name and manifest_flaws(manifest, name)]
             good = [name for name in files if "_good" in Path(name).name]
             for name, label in [*( (name, "positive") for name in bad[:args.limit_per_cwe]),
                                 *( (name, "clean") for name in good[:args.limit_per_cwe])]:
                 relative = name.removeprefix("Java/")
                 code = archive.read(name).decode("utf-8", errors="replace")
                 selected.append(record(source_name, source_url, args.split, relative, code,
-                                       cwe, label, manifest.get(Path(name).name, [])))
+                                       cwe, label, manifest_flaws(manifest, name)))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:

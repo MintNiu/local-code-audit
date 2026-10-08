@@ -5531,6 +5531,9 @@ bash "$repo_root/evals/test-erp-export-preflight.sh"
 # JavaVFC metadata is candidate-only until a human supplies line-level labels;
 # keep normalization and no-source-copy boundaries regression-tested.
 bash "$repo_root/evals/test-javavfc-candidates.sh"
+# VCC-Eval has introducing-commit line metadata, but its repository license and
+# source/diff lineage still require human verification before any gold label.
+bash "$repo_root/evals/test-vcc-eval-candidates.sh"
 # A 32-bit loop over an unbounded archive long must not be allowed to wrap.
 bash "$repo_root/evals/test-java-integer-loop-preflight.sh"
 # Request-controlled commands must not reach Java OS-process sinks without a
