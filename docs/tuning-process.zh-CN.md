@@ -1232,3 +1232,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 外部 Vul4J 方向性复核进一步确认：`VUL4J-33`（Struts/CVE-2016-3081）和 `VUL4J-42`（Plexus Utils/CVE-2017-1000487）都能从修复提交的 parent、PoV 测试和修复差异确认表达式链/OS 命令注入根因，但当前数据仍没有可靠的漏洞引入提交。`human_patch` 或其 parent 只能作为 external-smoke 方向证据，不能直接写入 positive 或严格 holdout；待找到 introduction commit、可复现 PoV 和精确变更行后再提升标签等级。
 
 同日对 VCC-Eval external-smoke 做 parent/diff 方向性核验：Armeria 和 Undertow 的引入行均为实际新增行，JSPWiki 的原始标签路径则在引入提交不存在，未自动修正。验证器只保留证据状态，尚未把任何样本转为 gold；后续还需人工确认触发条件、根因严重度、许可证和与当前 Platform holdout 的功能簇隔离。
+
+随后只提取 Armeria 与 Undertow 的标注文件做窄差异个人 tuned smoke，两次都完整返回 clean；整仓库 archive 的 promisor blob 网络断开则按 fail-closed 保留。该结果没有进入召回率或误报率，说明外部数据导入和模型能力诊断必须继续与正式 scorecard 分离。
