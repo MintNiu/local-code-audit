@@ -65,3 +65,5 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 2026-10-09：在同一 Java 在线会话提交上做了普通 personal profile 与 `auth-tenant` 专项复核 A/B。两轮都完整结束，均为 5 个分片，最终结果哈希一致；专项复核耗时约 280 秒，普通审查约 102 秒，未增加模型原生问题。该结果只作为专项通道诊断证据，说明确定性租户预检已覆盖该样本的主要风险；`auth-tenant` 继续保持默认关闭，不把额外耗时当作能力提升，也不将该样本写入严格 scorecard。
 
 同日新增 `scripts/prepare-swe-prbench-candidates.py` 和 `evals/test-swe-prbench-candidates.sh`。适配器只读取 SWE-PRBench 的 `prs.jsonl` 元数据，按 `task_id` 解析候选 PR 号，保留语言、难度、RVS 和评论数量，丢弃 diff、上下文和评论正文；每条记录均为 `pending-human-label`、`golden_status=not-loaded`。固定 revision 的数据卡约 350 条 PR、Java 约 4%，因此 Java-first 只作为小规模 external-smoke，不能把该集当作 Java 高危门禁；全语言样本也必须先完成引用仓库许可证和文件/行号人工核对。
+
+同日按固定 revision 实际生成私有索引：`prs.jsonl` 共 350 条，Java 15 条；全语言分布为 Python 242、JavaScript 37、Go 35、TypeScript 21、Java 15。输入文件 SHA-256 为 `a58e1f713533f6bc260a93f6e234b85acd16a77f55a756893694b96495eb43cd`；输出索引不含 diff、评论、上下文或 findings 字段，未进入模型提示词或 Platform 严格 scorecard。
