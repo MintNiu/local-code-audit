@@ -60,3 +60,5 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 同轮只提取 Armeria 和 Undertow 的标注文件构造窄差异模型 smoke，个人 tuned profile 均完整返回 clean；整仓库 archive 因 promisor blob 网络断开而 fail-closed，未把失败解释为 clean。两条 clean 结果只用于诊断当前模型对外部 Java 引入差异的原生可见性，不进入 Platform 严格 scorecard 或外部 gold。
 
 同日修正 Juliet Java 预处理器的 manifest 关联：优先使用归一化的相对路径，只有 basename 全局唯一时才允许回退。这样可以避免不同 CWE 目录中的同名测试文件共享错误的缺陷行号或标签；Windows 风格路径也会先统一为 `/`。重复 basename、路径分隔符和精确行号均由回归夹具覆盖，数据质量错误不得进入训练或外部 smoke。
+
+2026-10-09：在同一 Java 在线会话提交上做了普通 personal profile 与 `auth-tenant` 专项复核 A/B。两轮都完整结束，均为 5 个分片，最终结果哈希一致；专项复核耗时约 280 秒，普通审查约 102 秒，未增加模型原生问题。该结果只作为专项通道诊断证据，说明确定性租户预检已覆盖该样本的主要风险；`auth-tenant` 继续保持默认关闭，不把额外耗时当作能力提升，也不将该样本写入严格 scorecard。
