@@ -67,3 +67,5 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 同日新增 `scripts/prepare-swe-prbench-candidates.py` 和 `evals/test-swe-prbench-candidates.sh`。适配器只读取 SWE-PRBench 的 `prs.jsonl` 元数据，按 `task_id` 解析候选 PR 号，保留语言、难度、RVS 和评论数量，丢弃 diff、上下文和评论正文；每条记录均为 `pending-human-label`、`golden_status=not-loaded`。固定 revision 的数据卡约 350 条 PR、Java 约 4%，因此 Java-first 只作为小规模 external-smoke，不能把该集当作 Java 高危门禁；全语言样本也必须先完成引用仓库许可证和文件/行号人工核对。
 
 同日按固定 revision 实际生成私有索引：`prs.jsonl` 共 350 条，Java 15 条；全语言分布为 Python 242、JavaScript 37、Go 35、TypeScript 21、Java 15。输入文件 SHA-256 为 `a58e1f713533f6bc260a93f6e234b85acd16a77f55a756893694b96495eb43cd`；输出索引不含 diff、评论、上下文或 findings 字段，未进入模型提示词或 Platform 严格 scorecard。
+
+随后只在本机私有目录提取这 15 条 Java 的 `config_A` 上下文和人工标注结构做诊断：15/15 请求完整结束且均返回 clean；人工标注含 56 条发起评论，其中 53 条位于变更行、18 条明确标记为需要修改。对 3 条需要修改评论较多的样本追加 `config_C` 对照，仍为 3/3 clean。该结果说明当前模型对真实外部 review 反馈存在系统性漏报，增加上下文层级没有带来收益；它不代表 18 条评论都是 P0/P1，也不进入 Platform 严格 scorecard，后续应先做结构化根因路由和人工严重度核验。
