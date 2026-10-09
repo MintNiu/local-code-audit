@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$repo_root/evals/test-aacr-review-dataset.sh"
+"$repo_root/evals/test-specialist-channel.sh"
 "$repo_root/evals/test-publishing-external-ticket-token-preflight.sh"
 "$repo_root/evals/test-publishing-pdf-render-resource-preflight.sh"
 "$repo_root/evals/test-sql-menu-delivery-preflight.sh"

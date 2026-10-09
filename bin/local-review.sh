@@ -83,6 +83,11 @@ chunk_preflight_context_bytes="${OLLAMA_REVIEW_CHUNK_PREFLIGHT_BYTES:-4000}"
 chunk_preflight_prompt_enabled=true
 chunk_prompt_examples_enabled=true
 retry_attempts="${OLLAMA_REVIEW_RETRY_ATTEMPTS:-2}"
+# Optional diagnostic-only specialist pass. It is deliberately empty by
+# default so the normal review keeps the same scope, latency, and output
+# protocol. Evaluation runs can select one narrow risk family without
+# silently changing the personal high-performance profile.
+specialist_channel="${OLLAMA_REVIEW_SPECIALIST_CHANNEL:-}"
 # Reserve part of the model context for tokenizer variance, request metadata,
 # and a small amount of runtime overhead.  The guard below rejects an
 # over-budget request before it reaches Ollama instead of allowing the model
@@ -176,6 +181,7 @@ Git 报告的未跟踪路径只接受普通文件或符号链接，默认普通�
 整次审查默认受 OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS 限制；个人高性能入口默认 2400 秒，以覆盖多个分片串行审查，显式设置该变量仍可 fail-fast。
 Ollama 瞬时传输失败默认最多重试 2 次；可用 OLLAMA_REVIEW_RETRY_ATTEMPTS 覆盖，重试仍受整次审查总超时约束。
 请求会预留 OLLAMA_REVIEW_INPUT_RESERVE_TOKENS（默认 1024）个上下文 token，并把系统规则与用户材料一起估算；超出可用输入预算时会在请求前失败，不会返回可能被截断的审查结果。
+评测时可用 OLLAMA_REVIEW_SPECIALIST_CHANNEL=auth-tenant、concurrency-state 或 external-io 启用一次串行专项复核；它会与基础审查结果合并，专项失败则整次 fail-closed。默认空值，不增加日常请求数。
 EOF
 }
 
@@ -339,6 +345,15 @@ if [[ ! "$chunk_preflight_context_bytes" =~ ^[0-9]+$ ]] || (( chunk_preflight_co
   echo "OLLAMA_REVIEW_CHUNK_PREFLIGHT_BYTES 必须是至少 1000 字节的整数。" >&2
   exit 2
 fi
+
+case "$specialist_channel" in
+  ""|auth-tenant|concurrency-state|external-io)
+    ;;
+  *)
+    echo "OLLAMA_REVIEW_SPECIALIST_CHANNEL 只支持空值、auth-tenant、concurrency-state 或 external-io，当前值: $specialist_channel" >&2
+    exit 2
+    ;;
+esac
 
 status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-status.XXXXXX")"
 staged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-staged.XXXXXX")"
@@ -2710,6 +2725,29 @@ Git 精确重命名边界：如果输入包含“Git 精确重命名证据”段
 EOF
 )"
 
+specialist_instruction() {
+  case "$specialist_channel" in
+    auth-tenant)
+      cat <<'EOF'
+--- 可选风险族复核：身份、授权与租户边界 ---
+这是一次仅用于诊断和 A/B 评测的窄范围复核。优先检查当前差异中可直接证明的认证身份绑定、资源归属、越权/IDOR、租户边界和 fail-open 路径；核对主体、资源、租户三者是否在同一条可达调用链上绑定。只输出该风险族的独立问题，仍须遵守系统中的证据、定位、严重度和完整性协议；缺少调用链或仅凭签名/命名推测时必须保持 clean。
+EOF
+      ;;
+    concurrency-state)
+      cat <<'EOF'
+--- 可选风险族复核：并发、事务与状态机 ---
+这是一次仅用于诊断和 A/B 评测的窄范围复核。优先检查当前差异中可直接证明的 check-then-act、锁/事务顺序、CAS/幂等、重复消费、状态迁移和跨请求竞态；逐条核对可达方法边界、共享资源、锁获取顺序与失败回滚。只输出该风险族的独立问题，仍须遵守系统中的证据、定位、严重度和完整性协议；仅凭“可能并发”或没有可见资源映射时必须保持 clean。
+EOF
+      ;;
+    external-io)
+      cat <<'EOF'
+--- 可选风险族复核：外部输入、I/O 与数据暴露 ---
+这是一次仅用于诊断和 A/B 评测的窄范围复核。优先检查当前差异中可直接证明的 SSRF、路径/文件访问、反序列化、外部 URL/命令拼接、秘密或敏感数据进入日志/持久化/外部边界，以及资源耗尽。必须指出具体输入到危险汇点的可达证据；只输出该风险族的独立问题，仍须遵守系统中的证据、定位、严重度和完整性协议；缺少危险汇点或仅凭输入类型推测时必须保持 clean。
+EOF
+      ;;
+  esac
+}
+
 prompt_prefix_common="$(
   {
     # The model only needs a stable repository label; avoid leaking or varying
@@ -3488,6 +3526,62 @@ run_one_prompt() {
     return 11
   fi
   validate_response "$response_file" "$output_file" "$kind_file" "$paths_file"
+}
+
+run_specialist_prompt() {
+  local prompt="$1"
+  local response_file="$2"
+  local output_file="$3"
+  local kind_file="$4"
+  local paths_file="${5:-$changed_paths_file}"
+  local request_timeout="${6:-$timeout_seconds}"
+  local evidence_file="${7:-$chunk_input_file}"
+  local base_review_system="$review_system"
+  local instruction
+
+  [[ -n "$specialist_channel" ]] || return 0
+  instruction="$(specialist_instruction)"
+  review_system="${base_review_system}"$'\n\n'"$instruction"
+  local status=0
+  if run_one_prompt "$prompt" "$response_file" "$output_file" "$kind_file" "$paths_file" "$request_timeout" "$evidence_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  review_system="$base_review_system"
+  return "$status"
+}
+
+merge_model_pass_outputs() {
+  local primary_output="$1"
+  local primary_kind="$2"
+  local specialist_output="$3"
+  local specialist_kind="$4"
+  local merged_file="$5"
+  local has_findings=false
+
+  : >"$merged_file"
+  if grep -q '^findings$' "$primary_kind"; then
+    has_findings=true
+    cat "$primary_output" >>"$merged_file"
+  fi
+  if grep -q '^findings$' "$specialist_kind"; then
+    has_findings=true
+    if [[ -s "$merged_file" ]]; then
+      printf '\n\n' >>"$merged_file"
+    fi
+    cat "$specialist_output" >>"$merged_file"
+  fi
+
+  if [[ "$has_findings" == true ]]; then
+    sort_findings_by_severity <"$merged_file" | dedup_exact_findings >"$merged_file.tmp"
+    mv "$merged_file.tmp" "$merged_file"
+    printf 'findings\n' >"$primary_kind"
+  else
+    printf '未发现阻塞问题\n' >"$merged_file"
+    printf 'clean\n' >"$primary_kind"
+  fi
+  cp "$merged_file" "$primary_output"
 }
 
 merge_preflight_findings() {
@@ -12912,6 +13006,10 @@ collect_sales_return_lock_order_preflight() {
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
+specialist_response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-specialist-response.XXXXXX")"
+specialist_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-specialist-output.XXXXXX")"
+specialist_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-specialist-kind.XXXXXX")"
+specialist_merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-specialist-merged.XXXXXX")"
 chunk_input_file="$(mktemp "${TMPDIR:-/tmp}/local-review-diff.XXXXXX")"
 changed_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths.XXXXXX")"
 cross_file_evidence_file="$(mktemp "${TMPDIR:-/tmp}/local-review-cross-file-evidence.XXXXXX")"
@@ -12926,7 +13024,7 @@ java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$specialist_response_file" "$specialist_output_file" "$specialist_kind_file" "$specialist_merged_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -13220,18 +13318,33 @@ if [[ "$needs_split" != true ]]; then
   printf -v trace_line 'initial_status\t%s\t%s' "$initial_status" "$(( $(date +%s) - initial_start ))"
   write_review_trace "$trace_line"
   if [[ "$initial_status" -eq 0 ]]; then
+    if [[ -n "$specialist_channel" ]]; then
+      ensure_review_deadline "基础审查完成，开始专项复核" || exit 124
+      specialist_status=0
+      specialist_start="$(date +%s)"
+      run_specialist_prompt "$initial_prompt" "$specialist_response_file" "$specialist_output_file" "$specialist_kind_file" "$changed_paths_file" "$timeout_seconds" || specialist_status=$?
+      printf -v trace_line 'specialist_status\t%s\t%s\t%s' "$specialist_channel" "$specialist_status" "$(( $(date +%s) - specialist_start ))"
+      write_review_trace "$trace_line"
+      if [[ "$specialist_status" -ne 0 ]]; then
+        emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
+        echo "本地代码审查失败：专项复核未完成（${specialist_channel}），基础审查结果仅作诊断，整次审查不完整。" >&2
+        cat "$response_output_file" >&2
+        exit 1
+      fi
+      merge_model_pass_outputs "$response_output_file" "$response_kind_file" "$specialist_output_file" "$specialist_kind_file" "$specialist_merged_file"
+    fi
     write_review_trace $'chunk_count\t1'
     merge_preflight_findings "$response_output_file" "$response_kind_file" "$build_preflight_file" "$deterministic_lock_order_file"
     cat "$response_output_file"
     exit 0
   fi
-  if [[ "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 13 ]] &&
+  if [[ -z "$specialist_channel" && ( "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 13 ) ]] &&
      can_return_presigned_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file"; then
     echo "本地代码审查：模型请求未完成，但当前差异仅包含一个已由确定性预检完整证明的预签名票据生命周期问题；返回该 P1，未将模型半截输出视为完整结果。" >&2
     cat "$build_preflight_file"
     exit 0
   fi
-  if [[ "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 12 || "$initial_status" -eq 13 ]] &&
+  if [[ -z "$specialist_channel" && ( "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 12 || "$initial_status" -eq 13 ) ]] &&
      can_return_weak_password_hash_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file"; then
     echo "本地代码审查：模型请求未完成，但当前差异仅包含一个已由确定性预检完整证明的弱密码哈希问题；返回该 P1，未将模型半截输出视为完整结果。" >&2
     cat "$build_preflight_file"
@@ -13279,6 +13392,10 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_response="$chunk_output_dir/$chunk_name.response.json"
   chunk_output="$chunk_output_dir/$chunk_name.txt"
   chunk_kind="$chunk_kind_dir/$chunk_name.kind"
+  chunk_specialist_response="$chunk_output_dir/$chunk_name.specialist.response.json"
+  chunk_specialist_output="$chunk_output_dir/$chunk_name.specialist.txt"
+  chunk_specialist_kind="$chunk_kind_dir/$chunk_name.specialist.kind"
+  chunk_specialist_merged="$chunk_output_dir/$chunk_name.specialist-merged.txt"
   chunk_paths_file="$chunk_output_dir/$chunk_name.paths"
   chunk_status_file="$chunk_output_dir/$chunk_name.status"
   chunk_preflight_file="$chunk_output_dir/$chunk_name.preflight"
@@ -13453,6 +13570,24 @@ $(cat "$changed_paths_file")
     done
     echo "本地代码审查失败：分片 $chunk_name 未完成，整次审查失败；已完成分片仅作诊断，不作为完整结果返回。" >&2
     exit 1
+  fi
+  if [[ -n "$specialist_channel" ]]; then
+    ensure_review_deadline "分片 ${chunk_name} 基础审查完成，开始专项复核" || exit 124
+    chunk_specialist_status=0
+    chunk_specialist_start="$(date +%s)"
+    specialist_original_num_predict="$num_predict"
+    num_predict="$chunk_num_predict"
+    run_specialist_prompt "$chunk_prompt" "$chunk_specialist_response" "$chunk_specialist_output" "$chunk_specialist_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_specialist_status=$?
+    num_predict="$specialist_original_num_predict"
+    printf -v trace_line 'specialist_status\t%s\t%s\t%s' "$chunk_name" "$specialist_channel" "$chunk_specialist_status"
+    write_review_trace "$trace_line"
+    if [[ "$chunk_specialist_status" -ne 0 ]]; then
+      emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
+      echo "本地代码审查失败：分片 ${chunk_name} 的专项复核未完成（${specialist_channel}），整次审查不完整。" >&2
+      cat "$chunk_output" >&2
+      exit 1
+    fi
+    merge_model_pass_outputs "$chunk_output" "$chunk_kind" "$chunk_specialist_output" "$chunk_specialist_kind" "$chunk_specialist_merged"
   fi
   merge_preflight_findings "$chunk_output" "$chunk_kind" "$chunk_merge_preflight_file" "$deterministic_lock_order_file"
 done

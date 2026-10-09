@@ -107,6 +107,8 @@ The byte budget applies to collected Git diff material only. Project rules, expl
 
 Transient Ollama transport failures are retried up to two times within the total review timeout by default. The personal high-performance wrapper uses a 2400-second total budget to accommodate many serial shards; set `OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS` explicitly for a fail-fast limit. Set `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` to disable retries or tune it for local stability. The launcher also estimates the input budget for system rules, context, and diff before sending; tune `OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` when you need a different safety margin.
 
+For diagnostic A/B runs only, set `OLLAMA_REVIEW_SPECIALIST_CHANNEL` to `auth-tenant`, `concurrency-state`, or `external-io`. The runner performs one additional serial, narrow risk-family pass and unions both complete outputs; the default is empty, so normal reviews keep one request. Any specialist timeout, truncation, or invalid output fails closed, and specialist union results are not counted as model-native scorecard recall until independently validated.
+
 The output gate rejects generic or incomplete summaries: every finding paragraph must include a severity, a file/line location that matches a changed file or an explicitly supplied context file, and explicit `影响：`, `修复建议：`, and `验证方式：` fields. A basename is accepted only when it is unambiguous in the review set.
 
 Configuration findings are not suppressed merely for saying “may” or “if”.

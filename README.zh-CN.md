@@ -91,6 +91,8 @@ local-review --repo /path/to/repo
 
 Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最多重试 2 次；个人高性能入口默认给多分片串行审查预留 2400 秒，也可显式设置 `OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS` 让它更快失败。可用 `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` 关闭重试，或按本机稳定性调整。脚本还会按保守字节估算检查系统规则、上下文和 diff 的输入预算；可用 `OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` 调整预留空间。
 
+仅在诊断/A-B 评测时，可设置 `OLLAMA_REVIEW_SPECIALIST_CHANNEL=auth-tenant`、`concurrency-state` 或 `external-io`。审查器会在基础审查后串行追加一次窄范围专项复核，并合并两次完整结果；默认值为空，因此日常审查仍只发一个请求。专项超时、截断或格式无效时整次 fail-closed；在独立验证前，专项合并结果不计入模型原生严格召回率。
+
 输出门禁会拒绝泛化或不完整总结：每个问题段都必须包含严重级别、能匹配变更文件或显式上下文文件的文件/行号，以及明确的“影响：”“修复建议：”“验证方式：”字段；只有在当前审查集合中唯一时才接受单独的文件名。
 
 如果问题带有可解析的文件行号，脚本还会对照当前文件或显式 context 的实际行数；越界定位会使本次审查失败，避免把不存在的行号当成可信证据。删除文件不按当前工作树强行校验。

@@ -308,6 +308,7 @@ review_temperature="${OLLAMA_REVIEW_TEMPERATURE:-0}"
 review_seed="${OLLAMA_REVIEW_SEED:-42}"
 review_top_k="${OLLAMA_REVIEW_TOP_K:-40}"
 review_top_p="${OLLAMA_REVIEW_TOP_P:-0.9}"
+review_specialist_channel="${OLLAMA_REVIEW_SPECIALIST_CHANNEL:-}"
 count=0
 failed_count=0
 manifest_row=1
@@ -600,6 +601,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     printf 'seed\t%s\n' "$review_seed"
     printf 'top_k\t%s\n' "$review_top_k"
     printf 'top_p\t%s\n' "$review_top_p"
+    printf 'specialist_channel\t%s\n' "$review_specialist_channel"
     printf 'num_ctx\t%s\n' "$profile_num_ctx"
     printf 'num_predict\t%s\n' "$profile_num_predict"
     printf 'max_diff_bytes\t%s\n' "$effective_profile_max_diff_bytes"
