@@ -5547,6 +5547,12 @@ bash "$repo_root/evals/test-java-integer-loop-preflight.sh"
 # ByteBuffer EOF handling must not replay stale bytes after a truncated read;
 # keep multiline Java method parsing and clear-vs-limit(0) semantics covered.
 bash "$repo_root/evals/test-java-bytebuffer-eof-preflight.sh"
+# A newly mapped GitServlet write route must be covered by the authentication
+# filter; keep the cross-file Java + web.xml boundary deterministic.
+bash "$repo_root/evals/test-java-unprotected-git-write-preflight.sh"
+# A TLS HostnameVerifier result must gate the handshake; ignored booleans are
+# a high-signal Java MITM boundary and checked results stay clean.
+bash "$repo_root/evals/test-java-tls-hostname-verifier-preflight.sh"
 # Header-only token forwarding to a clearly internal URI is a clean boundary;
 # keep direct URL/external-boundary evidence visible to the output filter.
 bash "$repo_root/evals/test-java-token-header-boundary.sh"

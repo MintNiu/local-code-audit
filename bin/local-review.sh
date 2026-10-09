@@ -6315,6 +6315,259 @@ PY
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_unprotected_git_write_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+
+  # This is a deliberately narrow cross-file check for a newly exposed
+  # servlet write surface.  It requires the diff to add an active GitServlet
+  # mapped to /git/*, the changed servlet to accept uploads and call the Git
+  # write API, and an existing AuthenticationFilter mapping that omits the
+  # new route.  Other security frameworks or routes remain model/manual
+  # review territory instead of being guessed here.
+  [[ -n "$source_root" ]] || return 0
+  python3 - "$diff_file" "$source_root" >>"$output_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+diff_path, source_root = sys.argv[1:]
+root = Path(source_root)
+
+def safe_source(rel: str):
+    path = Path(rel)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    current = root
+    for part in path.parts:
+        current = current / part
+        if current.is_symlink():
+            return None
+    return current if current.is_file() else None
+
+added = {}
+path = None
+new_line = 0
+for raw in Path(diff_path).read_text(encoding="utf-8", errors="replace").splitlines():
+    if raw.startswith("+++ b/"):
+        path = raw[6:].split("\t", 1)[0]
+        continue
+    if raw.startswith("@@ "):
+        match = re.search(r"\+(\d+)(?:,(\d+))?", raw)
+        new_line = int(match.group(1)) if match else 0
+        continue
+    if path is None or not new_line:
+        continue
+    prefix = raw[:1]
+    if prefix == "+":
+        added.setdefault(path, []).append((new_line, raw[1:]))
+        new_line += 1
+    elif prefix != "-":
+        new_line += 1
+
+def current_lines(rel):
+    source = safe_source(rel)
+    if source is None:
+        return None
+    return source.read_text(encoding="utf-8", errors="replace").splitlines()
+
+def uncomment_xml(lines):
+    text = "\n".join(lines)
+    return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+def has_active_git_route(lines):
+    text = uncomment_xml(lines)
+    servlet_blocks = re.findall(r"<servlet\b[^>]*>(.*?)</servlet>", text, flags=re.S | re.I)
+    has_class = any(re.search(r"<servlet-class>\s*[^<]*GitServlet\s*</servlet-class>", block, re.I)
+                    for block in servlet_blocks)
+    mappings = re.findall(r"<servlet-mapping\b[^>]*>(.*?)</servlet-mapping>", text, flags=re.S | re.I)
+    has_mapping = any(re.search(r"<url-pattern>\s*/git/\*\s*</url-pattern>", block, re.I)
+                      for block in mappings)
+    return has_class and has_mapping
+
+def has_auth_for_git(lines):
+    text = uncomment_xml(lines)
+    mappings = re.findall(r"<filter-mapping\b[^>]*>(.*?)</filter-mapping>", text, flags=re.S | re.I)
+    for block in mappings:
+        if not re.search(r"<filter-name>\s*(?:AuthenticationFilter|GlobalFileUploadFilter)\s*</filter-name>", block, re.I):
+            continue
+        patterns = re.findall(r"<url-pattern>\s*([^<]+?)\s*</url-pattern>", block, flags=re.S | re.I)
+        if any(pattern.strip() in ("/git/*", "/*") for pattern in patterns):
+            return True
+    return False
+
+web_candidates = []
+java_candidates = []
+for rel, entries in added.items():
+    text = "\n".join(line for _, line in entries)
+    if rel.endswith("WEB-INF/web.xml") and (
+        re.search(r"<servlet-class>\s*[^<]*GitServlet\s*</servlet-class>", text, re.I)
+        or re.search(r"<url-pattern>\s*/git/\*\s*</url-pattern>", text, re.I)
+    ):
+        web_candidates.append(rel)
+    if rel.endswith("GitServlet.java") and re.search(r"writeFile\s*\(|uploadFiles\s*\(", text):
+        java_candidates.append(rel)
+
+for web_rel in sorted(web_candidates):
+    web_lines = current_lines(web_rel)
+    if not web_lines or not has_active_git_route(web_lines) or has_auth_for_git(web_lines):
+        continue
+    web_line = next((i for i, line in enumerate(web_lines, 1)
+                     if re.search(r"<url-pattern>\s*/git/\*\s*</url-pattern>", line, re.I)), None)
+    if web_line is None:
+        continue
+    for java_rel in sorted(java_candidates):
+        java_lines = current_lines(java_rel)
+        if not java_lines:
+            continue
+        java_text = "\n".join(java_lines)
+        if not re.search(r"class\s+\w+\s+extends\s+UploadServlet", java_text):
+            continue
+        if not re.search(r"\bdoPost\s*\(", java_text) or not re.search(r"\bwriteFile\s*\(", java_text):
+            continue
+        java_line = next((i for i, line in enumerate(java_lines, 1)
+                          if re.search(r"\bwriteFile\s*\(", line)), None)
+        if java_line is None:
+            java_line = next((i for i, line in enumerate(java_lines, 1)
+                              if re.search(r"\bdoPost\s*\(", line)), None)
+        if java_line is None:
+            continue
+        print(f"P1 {java_rel}:{java_line} - 新增 GitServlet 写入入口未纳入 AuthenticationFilter 覆盖范围；authenticationEnabled=true 时 /git/* 可绕过认证，关闭认证时则完全没有该层保护。")
+        print("影响：未认证请求可能向服务端检出仓库写入任意上传文件并创建 Git 提交，导致配置、源码或部署内容被篡改；仅当 pushOnCommit=true 且远端可达时才会进一步推送，实际可达性还取决于部署网络、上游网关和认证配置。")
+        print("修复建议：为 /git/* 显式绑定与 /upload/* 等价的认证/授权过滤器，并增加上传类型、仓库路径和分支 allowlist；写入前校验操作者权限，默认拒绝未认证请求。")
+        print(f"验证方式：分别在 authenticationEnabled=true/false、pushOnCommit=false/true 下匿名 POST /git/<branch>/<path> 上传小文件，确认认证开启时请求先被拒绝且关闭时有明确的部署隔离；已认证用户再验证只允许授权分支/路径，提交与可选推送审计记录包含操作者。")
+        print(f"来源：确定性预检（代码证据，非模型原文）；{web_rel}:{web_line} 注册 /git/*，但未见 AuthenticationFilter 的 /git/* 或 /* 映射。")
+        print()
+        break
+PY
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_java_tls_hostname_verifier_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+
+  # A TLS HostnameVerifier is security-relevant only when its boolean result
+  # gates the handshake.  Keep this check narrow: changed Java code must call
+  # hostnameVerifier.verify inside an SSLSocket start/handshake method and the
+  # result must not be assigned, tested, returned, or followed by a local
+  # SSLPeerUnverifiedException failure path.  Ordinary custom callbacks and
+  # non-TLS verifier calls remain model/manual review territory.
+  [[ -n "$source_root" ]] || return 0
+  python3 - "$diff_file" "$source_root" >>"$output_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+diff_path, source_root = sys.argv[1:]
+root = Path(source_root)
+
+def safe_source(rel: str):
+    path = Path(rel)
+    if path.is_absolute() or ".." in path.parts or not rel.endswith(".java"):
+        return None
+    current = root
+    for part in path.parts:
+        current = current / part
+        if current.is_symlink():
+            return None
+    return current if current.is_file() else None
+
+added = {}
+path = None
+new_line = 0
+for raw in Path(diff_path).read_text(encoding="utf-8", errors="replace").splitlines():
+    if raw.startswith("+++ b/"):
+        path = raw[6:].split("\t", 1)[0]
+        continue
+    if raw.startswith("@@ "):
+        match = re.search(r"\+(\d+)(?:,(\d+))?", raw)
+        new_line = int(match.group(1)) if match else 0
+        continue
+    if path is None or not new_line:
+        continue
+    prefix = raw[:1]
+    if prefix == "+":
+        added.setdefault(path, []).append(new_line)
+        new_line += 1
+    elif prefix != "-":
+        new_line += 1
+
+def mask_line(line: str):
+    line = re.sub(r'"(?:\\.|[^"\\])*"', '""', line)
+    line = re.sub(r"//.*$", "", line)
+    return line
+
+def method_bounds(lines, target):
+    # Find the nearest method-like declaration whose brace range contains the
+    # changed call. This is intentionally conservative and yields no finding
+    # for unusual Java syntax rather than borrowing evidence from another
+    # method in the same class.
+    masked = [mask_line(line) for line in lines]
+    start = max(0, target - 160)
+    for index in range(target, start - 1, -1):
+        signature = ""
+        for probe in range(index, min(len(lines), index + 8)):
+            signature += " " + masked[probe]
+            if "{" not in signature:
+                continue
+            if re.search(r"\b(start|handshake|connect)\s*\([^;{}]*\)\s*(?:throws\s+[^{}]+)?\s*\{", signature):
+                open_index = probe
+                depth = 0
+                for end in range(open_index, len(lines)):
+                    text = masked[end]
+                    depth += text.count("{") - text.count("}")
+                    if end > open_index and depth <= 0:
+                        return index, end
+                return index, len(lines) - 1
+            break
+    return None
+
+for rel, added_lines in sorted(added.items()):
+    source = safe_source(rel)
+    if source is None:
+        continue
+    lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+    full_text = "\n".join(lines)
+    if "hostnameVerifier" not in full_text or "SSLSocket" not in full_text:
+        continue
+    for line_no in added_lines:
+        if line_no < 1 or line_no > len(lines):
+            continue
+        if not re.search(r"\bhostnameVerifier\s*\.\s*verify\s*\(", lines[line_no - 1]):
+            continue
+        bounds = method_bounds(lines, line_no - 1)
+        if bounds is None:
+            continue
+        start, end = bounds
+        body = lines[start:end + 1]
+        body_text = "\n".join(body)
+        call = lines[line_no - 1]
+        # The call is safe for this narrow detector when its boolean is
+        # visibly consumed or a nearby failure path already closes/aborts the
+        # session. A bare statement expression is the risky shape.
+        if re.search(r"\b(if|while)\s*\([^)]*hostnameVerifier\s*\.\s*verify", call):
+            continue
+        if re.search(r"(?:boolean\s+\w+|\w+)\s*=\s*hostnameVerifier\s*\.\s*verify", body_text):
+            continue
+        if re.search(r"\breturn\s+hostnameVerifier\s*\.\s*verify|\bthrow\b[^\n]*hostnameVerifier\s*\.\s*verify", call):
+            continue
+        nearby = "\n".join(body[max(0, line_no - 1 - start - 12):min(len(body), line_no - 1 - start + 13)])
+        if re.search(r"!\s*hostnameVerifier\s*\.\s*verify|SSLPeerUnverifiedException|session\.invalidate\s*\(\)|socket\.close\s*\(\)", nearby):
+            continue
+        print(f"P1 {rel}:{line_no} - TLS HostnameVerifier.verify() 的布尔结果被忽略，SSL 握手未校验服务端主机名。")
+        print("影响：攻击者可在受信任 CA 或证书链仍通过的情况下伪造目标主机，客户端可能把恶意 TLS 端点当作合法服务，导致凭据、消息或内部数据泄露/篡改。")
+        print("修复建议：检查 verify() 返回值；返回 false 时立即使会话失效、关闭 socket 并抛出 SSLPeerUnverifiedException，或启用 SSLSocket/SSLParameters 的标准 endpoint identification。")
+        print("验证方式：使用证书链有效但主机名不匹配的 TLS 端点，确认连接在握手后被拒绝；匹配主机名和自定义 verifier 明确返回 true 的对照应正常连接。")
+        print("来源：确定性预检（代码证据，非模型原文）")
+        print()
+        break
+PY
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_java_command_injection_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -13424,6 +13677,8 @@ collect_java_hardcoded_crypto_key_preflight "$chunk_input_file" "$build_prefligh
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_bytebuffer_eof_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_unprotected_git_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_tls_hostname_verifier_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_command_injection_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_session_expiration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_resource_shutdown_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

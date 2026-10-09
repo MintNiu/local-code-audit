@@ -1255,4 +1255,10 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 
 本轮先尝试把该证据交给模型，真实正例在 tuned profile 下仍返回 clean，因此新增窄范围 `collect_java_bytebuffer_eof_preflight`。规则要求变更 Java 文件的方法级结构同时满足底层 `read()`、`== -1`、`position(0)`、后续 `get()`，并且 EOF 后没有 `flip`/`limit(0)`；不凭类名、CVE 编号或泛化的 ByteBuffer 关键词报告。`ByteBuffer.clear()` 明确不算安全，因为它会恢复 `limit=capacity` 并可能重放旧字节。第一次 smoke 未命中，定位到 Java 多行方法签名和预检自身的清洗顺序 bug；修复后真实差异稳定输出完整 P2 证据，新增正例、`limit(0)` 安全对照和 `clear()` 误安全对照夹具通过。该发现保留“确定性预检（代码证据，非模型原文）”来源，避免把规则命中冒充模型能力。
 
-同日复测 `java-token-header` clean 对照时，模型在有无私有 few-shot 的首轮复测中都出现同类误报：把“方法参数 `token` 通过 `X-Token` 发送到明确内部 URI”报为条件式 P1，甚至复述了系统规则中“没有日志、外部跳转、URL 拼接或禁止契约”的安全前提后仍反向下结论。提示词 A/B 不能解决该长系统提示下的语义误报，因此新增源码证据过滤：只有当前快照同时证明内部 literal URI、header-only 传递且没有日志/持久化/URL/重定向/外部边界时，才删除这类纯条件式泄漏段；直接日志、外部 URI、URL 参数或契约冲突始终保留。新增 `evals/test-java-token-header-boundary.sh` 覆盖安全内部 URI和 internal→external 变更，后者必须保留 finding。该过滤只修正已证明的模型自相矛盾，不改变“所有有代码证据的问题必须可见”的规则。
+同日复测 `java-token-header` clean 对照时，模型在有无私有 few-shot 的首轮复测中都出现同类误报：把“方法参数 `token` 通过 `X-Token` 发送到明确内部 URI”报为条件式 P1，甚至复述了系统规则中“没有日志、外部跳转、URL 拼接或禁止契约”的安全前提后仍反向下结论。提示词 A/B 不能解决该长系统提示下的语义误报，因此新增源码证据过滤：只有当前快照同时证明内部 literal URI、header-only 传递且没有日志/持久化/URL/重定向/外部边界时，才删除这类纯条件式泄漏段；直接日志、外部 URI、URL 参数或契约冲突始终保留。新增 `evals/test-java-token-header-boundary.sh` 覆盖安全内部 URI 和 internal→external 变更，后者必须保留 finding。该过滤只修正已证明的模型自相矛盾，不改变“所有有代码证据的问题必须可见”的规则。
+
+2026-10-09：Hawtio VCC-Eval Java 候选 `fb3c03549e0c06dedef5eb97e8a1965369689fe1` 的只读核验发现，新增可写 `GitServlet` 后，`hawtio-base` 与 `hawtio-web` 的 `/git/*` 映射仍未纳入 `AuthenticationFilter` 的 `/upload/*` 保护范围；POST 链路可调用 `uploadFiles`、`WriteContext.addFile` 并创建本地提交，只有 `pushOnCommit=true` 时才继续推送。该结论是依赖部署边界的条件 P1，模型原始 smoke 返回 clean，候选继续留在私有 tuning-source，不进入严格 scorecard。
+
+针对这类跨 Java 与 `WEB-INF/web.xml` 的认证范围漏报，运行器新增 `collect_java_unprotected_git_write_preflight`，只在差异切换/新增 GitServlet 映射、当前 servlet 明确包含 `doPost`/`writeFile` 写链路且同一快照缺少 `/git/*` 或 `/*` 的 `AuthenticationFilter` 映射时输出 P1。显式认证映射的对照、没有写入口的 servlet 和无关 XML 均保持 clean；预检保留 Java 写入行与 web.xml 路由行，标记为确定性代码证据，不计作模型原生命中。
+
+同轮补充 Paho MQTT Java 的 TLS 主机名校验候选：`HostnameVerifier.verify(host, session)` 的返回值被忽略时，证书链有效但主机名不匹配的端点仍可能被接受，属于 P1 级别的中间人边界。新增 `collect_java_tls_hostname_verifier_preflight`，要求变更行位于 `SSLSocket` 的握手方法、调用是裸语句且没有赋值/条件/失败路径；`!verify(...)`、异常关闭和显式 endpoint identification 的安全对照保持 clean。该预检覆盖 VCC 候选的高信号形态，但候选仍是外部 tuning-source，不回填模型原生召回率。

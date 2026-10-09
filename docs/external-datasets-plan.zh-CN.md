@@ -73,3 +73,11 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 2026-10-09：对 VCC-Eval 的 Commons Compress `CVE-2018-11771` 候选完成私有 parent/target 方向核验。目标提交在 `ZipArchiveInputStream.readStored` 中把底层 `InputStream.read()` 的 EOF 直接返回，但保留了 `ByteBuffer` 上一次的正 `limit`；截断输入的独立复现显示，后续读取会重新暴露旧字节并在 EOF 与旧数据之间交替，符合 Apache 公告所述的低严重度拒绝服务根因。该漏洞是 P2/低严重度，不进入当前 P0/P1 严格 scorecard，也不把修复提交当作 review gold；真实源代码、PoV 和 commit 对象继续只保存在本机私有评测目录。
 
 为避免该窄而高置信的 Java 资源耗尽形态被小模型漏报，运行器新增 `ByteBuffer` EOF 状态预检：仅在当前变更 Java 方法同时出现底层 `read()`、`== -1`、`position(0)`、后续 `get()`，且 EOF 后没有 `flip`/`limit(0)` 状态重置时报告 P2。`ByteBuffer.clear()` 不作为安全反证，因为它会恢复 `limit=capacity`，可能重新暴露旧数据。正例、`limit(0)` 安全对照、误用 `clear()` 对照和真实 Commons Compress 差异均通过回归；该规则只作 fail-closed 可见性保护，不提高模型原生召回率。
+
+2026-10-09：对 VCC-Eval 的 Hawtio Java 候选 `fb3c03549e0c06dedef5eb97e8a1965369689fe1` 做了只读跨文件核验。提交把 `/git/*` 的 servlet 类切换为新增的 `io.hawt.web.GitServlet`；其 `doPost` 通过 `uploadFiles`、`WriteContext.addFile` 和 Git 提交流程写入仓库，若 `pushOnCommit=true` 还会继续推送，但 `hawtio-base` 与 `hawtio-web` 的 `WEB-INF/web.xml` 只给 `/upload/*` 配置 `AuthenticationFilter`，没有 `/git/*` 或 `/*` 的等价保护。该结论依赖部署是否启用认证、是否暴露对应 WAR、上游是否已有网关认证和 push 配置，按条件 P1 记录；未把 Hawtio 源码、diff、CVE 或评论复制到公开仓库，也未把候选写入严格 Platform scorecard。
+
+为防止该类“Java 写入口 + web.xml 映射 + 认证范围缺口”的跨文件漏报，运行器新增 `collect_java_unprotected_git_write_preflight`。规则只在当前差异切换/新增 GitServlet 映射、当前 servlet 明确包含 `doPost`/`writeFile` 写链路，且同一快照的 `AuthenticationFilter` 没有 `/git/*` 或 `/*` 映射时报告条件 P1；`authenticationEnabled`、上游网关和 `pushOnCommit` 仍作为部署条件显式写入影响与验证方式，不能从静态差异推断必然远端推送。显式认证映射的对照保持 clean。预检输出同时保留 Java 写入行和 web.xml 路由证据，来源标记为确定性代码证据，不把预检命中冒充模型原生召回。
+
+同日补充 Eclipse Paho MQTT Java 的 VCC 候选 `176f6fc0b83` 方向核验：`SSLNetworkModule` 在 TLS 握手后调用 `HostnameVerifier.verify(host, session)` 却忽略返回的布尔值，后续修复才在 false 时失效会话、关闭 socket 并抛出 `SSLPeerUnverifiedException`。该根因可导致有效证书链下的主机名冒充，按 P1 候选保留；Paho 的 EPL/EDL 许可已记录，但 VCC 数据集本身仍为 `pending-human-label`，未把候选或修复提交直接写入严格 scorecard。
+
+运行器新增 `collect_java_tls_hostname_verifier_preflight`：仅在变更 Java 文件的 `SSLSocket` 握手方法内新增裸 `hostnameVerifier.verify()`，且没有赋值、条件判断或失败路径时报告 P1；显式检查返回值、关闭 socket 并抛出异常的对照保持 clean。该规则用于在高危 TLS 漏报时 fail-closed 保留代码证据，不把确定性命中当作模型原生命中。
