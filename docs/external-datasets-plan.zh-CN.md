@@ -8,10 +8,11 @@
 | --- | --- | --- | --- |
 | 1 | [AACR-Bench](https://github.com/alibaba/aacr-bench) | 真实 PR 的评论、定位、类别和多语言审查表达 | 先抽取少量 Java/TS/SQL/配置样本做 external-smoke；原始 PR 和引用仓库许可证逐项记录 |
 | 2 | [ReviewBench](https://github.com/review-bench/ReviewBench) | 真实 PR 语境、定位、排序和跨语言审查格式 | 只做 metadata-only external-smoke；仓库当前 219 条、Java 7 条，不能作为 Java P0/P1 严格召回金标 |
-| 3 | [VCC-Eval](https://github.com/tuhh-softsec/VCC-Eval-A-Manually-Curated-Dataset-of-Vulnerability-Introducing-Commits-in-Java) | Java 漏洞引入提交、CVE/CWE 和精确引入行 | 先做 metadata-only 候选；数据仓库未声明可复用许可证，必须人工核对 intro parent、diff、触发证据和引用仓库许可后才能进入训练/holdout |
-| 4 | [Vul4J](https://github.com/tuhh-softsec/Vul4J) | 真实 Java 漏洞、修复补丁和 PoV 测试 | 优先使用有 PoV 的子集；PoV 与仅静态告警样本分层统计，不混成一个金标 |
-| 5 | [JavaVFC](https://zenodo.org/records/13731781) | 人工核验的 Java 修复提交 | 784 条人工集用于 train/dev 候选；extended 启发式集只能做 smoke，按仓库和提交谱系去重 |
-| 6 | [NIST Juliet/SARD](https://www.nist.gov/publications/juliet-11-cc-and-java-test-suite) | CWE 正负对照、行号和输出协议回归 | 只抽取小型 Java 子集；合成样本不代表真实世界召回率 |
+| 3 | [SWE-PRBench](https://huggingface.co/datasets/foundry-ai/swe-prbench) | 真实人工 PR 评论、难度类型和多语言 review 结构 | 只读取 `prs.jsonl` 做 metadata-only 候选；CC BY 4.0，Java 约 4%，先做 Java smoke，再做全语言定位/误报实验，不能作为 Java P0/P1 门禁 |
+| 4 | [VCC-Eval](https://github.com/tuhh-softsec/VCC-Eval-A-Manually-Curated-Dataset-of-Vulnerability-Introducing-Commits-in-Java) | Java 漏洞引入提交、CVE/CWE 和精确引入行 | 先做 metadata-only 候选；数据仓库未声明可复用许可证，必须人工核对 intro parent、diff、触发证据和引用仓库许可后才能进入训练/holdout |
+| 5 | [Vul4J](https://github.com/tuhh-softsec/Vul4J) | 真实 Java 漏洞、修复补丁和 PoV 测试 | 优先使用有 PoV 的子集；PoV 与仅静态告警样本分层统计，不混成一个金标 |
+| 6 | [JavaVFC](https://zenodo.org/records/13731781) | 人工核验的 Java 修复提交 | 784 条人工集用于 train/dev 候选；extended 启发式集只能做 smoke，按仓库和提交谱系去重 |
+| 7 | [NIST Juliet/SARD](https://www.nist.gov/publications/juliet-11-cc-and-java-test-suite) | CWE 正负对照、行号和输出协议回归 | 只抽取小型 Java 子集；合成样本不代表真实世界召回率 |
 
 暂缓 OWASP BenchmarkJava、MegaVul、PrimeVul、GitBug-Java 和 Defects4J：前几项存在 GPL/数据许可或标签质量边界，后几项体量大、偏通用缺陷或下载成本高。任何重新引入都必须先完成许可证和磁盘成本复核。
 
@@ -62,3 +63,5 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 同日修正 Juliet Java 预处理器的 manifest 关联：优先使用归一化的相对路径，只有 basename 全局唯一时才允许回退。这样可以避免不同 CWE 目录中的同名测试文件共享错误的缺陷行号或标签；Windows 风格路径也会先统一为 `/`。重复 basename、路径分隔符和精确行号均由回归夹具覆盖，数据质量错误不得进入训练或外部 smoke。
 
 2026-10-09：在同一 Java 在线会话提交上做了普通 personal profile 与 `auth-tenant` 专项复核 A/B。两轮都完整结束，均为 5 个分片，最终结果哈希一致；专项复核耗时约 280 秒，普通审查约 102 秒，未增加模型原生问题。该结果只作为专项通道诊断证据，说明确定性租户预检已覆盖该样本的主要风险；`auth-tenant` 继续保持默认关闭，不把额外耗时当作能力提升，也不将该样本写入严格 scorecard。
+
+同日新增 `scripts/prepare-swe-prbench-candidates.py` 和 `evals/test-swe-prbench-candidates.sh`。适配器只读取 SWE-PRBench 的 `prs.jsonl` 元数据，按 `task_id` 解析候选 PR 号，保留语言、难度、RVS 和评论数量，丢弃 diff、上下文和评论正文；每条记录均为 `pending-human-label`、`golden_status=not-loaded`。固定 revision 的数据卡约 350 条 PR、Java 约 4%，因此 Java-first 只作为小规模 external-smoke，不能把该集当作 Java 高危门禁；全语言样本也必须先完成引用仓库许可证和文件/行号人工核对。

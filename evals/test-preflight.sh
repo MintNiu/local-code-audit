@@ -5539,6 +5539,9 @@ bash "$repo_root/evals/test-vcc-eval-verifier.sh"
 # ReviewBench is metadata-only external smoke; never import source, diff, or
 # golden review text into the public repository.
 bash "$repo_root/evals/test-reviewbench-candidates.sh"
+# SWE-PRBench exposes review text and diffs in prs.jsonl; keep its adapter
+# metadata-only and require independent labels before any smoke/gold use.
+bash "$repo_root/evals/test-swe-prbench-candidates.sh"
 # A 32-bit loop over an unbounded archive long must not be allowed to wrap.
 bash "$repo_root/evals/test-java-integer-loop-preflight.sh"
 # Request-controlled commands must not reach Java OS-process sinks without a

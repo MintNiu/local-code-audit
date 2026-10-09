@@ -193,6 +193,25 @@ useful for multilingual review context and location smoke, but its seven Java
 PRs are not a Java P0/P1 recall gate. Run
 `bash evals/test-reviewbench-candidates.sh` for the no-leakage regression.
 
+For SWE-PRBench, normalize only the metadata in `prs.jsonl`; keep diffs,
+contexts, comments, and referenced repositories outside this public repository:
+
+```bash
+python3 scripts/prepare-swe-prbench-candidates.py \
+  /private/path/swe-prbench/dataset/prs.jsonl \
+  --revision b87f5797aef3ed2c3153bb1304ea4d801d36ba6e \
+  --language java \
+  --output /private/path/swe-prbench-java-candidates.jsonl
+```
+
+Every row stays `pending-human-label` with `golden_status=not-loaded`; the
+adapter derives a candidate PR number from `task_id` and preserves difficulty,
+RVS, and substantive-comment metadata without importing review text or patch
+content. SWE-PRBench has limited Java coverage, so the Java filter is only a
+small external smoke; all languages still require repository-license,
+file/line, and severity verification. Run
+`bash evals/test-swe-prbench-candidates.sh` for the no-leakage regression.
+
 For VCC-Eval Java vulnerability-introduction metadata, create a private
 metadata-only candidate index:
 

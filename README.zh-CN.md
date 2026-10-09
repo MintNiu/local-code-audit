@@ -157,6 +157,18 @@ python3 scripts/prepare-reviewbench-candidates.py \
 
 输出只包含仓库、PR、base/head、语言和变更规模；每条记录保持 `pending-human-label`，并写入 `golden_status=not-loaded`。不会复制源码、diff、评论或 golden finding。ReviewBench 当前只有 7 条 Java PR，不能作为 Java P0/P1 严格召回门禁，只用于真实 PR 语境、定位格式、多语言 smoke 和误报分析。对应无模型回归为 `bash evals/test-reviewbench-candidates.sh`。
 
+对于 SWE-PRBench，先只规范化 `prs.jsonl` 的元数据，不复制 diff、上下文或评论正文：
+
+```bash
+python3 scripts/prepare-swe-prbench-candidates.py \
+  /private/path/swe-prbench/dataset/prs.jsonl \
+  --revision b87f5797aef3ed2c3153bb1304ea4d801d36ba6e \
+  --language java \
+  --output /private/path/swe-prbench-java-candidates.jsonl
+```
+
+每条记录保持 `pending-human-label` 和 `golden_status=not-loaded`；适配器从 `task_id` 解析候选 PR 号，并保留难度、RVS 和人工评论数量等元数据。SWE-PRBench 的 Java 占比较低，Java 筛选只用于小规模 external-smoke，全语言样本也必须先核对引用仓库许可、文件/行号和严重度。对应无模型回归为 `bash evals/test-swe-prbench-candidates.sh`。
+
 对于 VCC-Eval 的 Java 漏洞引入提交元数据，先生成不含源码和补丁的私有候选索引：
 
 ```bash
