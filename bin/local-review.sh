@@ -3041,6 +3041,11 @@ validate_response() {
       ;;
     length)
     truncated_text="$(jq -r '.response // empty' <"$response_file")"
+    if [[ -n "$specialist_channel" ]]; then
+      echo "本地代码审查失败：专项评测要求两次模型输出均完整，拒绝从截断响应恢复 clean。" >&2
+      printf '%s\n' "$truncated_text" | redact_sensitive_text >&2
+      return 10
+    fi
     # A narrow recovery is safe for the xxl-job permission migration: the
     # deterministic preflight is authoritative, while the model sometimes
     # spends its entire shard budget repeating that same preflight or adding
@@ -3574,14 +3579,28 @@ merge_model_pass_outputs() {
   fi
 
   if [[ "$has_findings" == true ]]; then
-    sort_findings_by_severity <"$merged_file" | dedup_exact_findings >"$merged_file.tmp"
-    mv "$merged_file.tmp" "$merged_file"
+    sort_findings_by_severity <"$merged_file" | dedup_identical_model_blocks >"$primary_output"
     printf 'findings\n' >"$primary_kind"
   else
     printf '未发现阻塞问题\n' >"$merged_file"
     printf 'clean\n' >"$primary_kind"
+    cp "$merged_file" "$primary_output"
   fi
-  cp "$merged_file" "$primary_output"
+}
+
+dedup_identical_model_blocks() {
+  # Cross-pass candidates may share a path and risk family without sharing a
+  # root. Never use the baseline semantic deduper for specialist unions.
+  LC_ALL=C awk '
+    function flush() {
+      sub(/\n+$/, "", block)
+      if (block != "" && !seen[block]++) printf "%s\n\n", block
+      block = ""
+    }
+    /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
+    { block = block $0 "\n" }
+    END { flush() }
+  '
 }
 
 merge_preflight_findings() {
@@ -4200,7 +4219,7 @@ collect_security_preflight() {
   # from a URL query parameter, are reported. The alias set covers common
   # names such as authToken/signature/credential without treating ordinary IDs
   # as secrets.
-  awk -v repo_root="$source_root" '
+  LC_ALL=C awk -v repo_root="$source_root" '
     function clean_java_source_line(raw, text, pos, prefix, tail, close_pos) {
       text = raw
       # Java 15 text blocks can contain arbitrary JSON/SQL braces across
@@ -12111,8 +12130,8 @@ collect_sales_fulfillment_stale_order_preflight() {
   ' "$diff_file" || return 0
   application_file="$(find "$source_root/src/main/java" -type f -name 'SalesFulfillmentApplication.java' -print -quit 2>/dev/null || true)"
   [[ -f "$application_file" ]] || return 0
-  dispatch_line="$(grep -n -m1 -E 'public[[:space:]]+[^[:space:]]+[[:space:]]+dispatch[[:space:]]*\(' "$application_file" | cut -d: -f1)"
-  helper_line="$(grep -n -m1 'updateOrderDispatchStatus' "$application_file" | cut -d: -f1)"
+  dispatch_line="$(grep -n -m1 -E 'public[[:space:]]+[^[:space:]]+[[:space:]]+dispatch[[:space:]]*\(' "$application_file" | cut -d: -f1 || true)"
+  helper_line="$(grep -n -m1 'updateOrderDispatchStatus' "$application_file" | cut -d: -f1 || true)"
   [[ "$dispatch_line" =~ ^[0-9]+$ && "$helper_line" =~ ^[0-9]+$ ]] || return 0
   dispatch_block="$(python3 "$java_method_window_script" "$application_file" "$dispatch_line" 2>/dev/null || true)"
   helper_block="$(python3 "$java_method_window_script" "$application_file" "$helper_line" 2>/dev/null || true)"
@@ -12152,8 +12171,8 @@ collect_sales_fulfillment_lock_order_preflight() {
   ' "$diff_file" || return 0
   application_file="$(find "$source_root/src/main/java" -type f -name 'SalesFulfillmentApplication.java' -print -quit 2>/dev/null || true)"
   [[ -f "$application_file" ]] || return 0
-  normalize_line="$(grep -n -m1 -E 'normalizeDispatchLines[[:space:]]*\([^;]*\)[[:space:]]*\{' "$application_file" | cut -d: -f1)"
-  dispatch_line="$(grep -n -m1 -E 'public[[:space:]]+[^[:space:]]+[[:space:]]+dispatch[[:space:]]*\(' "$application_file" | cut -d: -f1)"
+  normalize_line="$(grep -n -m1 -E 'normalizeDispatchLines[[:space:]]*\([^;]*\)[[:space:]]*\{' "$application_file" | cut -d: -f1 || true)"
+  dispatch_line="$(grep -n -m1 -E 'public[[:space:]]+[^[:space:]]+[[:space:]]+dispatch[[:space:]]*\(' "$application_file" | cut -d: -f1 || true)"
   [[ "$normalize_line" =~ ^[0-9]+$ && "$dispatch_line" =~ ^[0-9]+$ ]] || return 0
   normalize_block="$(python3 "$java_method_window_script" "$application_file" "$normalize_line" 2>/dev/null || true)"
   dispatch_block="$(python3 "$java_method_window_script" "$application_file" "$dispatch_line" 2>/dev/null || true)"
@@ -13006,10 +13025,6 @@ collect_sales_return_lock_order_preflight() {
 response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-response.XXXXXX")"
 response_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-output.XXXXXX")"
 response_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-kind.XXXXXX")"
-specialist_response_file="$(mktemp "${TMPDIR:-/tmp}/local-review-specialist-response.XXXXXX")"
-specialist_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-specialist-output.XXXXXX")"
-specialist_kind_file="$(mktemp "${TMPDIR:-/tmp}/local-review-specialist-kind.XXXXXX")"
-specialist_merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-specialist-merged.XXXXXX")"
 chunk_input_file="$(mktemp "${TMPDIR:-/tmp}/local-review-diff.XXXXXX")"
 changed_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-paths.XXXXXX")"
 cross_file_evidence_file="$(mktemp "${TMPDIR:-/tmp}/local-review-cross-file-evidence.XXXXXX")"
@@ -13024,6 +13039,10 @@ java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
+specialist_response_file="$chunk_dir/initial.specialist.response.json"
+specialist_output_file="$chunk_dir/initial.specialist.output"
+specialist_kind_file="$chunk_dir/initial.specialist.kind"
+specialist_merged_file="$chunk_dir/initial.specialist.merged"
 trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$specialist_response_file" "$specialist_output_file" "$specialist_kind_file" "$specialist_merged_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
@@ -13295,7 +13314,16 @@ if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   echo "本地代码审查失败：检测到 combined diff（diff --cc/diff --combined），当前分片器不会猜测合并冲突语义；请先展开为普通文件 diff 后重试。" >&2
   exit 1
 fi
-if ! resolve_chunk_budget "$max_diff_bytes"; then
+resolve_review_budget() {
+  # Bash dynamic scope lets the budget probe include specialist overhead
+  # without altering the baseline request's system prompt.
+  local review_system="$review_system"
+  if [[ -n "$specialist_channel" ]]; then
+    review_system+=$'\n\n'"$(specialist_instruction)"
+  fi
+  resolve_chunk_budget "$1"
+}
+if ! resolve_review_budget "$max_diff_bytes"; then
   emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
   exit 1
 fi
@@ -13392,10 +13420,10 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_response="$chunk_output_dir/$chunk_name.response.json"
   chunk_output="$chunk_output_dir/$chunk_name.txt"
   chunk_kind="$chunk_kind_dir/$chunk_name.kind"
-  chunk_specialist_response="$chunk_output_dir/$chunk_name.specialist.response.json"
-  chunk_specialist_output="$chunk_output_dir/$chunk_name.specialist.txt"
-  chunk_specialist_kind="$chunk_kind_dir/$chunk_name.specialist.kind"
-  chunk_specialist_merged="$chunk_output_dir/$chunk_name.specialist-merged.txt"
+  chunk_specialist_response="$chunk_dir/$chunk_name.specialist.response.json"
+  chunk_specialist_output="$chunk_dir/$chunk_name.specialist.output"
+  chunk_specialist_kind="$chunk_dir/$chunk_name.specialist.kind"
+  chunk_specialist_merged="$chunk_dir/$chunk_name.specialist.merged"
   chunk_paths_file="$chunk_output_dir/$chunk_name.paths"
   chunk_status_file="$chunk_output_dir/$chunk_name.status"
   chunk_preflight_file="$chunk_output_dir/$chunk_name.preflight"
@@ -13579,7 +13607,7 @@ $(cat "$changed_paths_file")
     num_predict="$chunk_num_predict"
     run_specialist_prompt "$chunk_prompt" "$chunk_specialist_response" "$chunk_specialist_output" "$chunk_specialist_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_specialist_status=$?
     num_predict="$specialist_original_num_predict"
-    printf -v trace_line 'specialist_status\t%s\t%s\t%s' "$chunk_name" "$specialist_channel" "$chunk_specialist_status"
+    printf -v trace_line 'specialist_status\t%s\t%s\t%s\t%s' "$chunk_name" "$specialist_channel" "$chunk_specialist_status" "$(( $(date +%s) - chunk_specialist_start ))"
     write_review_trace "$trace_line"
     if [[ "$chunk_specialist_status" -ne 0 ]]; then
       emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
@@ -13619,9 +13647,15 @@ if [[ "$has_findings" == true ]]; then
   # restoring severity order; distinct locations, expressions, and independent
   # roots remain visible. Deterministic preflight blocks are then deduplicated
   # by their complete provenance-marked paragraph.
-  sort_findings_by_severity <"$combined_output_file" \
-    | dedup_exact_findings \
-    | dedup_deterministic_preflight_blocks
+  if [[ -n "$specialist_channel" ]]; then
+    sort_findings_by_severity <"$combined_output_file" \
+      | dedup_identical_model_blocks \
+      | dedup_deterministic_preflight_blocks
+  else
+    sort_findings_by_severity <"$combined_output_file" \
+      | dedup_exact_findings \
+      | dedup_deterministic_preflight_blocks
+  fi
 else
   printf '未发现阻塞问题\n'
 fi
