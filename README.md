@@ -205,7 +205,8 @@ python3 scripts/prepare-swe-prbench-candidates.py \
 ```
 
 Every row stays `pending-human-label` with `golden_status=not-loaded`; the
-adapter derives a candidate PR number from `task_id` and preserves difficulty,
+adapter preserves the source `task_id`, derives a candidate PR number from it,
+and preserves difficulty,
 RVS, and substantive-comment metadata without importing review text or patch
 content. SWE-PRBench has limited Java coverage, so the Java filter is only a
 small external smoke; all languages still require repository-license,

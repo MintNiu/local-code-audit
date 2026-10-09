@@ -167,7 +167,7 @@ python3 scripts/prepare-swe-prbench-candidates.py \
   --output /private/path/swe-prbench-java-candidates.jsonl
 ```
 
-每条记录保持 `pending-human-label` 和 `golden_status=not-loaded`；适配器从 `task_id` 解析候选 PR 号，并保留难度、RVS 和人工评论数量等元数据。SWE-PRBench 的 Java 占比较低，Java 筛选只用于小规模 external-smoke，全语言样本也必须先核对引用仓库许可、文件/行号和严重度。对应无模型回归为 `bash evals/test-swe-prbench-candidates.sh`。
+每条记录保持 `pending-human-label` 和 `golden_status=not-loaded`；适配器保留原始 `task_id`，从中解析候选 PR 号，并保留难度、RVS 和人工评论数量等元数据。SWE-PRBench 的 Java 占比较低，Java 筛选只用于小规模 external-smoke，全语言样本也必须先核对引用仓库许可、文件/行号和严重度。对应无模型回归为 `bash evals/test-swe-prbench-candidates.sh`。
 
 对于 VCC-Eval 的 Java 漏洞引入提交元数据，先生成不含源码和补丁的私有候选索引：
 

@@ -171,6 +171,7 @@ def normalize(
                 "split": split,
                 "repository": repository,
                 "repository_url": pr_url,
+                "task_id": task_id,
                 "pr_number": pr_number,
                 "base_commit": base.lower(),
                 "head_commit": head.lower(),

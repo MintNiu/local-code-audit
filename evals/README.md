@@ -19,7 +19,7 @@ JavaVFC 只提供漏洞修复提交元数据，不包含可直接当作金标的
 VCC-Eval 额外提供漏洞引入提交和人工行范围，但数据仓库未声明可复用许可证；`scripts/prepare-vcc-eval-candidates.py` 只保留 canonical 仓库、CVE/CWE、引入/修复 SHA 和行范围元数据，按仓库+CVE+提交谱系去重，所有记录仍为 `pending-human-label`。必须重新核对引入提交的 parent diff、触发证据和引用仓库许可证；修复提交或行号不能直接成为 gold。对应回归为 `bash evals/test-vcc-eval-candidates.sh`。
 ReviewBench 只用于真实 PR 语境和跨语言 external-smoke，不直接提供本项目的 P0/P1 金标。`scripts/prepare-reviewbench-candidates.py` 读取固定 revision 的 `corpus/manifest.json`，输出 metadata-only 的仓库、PR、base/head、语言和规模字段，全部标记为 `pending-human-label`，并将 `golden_status` 设为 `not-loaded`。它不会复制源码、diff、评论或 golden finding；仓库与引用项目许可证仍需分别核对。对应回归为 `bash evals/test-reviewbench-candidates.sh`。
 
-SWE-PRBench 只用于真实人工 review 结构、难度类型和多语言定位 smoke。`scripts/prepare-swe-prbench-candidates.py` 读取固定 revision 的 `prs.jsonl` 元数据，从 `task_id` 解析候选 PR 号，丢弃 diff、上下文和评论正文，并把所有行保持为 `pending-human-label`/`golden_status=not-loaded`。数据集的 Java 占比较低，不能作为 Java P0/P1 高危门禁；引用仓库许可证、文件/行号和严重度仍须人工核对。对应回归为 `bash evals/test-swe-prbench-candidates.sh`。
+SWE-PRBench 只用于真实人工 review 结构、难度类型和多语言定位 smoke。`scripts/prepare-swe-prbench-candidates.py` 读取固定 revision 的 `prs.jsonl` 元数据，保留原始 `task_id` 并从中解析候选 PR 号，丢弃 diff、上下文和评论正文，把所有行保持为 `pending-human-label`/`golden_status=not-loaded`。数据集的 Java 占比较低，不能作为 Java P0/P1 高危门禁；引用仓库许可证、文件/行号和严重度仍须人工核对。对应回归为 `bash evals/test-swe-prbench-candidates.sh`。
 
 ```bash
 python3 scripts/prepare-reviewbench-candidates.py \

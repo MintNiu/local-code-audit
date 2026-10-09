@@ -26,6 +26,7 @@ rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
 assert len(rows) == 1, rows
 row = rows[0]
 assert row["repository"] == "github.com/owner/repo", row
+assert row["task_id"] == "owner/repo__42", row
 assert row["pr_number"] == 42, row
 assert row["language"] == "java", row
 assert row["difficulty"] == "Type2_Contextual", row
