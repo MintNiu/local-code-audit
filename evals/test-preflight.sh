@@ -5544,6 +5544,12 @@ bash "$repo_root/evals/test-reviewbench-candidates.sh"
 bash "$repo_root/evals/test-swe-prbench-candidates.sh"
 # A 32-bit loop over an unbounded archive long must not be allowed to wrap.
 bash "$repo_root/evals/test-java-integer-loop-preflight.sh"
+# ByteBuffer EOF handling must not replay stale bytes after a truncated read;
+# keep multiline Java method parsing and clear-vs-limit(0) semantics covered.
+bash "$repo_root/evals/test-java-bytebuffer-eof-preflight.sh"
+# Header-only token forwarding to a clearly internal URI is a clean boundary;
+# keep direct URL/external-boundary evidence visible to the output filter.
+bash "$repo_root/evals/test-java-token-header-boundary.sh"
 # Request-controlled commands must not reach Java OS-process sinks without a
 # fixed command/argument boundary; keep constant and configuration-only calls
 # as clean negative fixtures.

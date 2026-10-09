@@ -712,6 +712,33 @@ filter_unsupported_shard_findings() {
       if (text ~ /仍.*(泄漏|越权|风险|问题)|同时.*(泄漏|越权|风险|问题)|但是|然而/) return 0
       return 1
     }
+    function safe_internal_header_token_only(text, evidence, path,    lower_evidence, lower_text, contradiction_text) {
+      # A narrow contradiction guard for the recurrent false positive where
+      # the model treats any method parameter named `token` as request input.
+      # It is safe to remove only a conditional/logging-based leak claim when
+      # the visible source proves an internal literal URI and sends the token
+      # through a header, with no URL, persistence, logging, redirect, or
+      # external-boundary evidence. Direct evidence remains visible.
+      if (path !~ /\.java$/) return 0
+      lower_text = tolower(text)
+      if (lower_text !~ /token|令牌|凭据/) return 0
+      if (lower_text !~ /header|请求头|http/) return 0
+      if (lower_text !~ /日志|持久化|外部边界|代理|记录/) return 0
+      if (lower_text !~ /可能|如果|若|假如/) return 0
+      # The model often lists “没有……禁止该 header 的契约” as part of the
+      # same unsupported conditional sentence. Remove that negated clause
+      # before checking for a real contract conflict; a direct “契约禁止”
+      # statement must remain visible.
+      contradiction_text = lower_text
+      gsub(/没有[^。！？\n]*(契约|禁止)/, "", contradiction_text)
+      if (contradiction_text ~ /契约|禁止|公网|公开|跨边界|未授权|外部请求|external[[:space:]]+(uri|url|request)/) return 0
+      if (lower_text ~ /直接[[:space:]]*(写入|记录|进入)|已[[:space:]]*(写入|记录)|明确.*(日志|持久化|外部边界)/) return 0
+      lower_evidence = tolower(evidence)
+      if (lower_evidence !~ /[.]header[[:space:]]*\([^)]*"[^"]*(token|authorization)[^"]*"[[:space:]]*,[[:space:]]*token[[:space:]]*\)/) return 0
+      if (lower_evidence !~ /uri[.]create[[:space:]]*\([[:space:]]*"https?:\/\/(internal[.:\/]|localhost[:\/]|127[.]0[.]0[.]1[:\/]|0[.]0[.]0[.]0[:\/]|\[::1\][:\/]|[^"\/]+[.](internal|intranet|svc)([:\/]|"))/) return 0
+      if (lower_evidence ~ /getparameter|query|path[[:space:]]*\(|redirect|logger|log[.]|printstacktrace|persist|save[[:space:]]*\(|insert|update[[:space:]]*\(|external|public[[:space:]]+(uri|url)/) return 0
+      return 1
+    }
     function non_finding_doc_summary(text) {
       # A model may turn a documentation-only synchronization note into a
       # fully formatted information block.  It is not an actionable finding:
@@ -1072,6 +1099,10 @@ filter_unsupported_shard_findings() {
           path_evidence ~ /@Data|@Getter|@Setter|@Value/ &&
           block !~ /编译失败|构建失败|依赖冲突|版本不兼容|明确.*移除|删除.*依赖|删除了.*Lombok/) invalid = 1
       if (safe_negative_info(block)) invalid = 1
+      # Use only the current source snapshot for this contradiction guard. The
+      # unified diff also contains deleted parent lines; treating an old
+      # internal URI as current evidence would hide a newly external request.
+      if (safe_internal_header_token_only(block, full_evidence[finding_path_value], finding_path_value)) invalid = 1
       if (username_only_credential_default(block, path_evidence, finding_path(block))) invalid = 1
       if (correlated_tenant_guard(block, path_evidence, finding_path_value)) invalid = 1
       # Do not suppress configuration findings just because their consequence
@@ -6110,6 +6141,177 @@ collect_java_external_control_flow_preflight() {
       '' >>"$output_file"
   done <"$candidates"
   rm -f "$candidates"
+  dedup_preflight_blocks "$output_file"
+}
+
+collect_java_bytebuffer_eof_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+
+  # A ByteBuffer-backed stream reader must establish an empty buffer state on
+  # EOF.  If it resets only position(0), returns -1, and later calls get() with
+  # the previous positive limit, a truncated input can replay stale bytes
+  # forever.  Keep this evidence gate deliberately structural and method-local:
+  # it requires a changed Java file, an actual read/-1 branch, a later get(),
+  # and no flip/limit(0) state reset.  ByteBuffer.clear() is deliberately not
+  # treated as an empty-state proof: it restores limit=capacity and can make
+  # stale bytes readable again.  It does not guess from a CVE,
+  # class name, or a generic loop/ByteBuffer mention.
+  [[ -n "$source_root" ]] || return 0
+  python3 - "$diff_file" "$source_root" "$output_file" >>"$output_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+diff_path, source_root, output_path = sys.argv[1:]
+root = Path(source_root)
+
+def safe_source(rel: str):
+    path = Path(rel)
+    if path.is_absolute() or ".." in path.parts or not rel.endswith(".java"):
+        return None
+    current = root
+    for part in path.parts:
+        current = current / part
+        if current.is_symlink():
+            return None
+    return current if current.is_file() else None
+
+added: dict[str, list[int]] = {}
+path = None
+new_line = 0
+for raw in Path(diff_path).read_text(encoding="utf-8", errors="replace").splitlines():
+    if raw.startswith("+++ b/"):
+        path = raw[6:].split("\t", 1)[0]
+        continue
+    if raw.startswith("@@ "):
+        match = re.search(r"\+(\d+)(?:,(\d+))?", raw)
+        new_line = int(match.group(1)) if match else 0
+        continue
+    if path is None or not new_line:
+        continue
+    prefix = raw[:1]
+    if prefix == "+":
+        added.setdefault(path, []).append(new_line)
+        new_line += 1
+    elif prefix != "-":
+        new_line += 1
+
+def method_windows(lines: list[str]):
+    # This is intentionally conservative.  It only needs to keep unrelated
+    # methods in the same class from being joined; unmatched/complex Java
+    # syntax simply yields no candidate and remains a model/manual concern.
+    starts = []
+    cleaned = []
+    in_block_comment = False
+    for raw in lines:
+        text = raw
+        if in_block_comment:
+            if "*/" in text:
+                text = text.split("*/", 1)[1]
+                in_block_comment = False
+            else:
+                text = ""
+        if "/*" in text:
+            before, after = text.split("/*", 1)
+            text = before
+            if "*/" in after:
+                text += after.split("*/", 1)[1]
+            else:
+                in_block_comment = True
+        text = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
+        text = re.sub(r"//.*$", "", text)
+        cleaned.append(text)
+    depth = 0
+    for index, text in enumerate(cleaned):
+        original_depth = depth
+        if original_depth >= 1 and re.search(r"\([^;{}]*\)\s*(?:throws\s+[^{}]+)?\s*\{", text):
+            if not re.search(r"\b(if|for|while|switch|catch|synchronized)\s*\(", text):
+                starts.append((index, original_depth))
+        elif original_depth >= 1 and "(" in text and not re.search(
+            r"\b(if|for|while|switch|catch|synchronized)\s*\(", text
+        ) and ";" not in text and "=" not in text:
+            # Java declarations frequently put `throws ... {` on the next
+            # line.  Join only a short signature window and require the
+            # opening brace to follow the closing parenthesis, so ordinary
+            # method calls inside a body are not treated as methods.
+            signature = text
+            close = text.find(")")
+            for probe in range(index + 1, min(index + 6, len(lines))):
+                signature += " " + cleaned[probe]
+                if close < 0:
+                    close = signature.find(")")
+                if close >= 0 and "{" in signature[close + 1:]:
+                    prefix = signature[:close + 1]
+                    if "(" in prefix and not re.search(r"\bnew\s+\w+\s*$", prefix):
+                        starts.append((index, original_depth))
+                    break
+        opens = text.count("{")
+        closes = text.count("}")
+        depth += opens - closes
+    for pos, start_depth in starts:
+        depth = start_depth
+        end = len(lines) - 1
+        for index in range(pos, len(lines)):
+            text = re.sub(r'"(?:\\.|[^"\\])*"', '""', lines[index])
+            text = re.sub(r"//.*$", "", text)
+            depth += text.count("{") - text.count("}")
+            if index > pos and depth <= start_depth:
+                end = index
+                break
+        yield pos, end
+
+for rel, added_lines in sorted(added.items()):
+    source = safe_source(rel)
+    if source is None:
+        continue
+    lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+    if "ByteBuffer" not in "\n".join(lines):
+        continue
+    for start, end in method_windows(lines):
+        method_added = [line for line in added_lines if start + 1 <= line <= end + 1]
+        if not method_added:
+            continue
+        body = lines[start:end + 1]
+        eof_index = None
+        for index, line in enumerate(body):
+            read_match = re.search(
+                r"\b([A-Za-z_$][\w$]*)\s*=\s*[^;]*\.[ \t]*read\s*\(", line
+            )
+            if read_match:
+                candidate_variable = read_match.group(1)
+                for probe in range(index, min(index + 9, len(body))):
+                    if re.search(
+                        rf"\b{re.escape(candidate_variable)}\s*==\s*-1\b",
+                        body[probe],
+                    ):
+                        eof_index = probe
+                        break
+            if eof_index is not None:
+                break
+        if eof_index is None:
+            continue
+        if not any(re.search(r"\.position\s*\(\s*0\s*\)", line)
+                   for line in body[max(0, eof_index - 8):eof_index + 1]):
+            continue
+        if not any(re.search(r"\.get\s*\(", line)
+                   for line in body[eof_index + 1:]):
+            continue
+        post_eof = body[eof_index + 1:]
+        if any(re.search(r"\.flip\s*\(\s*\)", line) or
+               re.search(r"\.limit\s*\(\s*0\s*\)", line)
+               for line in post_eof):
+            continue
+        line_no = start + eof_index + 1
+        print(f"P2 {rel}:{line_no} - ByteBuffer 读取底层 EOF 后未清空有效范围，后续 get() 可能重复旧数据并形成无限流。")
+        print("影响：畸形或截断输入可令读取调用交替返回 EOF 与旧字节，持续占用线程/CPU 并造成拒绝服务。")
+        print("修复建议：在 EOF 分支将 ByteBuffer 置为不可读的空范围（例如 limit(0) 或等价的 flip 状态），或确保下一次调用必先重新填充；不要用裸 clear() 代替 EOF 状态清空，也不要让后续 get() 复用上一次读取范围。")
+        print("验证方式：使用声明长度大于实际 payload 的截断输入，连续调用 read() 及 InputStreamReader，确认 EOF 后不会重复旧字节且能稳定结束或抛出截断异常。")
+        print("来源：确定性预检（代码证据，非模型原文）")
+        print()
+        break
+PY
   dedup_preflight_blocks "$output_file"
 }
 
@@ -13221,6 +13423,7 @@ collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflig
 collect_java_hardcoded_crypto_key_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_bytebuffer_eof_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_command_injection_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_session_expiration_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_resource_shutdown_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

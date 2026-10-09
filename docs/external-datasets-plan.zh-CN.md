@@ -69,3 +69,7 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 同日按固定 revision 实际生成私有索引：`prs.jsonl` 共 350 条，Java 15 条；全语言分布为 Python 242、JavaScript 37、Go 35、TypeScript 21、Java 15。输入文件 SHA-256 为 `a58e1f713533f6bc260a93f6e234b85acd16a77f55a756893694b96495eb43cd`；输出索引不含 diff、评论、上下文或 findings 字段，未进入模型提示词或 Platform 严格 scorecard。
 
 随后只在本机私有目录提取这 15 条 Java 的 `config_A` 上下文和人工标注结构做诊断：15/15 请求完整结束且均返回 clean；人工标注含 56 条发起评论，其中 53 条位于变更行、18 条明确标记为需要修改。对 3 条需要修改评论较多的样本追加 `config_C` 对照，仍为 3/3 clean。该结果说明当前模型对真实外部 review 反馈存在系统性漏报，增加上下文层级没有带来收益；它不代表 18 条评论都是 P0/P1，也不进入 Platform 严格 scorecard，后续应先做结构化根因路由和人工严重度核验。
+
+2026-10-09：对 VCC-Eval 的 Commons Compress `CVE-2018-11771` 候选完成私有 parent/target 方向核验。目标提交在 `ZipArchiveInputStream.readStored` 中把底层 `InputStream.read()` 的 EOF 直接返回，但保留了 `ByteBuffer` 上一次的正 `limit`；截断输入的独立复现显示，后续读取会重新暴露旧字节并在 EOF 与旧数据之间交替，符合 Apache 公告所述的低严重度拒绝服务根因。该漏洞是 P2/低严重度，不进入当前 P0/P1 严格 scorecard，也不把修复提交当作 review gold；真实源代码、PoV 和 commit 对象继续只保存在本机私有评测目录。
+
+为避免该窄而高置信的 Java 资源耗尽形态被小模型漏报，运行器新增 `ByteBuffer` EOF 状态预检：仅在当前变更 Java 方法同时出现底层 `read()`、`== -1`、`position(0)`、后续 `get()`，且 EOF 后没有 `flip`/`limit(0)` 状态重置时报告 P2。`ByteBuffer.clear()` 不作为安全反证，因为它会恢复 `limit=capacity`，可能重新暴露旧数据。正例、`limit(0)` 安全对照、误用 `clear()` 对照和真实 Commons Compress 差异均通过回归；该规则只作 fail-closed 可见性保护，不提高模型原生召回率。
