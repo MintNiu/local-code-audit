@@ -769,4 +769,4 @@ if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 22 cases\n'
+printf 'filter evidence regression passed: 24 cases\n'
