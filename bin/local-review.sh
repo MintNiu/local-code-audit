@@ -4,6 +4,16 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 java_method_window_script="$script_dir/java-method-window.py"
 
+# Keep Chinese model-output filters in a UTF-8 locale even when the caller
+# inherited `LC_ALL=C`; macOS awk treats non-ASCII character classes as byte
+# patterns there.  Raw diff/source scanners temporarily use `LC_ALL=C` below
+# so legacy non-UTF-8 repository bytes cannot abort input processing.
+review_text_locale="${LC_ALL:-${LANG:-C.UTF-8}}"
+case "$review_text_locale" in
+  *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ;;
+  *) review_text_locale="C.UTF-8" ;;
+esac
+
 ollama_probe_timeout_seconds="${OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS:-10}"
 
 ollama_api_url="${OLLAMA_HOST:-http://127.0.0.1:11434}"
@@ -419,6 +429,14 @@ sanitize_terminal_text() {
     s~[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]~~g;
     s~\r~~g;
   '
+}
+
+normalize_repository_text() {
+  # Git may return legacy source/Javadoc bytes that are not valid UTF-8.  The
+  # review protocol and JSON request body must remain valid UTF-8, so replace
+  # only undecodable byte sequences while preserving line boundaries and all
+  # surrounding source text for evidence and line-number validation.
+  python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().decode("utf-8", "replace").encode("utf-8"))'
 }
 
 redact_sensitive_text() {
@@ -2537,11 +2555,14 @@ sort_findings_by_severity() {
 
 git -c core.fsmonitor=false -C "$repo_root" status --short >"$status_file"
 
-git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached -- >"$staged_file"
-git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- >"$unstaged_file"
+git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --cached -- \
+  | normalize_repository_text >"$staged_file"
+git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ -- \
+  | normalize_repository_text >"$unstaged_file"
 
 if [[ -n "$base_ref" ]]; then
-  git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ "$base_ref...HEAD" -- >"$base_file"
+  git -c core.fsmonitor=false -c core.quotePath=false -C "$repo_root" diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ "$base_ref...HEAD" -- \
+    | normalize_repository_text >"$base_file"
 fi
 
 # Include untracked files so newly created source files are reviewed too.  Do
@@ -2600,6 +2621,15 @@ while IFS= read -r -d '' path; do
     exit 1
   fi
 done <"$changed_paths_nul_file"
+
+# Normalize the accumulated untracked-file diff after bounded collection.  A
+# post-pass keeps the existing git-diff timeout/status handling intact while
+# ensuring later prompt/evidence consumers never see invalid UTF-8 bytes.
+if [[ -s "$untracked_file" ]]; then
+  normalized_untracked_file="$(mktemp "${TMPDIR:-/tmp}/local-review-untracked-normalized.XXXXXX")"
+  normalize_repository_text <"$untracked_file" >"$normalized_untracked_file"
+  mv "$normalized_untracked_file" "$untracked_file"
+fi
 
 # The review diff intentionally uses --no-renames so that both sides of a
 # moved file remain visible to the model.  Add a separate, narrow R100 signal
@@ -13635,7 +13665,11 @@ if [[ -s "$cross_file_evidence_file" ]]; then
     fi
   done <"$changed_paths_file"
 fi
-awk '
+# Git diffs can contain legacy source bytes that are not valid UTF-8.  Keep
+# this byte-oriented import index in the C locale, while leaving model-output
+# filters in the caller's UTF-8 locale so Chinese severity/evidence regexes
+# continue to work on macOS awk.
+LC_ALL=C awk '
   /^diff --git / { path = $4; sub(/^b\//, "", path); next }
   /^\+\+\+ b\// { path = substr($0, 7); next }
   /^\+[[:space:]]*import[[:space:]]/ {
@@ -13660,6 +13694,7 @@ else
   : >"$java_main_source_index"
 fi
 ensure_review_deadline "确定性预检" || exit 124
+export LC_ALL=C
 collect_build_preflight "$changed_imports_file" "$build_preflight_file"
 collect_cross_platform_config_preflight "$chunk_input_file" "$build_preflight_file"
 collect_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
@@ -13767,6 +13802,7 @@ collect_sales_return_lock_order_preflight "$chunk_input_file" "$deterministic_lo
 collect_deleted_context_preflight "$deleted_types_file" "$build_preflight_file"
 collect_context_tenant_preflight "$chunk_input_file" "$build_preflight_file"
 collect_tenant_lifecycle_login_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+export LC_ALL="$review_text_locale"
 ensure_review_deadline "确定性预检完成" || exit 124
 if grep -Eq '^diff --(cc|combined) ' "$chunk_input_file"; then
   echo "本地代码审查失败：检测到 combined diff（diff --cc/diff --combined），当前分片器不会猜测合并冲突语义；请先展开为普通文件 diff 后重试。" >&2

@@ -5553,6 +5553,8 @@ bash "$repo_root/evals/test-java-unprotected-git-write-preflight.sh"
 # A TLS HostnameVerifier result must gate the handshake; ignored booleans are
 # a high-signal Java MITM boundary and checked results stay clean.
 bash "$repo_root/evals/test-java-tls-hostname-verifier-preflight.sh"
+# Legacy source bytes outside UTF-8 must not abort awk preflight processing.
+bash "$repo_root/evals/test-non-utf8-repository.sh"
 # Header-only token forwarding to a clearly internal URI is a clean boundary;
 # keep direct URL/external-boundary evidence visible to the output filter.
 bash "$repo_root/evals/test-java-token-header-boundary.sh"

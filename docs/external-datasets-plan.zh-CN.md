@@ -81,3 +81,5 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 同日补充 Eclipse Paho MQTT Java 的 VCC 候选 `176f6fc0b83` 方向核验：`SSLNetworkModule` 在 TLS 握手后调用 `HostnameVerifier.verify(host, session)` 却忽略返回的布尔值，后续修复才在 false 时失效会话、关闭 socket 并抛出 `SSLPeerUnverifiedException`。该根因可导致有效证书链下的主机名冒充，按 P1 候选保留；Paho 的 EPL/EDL 许可已记录，但 VCC 数据集本身仍为 `pending-human-label`，未把候选或修复提交直接写入严格 scorecard。
 
 运行器新增 `collect_java_tls_hostname_verifier_preflight`：仅在变更 Java 文件的 `SSLSocket` 握手方法内新增裸 `hostnameVerifier.verify()`，且没有赋值、条件判断或失败路径时报告 P1；显式检查返回值、关闭 socket 并抛出异常的对照保持 clean。该规则用于在高危 TLS 漏报时 fail-closed 保留代码证据，不把确定性命中当作模型原生命中。
+
+Paho 私有 smoke 还验证了输入处理边界：历史仓库包含非 UTF-8 Java/Javadoc 字节时，运行器原先可能在 UTF-8 locale 下被差异导入扫描的 `awk` 多字节转换错误中止。现已只对该字节导入索引使用 `LC_ALL=C`，并增加非 UTF-8 回归夹具；模型输出过滤仍保留 UTF-8 locale，避免中文规则失效。该变化只修复评测/审查入口的鲁棒性，不把超时或不完整模型输出计为 clean，也不进入召回分母。

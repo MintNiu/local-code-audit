@@ -1262,3 +1262,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 针对这类跨 Java 与 `WEB-INF/web.xml` 的认证范围漏报，运行器新增 `collect_java_unprotected_git_write_preflight`，只在差异切换/新增 GitServlet 映射、当前 servlet 明确包含 `doPost`/`writeFile` 写链路且同一快照缺少 `/git/*` 或 `/*` 的 `AuthenticationFilter` 映射时输出 P1。显式认证映射的对照、没有写入口的 servlet 和无关 XML 均保持 clean；预检保留 Java 写入行与 web.xml 路由行，标记为确定性代码证据，不计作模型原生命中。
 
 同轮补充 Paho MQTT Java 的 TLS 主机名校验候选：`HostnameVerifier.verify(host, session)` 的返回值被忽略时，证书链有效但主机名不匹配的端点仍可能被接受，属于 P1 级别的中间人边界。新增 `collect_java_tls_hostname_verifier_preflight`，要求变更行位于 `SSLSocket` 的握手方法、调用是裸语句且没有赋值/条件/失败路径；`!verify(...)`、异常关闭和显式 endpoint identification 的安全对照保持 clean。该预检覆盖 VCC 候选的高信号形态，但候选仍是外部 tuning-source，不回填模型原生召回率。
+
+同一 Paho smoke 暴露了运行器对旧仓库编码的鲁棒性问题：仓库内非 UTF-8 的历史 Java/Javadoc 字节会让 UTF-8 locale 下的差异导入扫描 `awk` 提前失败。运行器现在只对字节导入索引使用 `LC_ALL=C`，Python 源码读取继续使用显式替换解码；新增非 UTF-8 仓库夹具，确认审查不会因编码转换中止，同时保留 UTF-8 locale 供中文输出过滤规则使用。该修复只保证 fail-closed 的输入处理，不改变模型评分或把不完整输出解释为 clean。
