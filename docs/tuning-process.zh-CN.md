@@ -1268,3 +1268,5 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 2026-10-10：根据两条相互独立的小程序登录漏报（微信 `code` 直接作为 `openId`/`subject` 签发令牌），新增 `collect_java_external_login_code_preflight`。规则只在变更 Java 行同时满足“请求 code 直接流入稳定身份字段”“同一登录方法签发 JWT/session”“没有可见的 code2Session、OAuth authorization-code 或等价服务端交换”时报告 P1；显式微信 SDK/OAuth 交换和无令牌流程保持 clean。新增正负夹具并接入完整预检回归。该规则是确定性代码证据保护，不计入模型原生召回，也不能把两个同族样本重新写回冻结 scorecard；后续外部 Java 数据优先寻找不同根因的引入提交，避免继续重复身份交换族。
 
 同日增加公开发布安全门禁：公开仓库的 tracked 文件不得包含本机绝对工作区路径、RFC1918 `192.168.*` 地址或 Platform 内部测试凭据拼写；当前树中的夹具和 README 已改为占位值，`evals/test-public-release-safety.sh` 纳入 `test-preflight.sh`。旧提交历史仍保留曾经公开过的字符串，未在没有明确授权的情况下重写历史；任何真实凭据都应轮换。该门禁只保护发布边界，不改变模型质量指标。
+
+随后核验 VCC-Eval 的 UAA `CVE-2019-11274` 候选：引入提交 `929577b8c6dc83637ae044717ba573d91d01ee95` 在 `ScimGroupEndpoints` 把 `@RequestParam filter` 原样拼入异常消息，异常链会把 `message/error_description` 写入 JSON 响应；修复提交改为 `HtmlUtils.htmlEscape(filter)`，仓库 LICENSE/NOTICE 为 Apache-2.0。VCC 元数据路径与真实历史路径不一致，且官方 split 标为 `train`，因此只作为私有 tuning-source/诊断样本，不进入 external-smoke 统计或 Platform 冻结 scorecard。为保留该类高危证据，新增 `collect_java_reflected_error_xss_preflight` 及正负回归：映射 HTTP 方法中请求绑定值进入异常消息且无 HTML/JSON 上下文编码时报告 P1，显式编码和内部异常保持 clean；该预检命中仍不计作模型原生命中。

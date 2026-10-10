@@ -6076,6 +6076,115 @@ PY
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_reflected_error_xss_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # Error messages are an output sink too. Keep this rule narrow: only a
+  # changed Java exception concatenation is reported when the same mapped
+  # handler binds the variable from HTTP input and no context-aware escaping is
+  # visible. Logging or ordinary internal exceptions without request binding
+  # are intentionally outside this preflight.
+  python3 - "$diff_file" "$source_root" >>"$output_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+diff_path = Path(sys.argv[1])
+source_root = Path(sys.argv[2]).resolve()
+
+def without_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    return re.sub(r"//[^\n]*", " ", text)
+
+def added_lines(diff_text: str):
+    path = None
+    new_line = 0
+    for raw in diff_text.splitlines():
+        if raw.startswith("diff --git "):
+            path = None
+            continue
+        if raw.startswith("+++ b/"):
+            path = raw[6:].strip()
+            continue
+        if raw.startswith("@@"):
+            match = re.search(r"\+([0-9]+)(?:,[0-9]+)?", raw)
+            new_line = int(match.group(1)) if match else 0
+            continue
+        prefix = raw[:1]
+        if prefix == "+" and not raw.startswith("+++"):
+            if path and path.endswith(".java"):
+                yield path, new_line, raw[1:]
+            new_line += 1
+        elif prefix != "-":
+            new_line += 1
+
+exception_concat = re.compile(
+    r"\bnew\s+[A-Za-z_$][\w$]*(?:Exception|Error)\s*\([^;\n]*"
+    r"\+\s*([A-Za-z_$][\w$]*)\b"
+)
+mapping = re.compile(r"@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\b")
+echo_variable = re.compile(r"(?:filter|query|search|message|name|id)", re.I)
+response_evidence = re.compile(r"@ExceptionHandler|ResponseEntity|ExceptionReport|error_description|@ResponseBody")
+safe_output = re.compile(
+    r"(?:htmlEscape|escapeHtml|Encode\.forHtml|StringEscapeUtils\.escapeHtml|"
+    r"HtmlUtils\.htmlEscape|sanitize|sanitizeHtml)", re.I
+)
+
+try:
+    diff_text = diff_path.read_text(encoding="utf-8", errors="replace")
+except OSError:
+    raise SystemExit(0)
+
+seen = set()
+for path_text, line_no, added in added_lines(diff_text):
+    match = exception_concat.search(added)
+    if not match:
+        continue
+    variable = match.group(1)
+    if not echo_variable.fullmatch(variable):
+        continue
+    relative = Path(path_text)
+    if relative.is_absolute() or ".." in relative.parts:
+        continue
+    source_file = (source_root / relative).resolve()
+    if source_file != source_root and source_root not in source_file.parents:
+        continue
+    try:
+        lines = source_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        continue
+    if not (1 <= line_no <= len(lines)):
+        continue
+    start = max(0, line_no - 81)
+    end = min(len(lines), line_no + 100)
+    window = without_comments("\n".join(lines[start:end]))
+    request_binding = re.compile(
+        rf"@(?:RequestParam|PathVariable|RequestHeader|RequestPart)\b[^\n]*"
+        rf"\b{re.escape(variable)}\b|"
+        rf"\b{re.escape(variable)}\s*=\s*[^;\n]*getParameter\s*\("
+    )
+    if not mapping.search(window) or not request_binding.search(window):
+        continue
+    if not response_evidence.search(window):
+        continue
+    if safe_output.search(added) or safe_output.search(window):
+        continue
+    key = (path_text, line_no, variable)
+    if key in seen:
+        continue
+    seen.add(key)
+    print(f"P1 {path_text}:{line_no} - HTTP 输入 {variable} 未见上下文编码就被拼入异常消息，异常响应或错误页面可能反射执行型内容。")
+    print("影响：攻击者可提交包含 HTML/脚本语法的参数；若异常消息进入浏览器渲染上下文，可能造成反射型 XSS、会话窃取或操作冒用。")
+    print("修复建议：不要把原始请求值放入面向客户端的错误消息；必须保留时按最终输出上下文使用 HTML/JSON 编码，并统一验证异常处理器不会把原文渲染为 HTML。")
+    print("验证方式：用 <script>、属性闭合和 JSON/HTML 特殊字符请求该参数，确认响应只包含安全编码文本且浏览器不执行；同时验证正常过滤错误仍返回预期状态码。")
+    print()
+PY
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_java_external_control_flow_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -13818,6 +13927,7 @@ collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflig
 collect_java_hardcoded_crypto_key_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_login_code_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_reflected_error_xss_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_bytebuffer_eof_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_unprotected_git_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"

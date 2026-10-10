@@ -5554,6 +5554,9 @@ bash "$repo_root/evals/test-java-unprotected-git-write-preflight.sh"
 # A client login code must not be used as an identity without server-side
 # code-to-identity exchange; explicit SDK exchange remains a clean negative.
 bash "$repo_root/evals/test-java-external-login-code-preflight.sh"
+# Request-bound values must not be concatenated into mapped exception messages
+# without output-context encoding; escaped and internal-only exceptions stay clean.
+bash "$repo_root/evals/test-java-reflected-error-xss-preflight.sh"
 # A TLS HostnameVerifier result must gate the handshake; ignored booleans are
 # a high-signal Java MITM boundary and checked results stay clean.
 bash "$repo_root/evals/test-java-tls-hostname-verifier-preflight.sh"
