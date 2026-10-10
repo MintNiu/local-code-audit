@@ -1264,3 +1264,7 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同轮补充 Paho MQTT Java 的 TLS 主机名校验候选：`HostnameVerifier.verify(host, session)` 的返回值被忽略时，证书链有效但主机名不匹配的端点仍可能被接受，属于 P1 级别的中间人边界。新增 `collect_java_tls_hostname_verifier_preflight`，要求变更行位于 `SSLSocket` 的握手方法、调用是裸语句且没有赋值/条件/失败路径；`!verify(...)`、异常关闭和显式 endpoint identification 的安全对照保持 clean。该预检覆盖 VCC 候选的高信号形态，但候选仍是外部 tuning-source，不回填模型原生召回率。
 
 同一 Paho smoke 暴露了运行器对旧仓库编码的鲁棒性问题：仓库内非 UTF-8 的历史 Java/Javadoc 字节会让 UTF-8 locale 下的差异导入扫描 `awk` 提前失败。运行器现在只对字节导入索引使用 `LC_ALL=C`，Python 源码读取继续使用显式替换解码；新增非 UTF-8 仓库夹具，确认审查不会因编码转换中止，同时保留 UTF-8 locale 供中文输出过滤规则使用。该修复只保证 fail-closed 的输入处理，不改变模型评分或把不完整输出解释为 clean。
+
+2026-10-10：根据两条相互独立的小程序登录漏报（微信 `code` 直接作为 `openId`/`subject` 签发令牌），新增 `collect_java_external_login_code_preflight`。规则只在变更 Java 行同时满足“请求 code 直接流入稳定身份字段”“同一登录方法签发 JWT/session”“没有可见的 code2Session、OAuth authorization-code 或等价服务端交换”时报告 P1；显式微信 SDK/OAuth 交换和无令牌流程保持 clean。新增正负夹具并接入完整预检回归。该规则是确定性代码证据保护，不计入模型原生召回，也不能把两个同族样本重新写回冻结 scorecard；后续外部 Java 数据优先寻找不同根因的引入提交，避免继续重复身份交换族。
+
+同日增加公开发布安全门禁：公开仓库的 tracked 文件不得包含本机绝对工作区路径、RFC1918 `192.168.*` 地址或 Platform 内部测试凭据拼写；当前树中的夹具和 README 已改为占位值，`evals/test-public-release-safety.sh` 纳入 `test-preflight.sh`。旧提交历史仍保留曾经公开过的字符串，未在没有明确授权的情况下重写历史；任何真实凭据都应轮换。该门禁只保护发布边界，不改变模型质量指标。

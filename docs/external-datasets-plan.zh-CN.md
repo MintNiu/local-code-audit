@@ -83,3 +83,7 @@ Platform 真实提交仍是最终独立 holdout。评测时间线审计后，445
 运行器新增 `collect_java_tls_hostname_verifier_preflight`：仅在变更 Java 文件的 `SSLSocket` 握手方法内新增裸 `hostnameVerifier.verify()`，且没有赋值、条件判断或失败路径时报告 P1；显式检查返回值、关闭 socket 并抛出异常的对照保持 clean。该规则用于在高危 TLS 漏报时 fail-closed 保留代码证据，不把确定性命中当作模型原生命中。
 
 Paho 私有 smoke 还验证了输入处理边界：历史仓库包含非 UTF-8 Java/Javadoc 字节时，运行器原先可能在 UTF-8 locale 下被差异导入扫描的 `awk` 多字节转换错误中止。现已只对该字节导入索引使用 `LC_ALL=C`，并增加非 UTF-8 回归夹具；模型输出过滤仍保留 UTF-8 locale，避免中文规则失效。该变化只修复评测/审查入口的鲁棒性，不把超时或不完整模型输出计为 clean，也不进入召回分母。
+
+2026-10-10：从两条独立的微信登录漏报中提炼出 Java 外部数据的下一类优先根因：客户端提交的登录 `code` 被直接当作 `openId`、`subject` 或 `userId` 并签发 JWT/session，而没有服务端 code-to-identity 交换。运行器新增窄范围预检及正负回归；`code2Session`、OAuth authorization-code exchange 和等价 SDK/API 证据为明确反例。它只属于 tuning-source/运行时 fail-closed 保护，不是外部数据集金标，也不提高冻结 Platform scorecard。后续候选应优先选择不同根因的真实 Java 引入提交，例如 VCC-Eval 中需人工核验许可证、引入方向、触发证据和文件/行号的 SCIM 反射 XSS 候选，避免把同族重复样本误当成新能力。
+
+同日增加公开发布安全回归：tracked 文件扫描本机绝对路径、RFC1918 地址和内部 fixture 凭据；原始源码、完整 diff、模型权重和私有数据仍只允许出现在本机数据目录。当前发布树已清理这些值，但历史提交仍可能包含旧字符串；不自动重写公共历史，发现真实凭据时先轮换再单独评估历史清理方案。

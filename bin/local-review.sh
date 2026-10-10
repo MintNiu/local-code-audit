@@ -5970,6 +5970,112 @@ collect_java_external_security_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
+collect_java_external_login_code_preflight() {
+  local diff_file="$1"
+  local output_file="$2"
+  local source_root="${3:-}"
+  [[ -n "$source_root" && -d "$source_root" ]] || return 0
+
+  # A client-supplied login code is not an identity. Keep this cross-line
+  # rule narrow: require a changed Java assignment from request `code` to an
+  # identity field, a visible session/JWT issuance path, and no server-side
+  # code-to-identity exchange in the same method window. Comments and
+  # unrelated service helpers are ignored; explicit OAuth/SDK exchange stays
+  # clean.
+  python3 - "$diff_file" "$source_root" >>"$output_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+diff_path = Path(sys.argv[1])
+source_root = Path(sys.argv[2]).resolve()
+
+def without_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    return re.sub(r"//[^\n]*", " ", text)
+
+def added_lines(diff_text: str):
+    path = None
+    new_line = 0
+    for raw in diff_text.splitlines():
+        if raw.startswith("diff --git "):
+            path = None
+            continue
+        if raw.startswith("+++ b/"):
+            path = raw[6:].strip()
+            continue
+        if raw.startswith("@@"):
+            match = re.search(r"\+([0-9]+)(?:,[0-9]+)?", raw)
+            new_line = int(match.group(1)) if match else 0
+            continue
+        prefix = raw[:1]
+        if prefix == "+" and not raw.startswith("+++"):
+            if path and path.endswith(".java"):
+                yield path, new_line, raw[1:]
+            new_line += 1
+        elif prefix != "-":
+            new_line += 1
+
+identity_names = r"(?:openId|openID|unionId|unionID|subject|userId|userID)"
+direct_code = re.compile(
+    rf"\b{identity_names}\s*=\s*(?:[A-Za-z_$][\w$]*\.)?"
+    r"(?:getCode|getLoginCode)\s*\(|"
+    rf"\b{identity_names}\s*=\s*(?:code|loginCode)\b"
+)
+request_code = re.compile(r"(?:getCode|getLoginCode)\s*\(|\b(?:code|loginCode)\b")
+token_issue = re.compile(
+    r"(?:generateToken|createToken|issueToken|sign\s*\(|setToken\s*|"
+    r"jwt|accessToken|idToken|session|bearer)", re.I
+)
+login_context = re.compile(r"(?:login|auth|wechat|weixin|oauth|@(?:Post|Request)Mapping)", re.I)
+exchange = re.compile(
+    r"(?:code2session|jscode2session|authorization[_-]?code|"
+    r"oauth[^\n]{0,80}(?:exchange|token)|(?:exchange|token)[^\n]{0,80}oauth|"
+    r"(?:credential|identity)[^\n]{0,80}exchange|"
+    r"(?:weixin|wechat)[^\n]{0,80}(?:sdk|api|session))", re.I
+)
+
+try:
+    diff_text = diff_path.read_text(encoding="utf-8", errors="replace")
+except OSError:
+    raise SystemExit(0)
+
+seen = set()
+for path_text, line_no, added in added_lines(diff_text):
+    if not direct_code.search(added):
+        continue
+    relative = Path(path_text)
+    if relative.is_absolute() or ".." in relative.parts:
+        continue
+    source_file = (source_root / relative).resolve()
+    if source_file != source_root and source_root not in source_file.parents:
+        continue
+    try:
+        lines = source_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        continue
+    if not (1 <= line_no <= len(lines)):
+        continue
+    start = max(0, line_no - 61)
+    end = min(len(lines), line_no + 80)
+    window = without_comments("\n".join(lines[start:end]))
+    if not request_code.search(window) or not token_issue.search(window):
+        continue
+    if not login_context.search(window) or exchange.search(window):
+        continue
+    key = (path_text, line_no)
+    if key in seen:
+        continue
+    seen.add(key)
+    print(f"P1 {path_text}:{line_no} - 登录流程把客户端提交的 code 直接当作 openId/subject/userId 等身份标识并签发会话令牌，未见服务端 code-to-identity 交换。")
+    print("影响：攻击者可构造任意 code 冒充目标身份，取得 JWT/session 并访问该身份可达的业务资源。")
+    print("修复建议：在签发令牌前通过官方 code2Session、OAuth authorization-code exchange 或等价服务端凭证交换验证 code，并只使用服务端返回的稳定身份标识。")
+    print("验证方式：使用随机伪造 code、已使用 code 和其他用户 code 执行登录，均不得取得目标身份令牌；再用真实第三方交换成功样本确认合法登录仍可用。")
+    print()
+PY
+  dedup_preflight_blocks "$output_file"
+}
+
 collect_java_external_control_flow_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -13523,12 +13629,13 @@ deterministic_lock_order_file="$(mktemp "${TMPDIR:-/tmp}/local-review-lock-order
 java_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-index.XXXXXX")"
 java_main_source_index="$(mktemp "${TMPDIR:-/tmp}/local-review-java-main-index.XXXXXX")"
 chunk_budget_status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-chunk-budget-status.XXXXXX")"
+normalized_untracked_file=""
 chunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunks.XXXXXX")"
 specialist_response_file="$chunk_dir/initial.specialist.response.json"
 specialist_output_file="$chunk_dir/initial.specialist.output"
 specialist_kind_file="$chunk_dir/initial.specialist.kind"
 specialist_merged_file="$chunk_dir/initial.specialist.merged"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$specialist_response_file" "$specialist_output_file" "$specialist_kind_file" "$specialist_merged_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file"; rm -rf "$chunk_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$changed_paths_nul_file" "$exact_rename_context_file" "$active_request_body_file" "$response_file" "$response_output_file" "$response_kind_file" "$specialist_response_file" "$specialist_output_file" "$specialist_kind_file" "$specialist_merged_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$normalized_untracked_file"; rm -rf "$chunk_dir"' EXIT
 
 printf '%s\n' "$diff_material" >"$chunk_input_file"
 {
@@ -13710,6 +13817,7 @@ collect_open_redirect_preflight "$chunk_input_file" "$build_preflight_file" "$pr
 collect_java_hardcoded_db_password_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_hardcoded_crypto_key_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_security_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
+collect_java_external_login_code_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_external_control_flow_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_bytebuffer_eof_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
 collect_java_unprotected_git_write_preflight "$chunk_input_file" "$build_preflight_file" "$preflight_source_root"
@@ -13903,7 +14011,7 @@ fi
 chunk_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-results.XXXXXX")"
 chunk_kind_dir="$(mktemp -d "${TMPDIR:-/tmp}/local-review-chunk-kinds.XXXXXX")"
 combined_output_file="$(mktemp "${TMPDIR:-/tmp}/local-review-combined-output.XXXXXX")"
-trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$active_request_error_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
+trap 'release_ollama_lock; rm -f "$status_file" "$staged_file" "$unstaged_file" "$untracked_file" "$base_file" "$active_request_body_file" "$active_request_error_file" "$response_file" "$response_output_file" "$response_kind_file" "$chunk_input_file" "$changed_paths_file" "$cross_file_evidence_file" "$cross_file_symbol_index" "$changed_imports_file" "$deleted_types_file" "$build_preflight_file" "$mybatis_safe_index_file" "$deterministic_lock_order_file" "$java_source_index" "$java_main_source_index" "$chunk_budget_status_file" "$normalized_untracked_file" "$combined_output_file"; rm -rf "$chunk_dir" "$chunk_output_dir" "$chunk_kind_dir"' EXIT
 
 for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_name="$(basename "$chunk_file" .diff)"

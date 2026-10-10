@@ -98,7 +98,7 @@ python3 ./scripts/validate-independent-scorecard.py \
 
 ```bash
 python3 ./scripts/discover-candidates.py \
-  --workspace-root /Users/mintniu/Documents/04workspaces/Platform \
+  --workspace-root /path/to/Platform \
   --since 2026-09-01 \
   --exclude ~/.local/share/local-review/evals/stage1-freeze-20261003/independent-probe-results.tsv \
   --exclude ~/.local/share/local-review/evals/stage1-freeze-20261003/blind-candidate-review.tsv \
@@ -122,7 +122,7 @@ python3 ./scripts/triage-candidates.py \
 ```bash
 python3 ./scripts/rank-candidates.py \
   --candidates /tmp/local-review-pending-candidates.tsv \
-  --workspace-root /Users/mintniu/Documents/04workspaces/Platform \
+  --workspace-root /path/to/Platform \
   --out /tmp/local-review-ranked-candidates.tsv
 ```
 

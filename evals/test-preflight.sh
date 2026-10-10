@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+bash "$repo_root/evals/test-public-release-safety.sh"
 "$repo_root/evals/test-aacr-review-dataset.sh"
 "$repo_root/evals/test-specialist-channel.sh"
 "$repo_root/evals/test-publishing-external-ticket-token-preflight.sh"
@@ -208,7 +209,7 @@ cat >"$repo/application-credential-inline.json" <<'EOF'
 EOF
 cat >"$repo/application-credential-weak-default.yml" <<'EOF'
 nacos:
-  server-addr: 192.168.30.241:8848
+  server-addr: 192.0.2.10:8848
   password: ${NACOS_PASSWORD:nacos}
   safe-password: ${NACOS_SAFE_PASSWORD:}
 EOF
@@ -234,12 +235,12 @@ EOF
 cat >"$repo/application-credential-remote-default.yml" <<'EOF'
 spring:
   datasource:
-    url: jdbc:mysql://${DB_HOST:192.168.30.241}:${DB_PORT:3306}/platform_file
+    url: jdbc:mysql://${DB_HOST:192.0.2.10}:${DB_PORT:3306}/platform_file
     username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:wanzhiTestPlatform}
+    password: ${DB_PASSWORD:synthetic-db-password}
 cache:
-  host: ${REDIS_HOST:192.168.30.241}
-  password: ${REDIS_PASSWORD:wanzhiTestRedisPlatform}
+  host: ${REDIS_HOST:192.0.2.10}
+  password: ${REDIS_PASSWORD:synthetic-redis-password}
 EOF
 mkdir -p "$repo/sql"
 cat >"$repo/sql/client-secret-migration.sql" <<'EOF'
@@ -5550,6 +5551,9 @@ bash "$repo_root/evals/test-java-bytebuffer-eof-preflight.sh"
 # A newly mapped GitServlet write route must be covered by the authentication
 # filter; keep the cross-file Java + web.xml boundary deterministic.
 bash "$repo_root/evals/test-java-unprotected-git-write-preflight.sh"
+# A client login code must not be used as an identity without server-side
+# code-to-identity exchange; explicit SDK exchange remains a clean negative.
+bash "$repo_root/evals/test-java-external-login-code-preflight.sh"
 # A TLS HostnameVerifier result must gate the handshake; ignored booleans are
 # a high-signal Java MITM boundary and checked results stay clean.
 bash "$repo_root/evals/test-java-tls-hostname-verifier-preflight.sh"
