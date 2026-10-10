@@ -67,6 +67,62 @@ run_review() {
   printf '%s\n' "$output"
 }
 
+assert_truncated_independent_finding_fails() {
+  local name="$1" repo="$2" response="$3"
+  local output="$fixture_root/$name.out" error="$fixture_root/$name.err" status=0
+  printf '%s\n' "$response" >"$response_file"
+  if PATH="$fake_bin:$PATH" "$repo_root/bin/local-review.sh" --repo "$repo" >"$output" 2>"$error"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$status" == 0 ]] || grep -Fx '未发现阻塞问题' "$output" >/dev/null; then
+    printf 'FAIL %s: truncated response with an independent finding was accepted as clean\n' "$name" >&2
+    cat "$output" "$error" >&2
+    filter_evidence_failures=$((filter_evidence_failures + 1))
+    return
+  fi
+  grep -F 'MODEL_NPE_MARKER' "$error" >/dev/null || {
+    printf 'FAIL %s: independent finding was not preserved in truncation diagnostic\n' "$name" >&2
+    cat "$output" "$error" >&2
+    filter_evidence_failures=$((filter_evidence_failures + 1))
+  }
+}
+
+assert_truncated_response_fails() {
+  local name="$1" repo="$2" response="$3" expected_marker="$4"
+  local output="$fixture_root/$name.out" error="$fixture_root/$name.err" status=0
+  printf '%s\n' "$response" >"$response_file"
+  if PATH="$fake_bin:$PATH" "$repo_root/bin/local-review.sh" --repo "$repo" >"$output" 2>"$error"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$status" == 0 ]] || grep -Fx '未发现阻塞问题' "$output" >/dev/null; then
+    printf 'FAIL %s: truncated response was accepted as a complete review\n' "$name" >&2
+    cat "$output" "$error" >&2
+    filter_evidence_failures=$((filter_evidence_failures + 1))
+    return
+  fi
+  grep -F '模型输出因长度限制被截断' "$error" >/dev/null || {
+    printf 'FAIL %s: truncation was not reported fail-closed\n' "$name" >&2
+    cat "$output" "$error" >&2
+    filter_evidence_failures=$((filter_evidence_failures + 1))
+  }
+  grep -F "$expected_marker" "$error" >/dev/null || {
+    printf 'FAIL %s: deterministic diagnostic was not preserved\n' "$name" >&2
+    cat "$output" "$error" >&2
+    filter_evidence_failures=$((filter_evidence_failures + 1))
+  }
+}
+
+# Compatibility name for the two historical fixtures: they now assert the
+# safer fail-closed contract instead of treating a truncated response as a
+# successful recovery.
+assert_truncated_response_recovers_deterministic_only() {
+  assert_truncated_response_fails "$@"
+}
+
 assert_contains() {
   local name="$1" output="$2" marker="$3"
   grep -F "$marker" "$output" >/dev/null || {
@@ -246,11 +302,10 @@ if grep -F 'SPECULATIVE_PERMISSION_MARKER' "$permission_output" >/dev/null ||
 fi
 
 # If the same narrow permission response reaches Ollama's length cap, the
-# wrapper may recover only when filtering proves that every emitted block was
-# a preflight duplicate/speculation.  Other truncated responses remain
-# fail-closed.
+# wrapper must fail closed even though the deterministic preflight is known.
+# The unseen suffix could contain another independent authorization root.
 export LOCAL_REVIEW_TEST_DONE_REASON=length
-permission_truncated_output="$(run_review permission-migration-truncated "$permission_repo" 'P1 src/main/java/example/JobInfoController.java:7 - SPECULATIVE_PERMISSION_MARKER：当前分片未展示服务层实现，如果服务层未执行 job group 权限校验，普通用户可能越权修改任务。
+assert_truncated_response_fails permission-migration-truncated "$permission_repo" 'P1 src/main/java/example/JobInfoController.java:7 - SPECULATIVE_PERMISSION_MARKER：当前分片未展示服务层实现，如果服务层未执行 job group 权限校验，普通用户可能越权修改任务。
 影响：如果服务层缺少权限校验，可能发生越权。
 修复建议：检查服务层是否调用 validJobGroupPermission。
 验证方式：检查服务层实现并执行跨组请求。
@@ -258,14 +313,8 @@ permission_truncated_output="$(run_review permission-migration-truncated "$permi
 P1 src/main/java/example/JobInfoController.java:1-8 - 权限拦截器重构后仍有同类任务/日志入口未执行 job group 权限校验，授权修复不完整。
 影响：普通用户可能越权访问任务。
 修复建议：统一调用 validJobGroupPermission。
-验证方式：执行跨组请求。')"
+验证方式：执行跨组请求。' '权限拦截器重构后仍有同类任务/日志入口未执行'
 export LOCAL_REVIEW_TEST_DONE_REASON=stop
-if grep -F 'SPECULATIVE_PERMISSION_MARKER' "$permission_truncated_output" >/dev/null ||
-   ! grep -F '权限拦截器重构后仍有同类任务/日志入口未执行' "$permission_truncated_output" >/dev/null; then
-  printf 'FAIL permission-migration-truncated: safe length recovery did not preserve only preflight finding\n' >&2
-  cat "$permission_truncated_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
 
 # Legal generated-column syntax and an unconstrained DDL tenant-column
 # suggestion are information-level speculation without a visible contract;
@@ -372,7 +421,7 @@ if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_o
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 export LOCAL_REVIEW_TEST_DONE_REASON=length
-presigned_truncated_output="$(run_review presigned-replay-truncated "$presigned_repo" 'P1 src/UploadSessionService.java:25-27 - MODEL_PRESIGNED_DUPLICATE：取消后票据仍可重放，可能造成对象存储资源泄漏。
+assert_truncated_response_recovers_deterministic_only presigned-replay-truncated "$presigned_repo" 'P1 src/UploadSessionService.java:25-27 - MODEL_PRESIGNED_DUPLICATE：取消后票据仍可重放，可能造成对象存储资源泄漏。
 影响：取消后的预签名票据仍然有效。
 修复建议：撤销票据。
 验证方式：取消后再次上传应失败。
@@ -380,14 +429,18 @@ presigned_truncated_output="$(run_review presigned-replay-truncated "$presigned_
 P1 src/UploadSessionService.java:18-21 - MODEL_PRESIGNED_DUPLICATE_2：缺少过期票据校验，可能接受无效票据。
 影响：过期票据可能写入对象。
 修复建议：校验过期时间。
-验证方式：使用过期票据测试。')"
+验证方式：使用过期票据测试。' '取消后仍可重放有效的预签名上传票据'
 export LOCAL_REVIEW_TEST_DONE_REASON=stop
-if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_truncated_output" >/dev/null ||
-   grep -F 'MODEL_PRESIGNED_DUPLICATE' "$presigned_truncated_output" >/dev/null; then
-  printf 'FAIL presigned-replay-truncated: safe length recovery did not preserve preflight finding\n' >&2
-  cat "$presigned_truncated_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+export LOCAL_REVIEW_TEST_DONE_REASON=length
+assert_truncated_independent_finding_fails presigned-replay-independent "$presigned_repo" 'P1 src/UploadSessionService.java:25-27 - MODEL_PRESIGNED_DUPLICATE：取消后票据仍可重放，可能造成对象存储资源泄漏。
+影响：取消后的预签名票据仍然有效。
+修复建议：撤销票据。
+验证方式：取消后再次上传应失败。
+
+P2 src/main/java/example/JobLogController.java:6 - MODEL_NPE_MARKER：executorBiz 可能为 null，调用 log 时触发 NullPointerException。
+影响：请求路径可能返回 500 并中断日志查询。
+修复建议：在调用前显式校验 executorBiz 或让工厂失败闭环。
+验证方式：覆盖无效地址/客户端构造失败场景。'
 export LOCAL_REVIEW_TEST_DONE_REASON=stop
 export LOCAL_REVIEW_TEST_TRANSPORT_FAIL=1
 presigned_transport_output="$(run_review presigned-replay-transport "$presigned_repo" '未使用的响应体')"
@@ -437,7 +490,7 @@ if ! grep -F '直接传入 NetComClientProxy' "$ssrf_output" >/dev/null ||
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 export LOCAL_REVIEW_TEST_DONE_REASON=length
-ssrf_truncated_output="$(run_review direct-address-ssrf-truncated "$ssrf_repo" 'P1 src/main/java/example/JobLogController.java:6 - MODEL_DIRECT_ADDRESS_DUPLICATE：请求参数 executorAddress 直接传入 NetComClientProxy，可能造成 SSRF。
+assert_truncated_response_recovers_deterministic_only direct-address-ssrf-truncated "$ssrf_repo" 'P1 src/main/java/example/JobLogController.java:6 - MODEL_DIRECT_ADDRESS_DUPLICATE：请求参数 executorAddress 直接传入 NetComClientProxy，可能造成 SSRF。
 影响：攻击者可能让服务端访问内网地址。
 修复建议：只从日志记录加载执行器地址。
 验证方式：拒绝 localhost 和 metadata 地址。
@@ -445,14 +498,19 @@ ssrf_truncated_output="$(run_review direct-address-ssrf-truncated "$ssrf_repo" '
 P1 src/main/java/example/JobLogController.java:6 - MODEL_DIRECT_ADDRESS_DUPLICATE_2：RPC sink 使用了外部 executorAddress。
 影响：请求目标可被探测。
 修复建议：校验目标地址。
-验证方式：执行 SSRF 回归。')"
+验证方式：执行 SSRF 回归。' '直接传入 NetComClientProxy'
 export LOCAL_REVIEW_TEST_DONE_REASON=stop
-if ! grep -F '直接传入 NetComClientProxy' "$ssrf_truncated_output" >/dev/null ||
-   grep -F 'MODEL_DIRECT_ADDRESS_DUPLICATE' "$ssrf_truncated_output" >/dev/null; then
-  printf 'FAIL direct-address-ssrf-truncated: deterministic preflight recovery did not remove duplicate model text\n' >&2
-  cat "$ssrf_truncated_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+export LOCAL_REVIEW_TEST_DONE_REASON=length
+assert_truncated_independent_finding_fails direct-address-ssrf-independent "$ssrf_repo" 'P1 src/main/java/example/JobLogController.java:6 - MODEL_DIRECT_ADDRESS_DUPLICATE：请求参数 executorAddress 直接传入 NetComClientProxy，可能造成 SSRF。
+影响：攻击者可能让服务端访问内网地址。
+修复建议：只从日志记录加载执行器地址。
+验证方式：拒绝 localhost 和 metadata 地址。
+
+P2 src/main/java/example/JobLogController.java:6 - MODEL_NPE_MARKER：executorBiz 可能为 null，调用 log 时触发 NullPointerException。
+影响：请求路径可能返回 500 并中断日志查询。
+修复建议：在调用前显式校验 executorBiz 或让工厂失败闭环。
+验证方式：覆盖无效地址/客户端构造失败场景。'
+export LOCAL_REVIEW_TEST_DONE_REASON=stop
 safe_ssrf_repo="$(new_repo direct-address-ssrf-safe)"
 mkdir -p "$safe_ssrf_repo/src/main/java/example"
 cat >"$safe_ssrf_repo/src/main/java/example/JobLogController.java" <<'EOF'

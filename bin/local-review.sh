@@ -1147,205 +1147,23 @@ filter_unsupported_shard_findings() {
 }
 
 dedup_exact_findings() {
-  # Remove byte-identical blocks and an aggregate block only when the same
-  # location already has independently reported component roots. This keeps
-  # every distinct root visible while avoiding "aggregate + two duplicates".
+  # Preserve every distinct finding, including same-location/same-family and
+  # aggregate/component reports. Only identical text is safe to deduplicate;
+  # severity, provenance, description, evidence and all locations remain keys.
   LC_ALL=C awk '
-    function severity_rank(text,    header) {
-      header = text
-      sub(/^[[:space:]]*/, "", header)
-      if (header ~ /^P0[[:space:]:：]+/) return 0
-      if (header ~ /^P1[[:space:]:：]+/) return 1
-      if (header ~ /^P2[[:space:]:：]+/) return 2
-      if (header ~ /^P3[[:space:]:：]+/) return 3
-      return 4
-    }
-    function flush(    key, header, body_text) {
-      if (block == "") return
-      lines_count = split(block, block_lines, "\n")
-      header = block_lines[1]
-      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
-      sub(/[[:space:]]+-.*$/, "", header)
-      body_text = block
-      key = header
-      # Deterministic chained-division findings on one source line carry the
-      # involved operand in their body. Include it in the semantic location
-      # key so `a / b / c` does not erase the independent `c` risk merely
-      # because both operators share one line number.
-      variable_key = body_text
-      if (body_text ~ /涉及变量[[:space:]]*/) {
-        sub(/^.*涉及变量[[:space:]]*/, "", variable_key)
-        sub(/[^A-Za-z0-9_,[:space:]].*$/, "", variable_key)
-        key = key "|" variable_key
-      } else if (body_text ~ /分母变量[[:space:]]*/) {
-        variable_key = body_text
-        sub(/^.*分母变量[[:space:]]*/, "", variable_key)
-        sub(/[^A-Za-z0-9_].*$/, "", variable_key)
-        key = key "|" variable_key
-      } else if (body_text ~ /\$\{[A-Za-z_][A-Za-z0-9_.]*\}/) {
-        # Multiple MyBatis raw substitutions can share one XML line. Keep
-        # each expression as a distinct root while deduplicating different
-        # prose for the same expression.
-        match(body_text, /\$\{[A-Za-z_][A-Za-z0-9_.]*\}/)
-        key = key "|" substr(body_text, RSTART, RLENGTH)
+    function flush(    key) {
+      key = block
+      sub(/[[:space:]]+$/, "", key)
+      if (key != "" && !seen[key]++) {
+        if (printed) printf "\n"
+        printf "%s", block
+        printed = 1
       }
-      blocks[++count] = block
-      keys[count] = key
-      bodies[count] = body_text
-      # A deterministic preflight block and a model block may point to the
-      # same path/range while carrying different evidence. Keep both visible
-      # under the all-findings contract; only compare blocks from the same
-      # provenance class for semantic deduplication.
-      source_block[count] = (body_text ~ /来源：确定性预检（代码证据，非模型原文）/ ||
-                             body_text ~ /来源：确定性锁序预检（代码证据，非模型原文）/)
-      has_null[count] = (body_text ~ /null|NullPointerException|空/)
-      has_div[count] = (body_text ~ /ArithmeticException|除零|除数|b[[:space:]]*==[[:space:]]*0/)
-      has_credential[count] = (body_text ~ /凭据|AccessKey|Secret|secret|password|passwd|token|令牌|硬编码/)
-      # Keep semantic deduplication scoped to the same credential risk family.
-      # A configuration literal and a URL token can share a path/range in a
-      # compact diff but are independent findings and must both remain visible.
-      config_path = (key ~ /\.(ya?ml|properties|conf|ini|env|json|toml):[0-9]/)
-      config_cue = (body_text ~ /硬编码凭据|AccessKey|access-key|secret-key|api-key|client-secret|private-key|密码|password|passwd|配置文件|字面量/)
-      url_cue = (body_text ~ /URL|URI|查询参数|请求目标|访问日志|Referer|拼接到 URL|URL中|URL 中/)
-      if (config_cue || (config_path && !url_cue)) {
-        credential_family[count] = "config"
-      } else if (url_cue) {
-        credential_family[count] = "url"
-      } else if (has_credential[count]) {
-        credential_family[count] = "credential"
-      } else {
-        credential_family[count] = ""
-      }
-      # Classify common non-credential roots so shard aggregation can merge
-      # different prose for the same location without collapsing independent
-      # findings that happen to share a line.
-      if (body_text ~ /已有表 schema 快照新增字段或索引/) {
-        finding_family[count] = "schema-snapshot-migration"
-      } else if (body_text ~ /NullPointerException|非空保护|自动拆箱/) {
-        finding_family[count] = "java-null"
-      } else if (body_text ~ /ArithmeticException|除零|除数|分母|非零保护/) {
-        finding_family[count] = "java-zero"
-      } else if (body_text ~ /SSRF|请求伪造/) {
-        finding_family[count] = "ssrf"
-      } else if (body_text ~ /路径遍历|目录逃逸/) {
-        finding_family[count] = "path-traversal"
-      } else if (body_text ~ /认证令牌|令牌.*URL|URL.*令牌|查询参数.*令牌|token.*URL|URL.*token|Token.*URL|URL.*Token|TOKEN.*URL|URL.*TOKEN/) {
-        finding_family[count] = "url-token"
-      } else if (body_text ~ /硬编码凭据|AccessKey|access-key|secret-key|api-key|密码.*配置/) {
-        finding_family[count] = "hardcoded-credential"
-      } else if (body_text ~ /缺少仓库内类型|编译失败|import.*类型/) {
-        finding_family[count] = "build"
-      } else if (body_text ~ /跨租户|租户隔离|tenantId|TenantId|TENANT_ID|tenant[[:space:]-]*isolation|Tenant[[:space:]-]*Isolation/) {
-        finding_family[count] = "tenant"
-      } else if (body_text ~ /SQL[[:space:]]*注入|MyBatis|原始替换|文本拼接.*SQL/) {
-        finding_family[count] = "sql-injection"
-      } else if (body_text ~ /XXE|外部实体|XML[[:space:]]*解析|DocumentBuilderFactory/) {
-        finding_family[count] = "xxe"
-      } else if (body_text ~ /IDOR|对象级授权|对象级.*越权|裸对象 ID|裸 ID/) {
-        finding_family[count] = "idor"
-      } else {
-        finding_family[count] = ""
-      }
-      schema_path[count] = ""
-      schema_start[count] = 0
-      schema_end[count] = 0
-      if (finding_family[count] == "schema-snapshot-migration") {
-        schema_location = block_lines[1]
-        sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", schema_location)
-        sub(/[[:space:]]+-.*$/, "", schema_location)
-        if (match(schema_location, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?$/)) {
-          schema_suffix = substr(schema_location, RSTART, RLENGTH)
-          schema_path[count] = substr(schema_location, 1, RSTART - 1)
-          sub(/^:/, "", schema_suffix)
-          gsub(/[[:space:]]+/, "", schema_suffix)
-          split(schema_suffix, schema_parts, "-")
-          schema_start[count] = schema_parts[1] + 0
-          schema_end[count] = (schema_parts[2] == "" ? schema_start[count] : schema_parts[2] + 0)
-        }
-      }
-      severity[count] = severity_rank(block_lines[1])
       block = ""
     }
     /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
     { block = block $0 "\n" }
-    END {
-      flush()
-      # Decide all survivors before printing anything. The old one-pass
-      # implementation could print an early P2 and only later discover a
-      # more severe P1 for the same location, leaving both in the report.
-      for (i = 1; i <= count; i++) {
-          aggregate = has_null[i] && has_div[i]
-          if (aggregate) {
-            null_component = 0
-            div_component = 0
-            for (j = 1; j <= count; j++) {
-            if (j == i || keys[j] != keys[i] || source_block[j] != source_block[i]) continue
-            if (has_null[j] && !has_div[j]) null_component = 1
-            if (has_div[j] && !has_null[j]) div_component = 1
-          }
-          if (null_component && div_component) skipped[i] = 1
-        }
-      }
-      # Models often describe the same credential exposure twice with
-      # different prose. Keep one finding for the same path/range and risk
-      # family, preferring the most severe entry and then the earliest entry.
-      # Independent locations/families remain visible.
-      for (i = 1; i <= count; i++) {
-        if (skipped[i] || !has_credential[i]) continue
-        for (j = 1; j <= count; j++) {
-          if (i == j || skipped[j] || source_block[j] != source_block[i] || keys[j] != keys[i] || !has_credential[j] ||
-              credential_family[j] == "" || credential_family[j] != credential_family[i]) continue
-          if (severity[j] < severity[i] || (severity[j] == severity[i] && j < i)) {
-            skipped[i] = 1
-            break
-          }
-        }
-      }
-      # Apply the same severity-first choice to deterministic risk families
-      # emitted by model shards. Blocks with no high-confidence family remain
-      # visible because their root cannot be established safely.
-      for (i = 1; i <= count; i++) {
-        if (skipped[i] || finding_family[i] == "") continue
-        for (j = 1; j <= count; j++) {
-          if (i == j || skipped[j] || finding_family[j] != finding_family[i]) continue
-          same_scope = (source_block[j] == source_block[i] && keys[j] == keys[i])
-          if (finding_family[i] == "schema-snapshot-migration" &&
-              schema_path[i] != "" && schema_path[i] == schema_path[j] &&
-              schema_start[i] > 0 && schema_start[j] > 0 &&
-              schema_start[i] <= schema_end[j] && schema_start[j] <= schema_end[i]) {
-            # The model may report the whole hunk while the deterministic
-            # preflight points at the first changed line. Treat overlapping
-            # locations as one migration root and prefer the code-proven
-            # deterministic block.
-            same_scope = 1
-          }
-          if (!same_scope) continue
-          if (severity[j] < severity[i] ||
-              (severity[j] == severity[i] &&
-               ((finding_family[i] == "schema-snapshot-migration" && source_block[j] && !source_block[i]) ||
-                (finding_family[i] != "schema-snapshot-migration" && j < i)))) {
-            skipped[i] = 1
-            break
-          }
-        }
-      }
-      for (i = 1; i <= count; i++) {
-        if (!skipped[i]) {
-          # Model and deterministic preflight paths can carry different
-          # numbers of separator-only lines. Normalize only those trailing
-          # separators for exact deduplication; never normalize finding text,
-          # locations, or independent risk families.
-          normalized_body = bodies[i]
-          gsub(/\r/, "", normalized_body)
-          sub(/[[:space:]]+$/, "", normalized_body)
-        }
-        if (!skipped[i] && !seen[normalized_body]++) {
-          if (printed) printf "\n"
-          printf "%s", blocks[i]
-          printed = 1
-        }
-      }
-    }
+    END { flush() }
   '
 }
 
@@ -3107,86 +2925,10 @@ validate_response() {
       printf '%s\n' "$truncated_text" | redact_sensitive_text >&2
       return 10
     fi
-    # A narrow recovery is safe for the xxl-job permission migration: the
-    # deterministic preflight is authoritative, while the model sometimes
-    # spends its entire shard budget repeating that same preflight or adding
-    # unsupported "if the service layer..." speculation.  If filtering leaves
-    # no independent model finding, merge_preflight_findings will still append
-    # the complete deterministic block.  Any other truncated response stays
-    # fail-closed and is never treated as a complete review.
-    if [[ -n "$truncated_text" && -s "${build_preflight_file:-}" ]] &&
-       grep -Fq '权限拦截器重构后仍有同类任务/日志入口未执行' "$build_preflight_file" &&
-       grep -Eq '权限拦截器重构|服务层.*校验|job.?group' <<<"$truncated_text"; then
-      recoverable_text="$(printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings)"
-      recoverable_normalized="$(printf '%s' "$recoverable_text" | tr -d '[:space:]')"
-      case "$recoverable_normalized" in
-        ""|"未发现阻塞问题"|"未发现阻塞问题。"|"未发现阻塞问题."|"未发现阻塞问题！"|"未发现阻塞问题!")
-          printf '未发现阻塞问题\n' >"$output_file"
-          printf 'clean\n' >"$kind_file"
-          echo "本地代码审查：模型分片因重复权限预检文本达到长度上限，已丢弃重复文本并保留确定性权限预检；未发现其他可验证模型 finding。" >&2
-          return 0
-          ;;
-      esac
-    fi
-    # The direct-address SSRF preflight has the same narrow shape: the model
-    # may repeat the exact deterministic P1 until the chunk reaches its
-    # length cap. Drop only those duplicate paragraphs; if no independent
-    # model finding remains, the deterministic block is merged below. Other
-    # truncated security findings remain fail-closed.
-    if [[ -n "$truncated_text" && -s "${build_preflight_file:-}" ]] &&
-       grep -Fq '请求参数 executorAddress 直接传入 NetComClientProxy' "$build_preflight_file" &&
-       grep -Eq 'executorAddress|NetComClientProxy|SSRF|请求伪造|内网执行器|metadata' <<<"$truncated_text"; then
-      recoverable_file="$(mktemp "${TMPDIR:-/tmp}/local-review-direct-address-ssrf-recover.XXXXXX")"
-      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings >"$recoverable_file"
-      if ! grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$recoverable_file" ||
-         ! grep -Eq '租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|路径遍历|凭据|密钥|密码|XSS|反序列化|命令执行|任意文件|反射漏洞|重放|竞态|并发|迁移脚本|数据库升级|编译失败|构建失败' "$recoverable_file"; then
-        printf '未发现阻塞问题\n' >"$output_file"
-        printf 'clean\n' >"$kind_file"
-        rm -f "$recoverable_file"
-        echo "本地代码审查：模型分片因重复直接地址 SSRF 预检文本达到长度上限，已丢弃重复文本并保留确定性预检；未发现其他可验证模型 finding。" >&2
-        return 0
-      fi
-      rm -f "$recoverable_file"
-    fi
-    # The presigned-ticket preflight has the same narrow authoritative shape:
-    # a small fixture can make the model repeat speculative ticket/cleanup
-    # variants until the response reaches the length cap.  Remove only
-    # lifecycle paragraphs with no independent security root; if nothing
-    # remains, the deterministic P1 will be merged below.  Other truncated
-    # findings remain fail-closed.
-    if [[ -n "$truncated_text" && -s "${build_preflight_file:-}" ]] &&
-       grep -Fq '取消后仍可重放有效的预签名上传票据' "$build_preflight_file" &&
-       grep -Eq '预签名|票据|重放|objectKey|对象存储|cleanupExpired|取消' <<<"$truncated_text"; then
-      recoverable_file="$(mktemp "${TMPDIR:-/tmp}/local-review-presigned-recover.XXXXXX")"
-      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings >"$recoverable_file"
-      if ! grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$recoverable_file" ||
-         ! grep -Eq '租户|跨租户|权限|越权|授权|SQL[[:space:]]*注入|SSRF|请求伪造|路径遍历|凭据|密钥|密码|XSS|反序列化|命令执行|任意文件|反射漏洞' <<<"$truncated_text"; then
-        printf '未发现阻塞问题\n' >"$output_file"
-        printf 'clean\n' >"$kind_file"
-        rm -f "$recoverable_file"
-        echo "本地代码审查：模型分片因重复预签名票据生命周期文本达到长度上限，已丢弃重复文本并保留确定性预检；未发现其他可验证模型 finding。" >&2
-        return 0
-      fi
-      rm -f "$recoverable_file"
-    fi
-    # A fully hardened HTTP XML negative fixture can still spend its output
-    # budget on speculative namespace/tenant/audit prose. If the normal
-    # evidence filter removes every such paragraph and no concrete finding
-    # remains, recovery to clean is safe; any XXE, bypass, or P0-P3 evidence
-    # keeps the fail-closed truncation path.
-    if [[ -n "$truncated_text" ]] &&
-       grep -Eq 'DocumentBuilderFactory|XML|解析|外部实体|命名空间|tenant|租户' <<<"$truncated_text"; then
-      recoverable_file="$(mktemp "${TMPDIR:-/tmp}/local-review-xml-safe-recover.XXXXXX")"
-      printf '%s\n' "$truncated_text" | sanitize_terminal_text | filter_unsupported_shard_findings >"$recoverable_file"
-      if ! grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$recoverable_file"; then
-        printf '未发现阻塞问题\n' >"$output_file"
-        printf 'clean\n' >"$kind_file"
-        rm -f "$recoverable_file"
-        echo "本地代码审查：模型分片因硬化 XML 负例的非问题信息达到长度上限，已按源码证据恢复 clean；其他 XML/安全根因仍保持失败闭门。" >&2
-        return 0
-      fi
-      rm -f "$recoverable_file"
-    fi
+    # A length-limited response cannot prove that unseen findings are absent.
+    # Keep the raw response below as diagnostics and let the caller retry via
+    # smaller shards; no keyword filter or deterministic finding may turn
+    # incomplete generation into a successful/clean review.
     echo "本地代码审查失败：模型输出因长度限制被截断，未返回不完整结果。" >&2
     if [[ -n "$truncated_text" ]]; then
       echo "以下是截断原始输出（仅供定位，不能视为完整审查结果）：" >&2
@@ -3763,6 +3505,19 @@ bound_preflight_prompt_file() {
   ' "$source_file" >"$target_file"
 }
 
+build_shard_scope_metadata() {
+  local paths_file="$1"
+
+  # Use the same scope boundary for budget probes and real requests. Paths
+  # alone are not code evidence and cannot prove a missing declaration.
+  printf '%s\n' '--- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---'
+  cat "$paths_file"
+  printf '%s\n' \
+    '--- 变更路径元数据结束；未出现在当前分片的文件均视为未知，不得据此报告缺失 ---' \
+    '重要：每条 finding 的文件和行号必须来自当前分片实际展示的差异/上下文代码；不要仅凭全提交路径列表推断另一分片中的类型、方法、import 或构建问题。' \
+    '其他分片的代码不在本分片内。只有当前输入中的代码证据才能支持结论；涉及其他文件的独立问题由含有对应代码的分片审查，不凭路径名或未展示的定义重复报告。'
+}
+
 resolve_chunk_budget() {
   local configured_bytes="$1"
   local available_tokens probe_tokens remaining_tokens budget_bytes
@@ -3793,11 +3548,8 @@ resolve_chunk_budget() {
   # reject large commits before the real, smaller shard prompts were built.
   probe_body='--- 当前审查分片：chunk-0001 ---'
   probe_base_prompt="$(build_prompt "$probe_body" without-examples "" /dev/null)"
-  probe_prompt="$probe_base_prompt"
-  probe_prompt="$probe_prompt
---- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
-$(cat "$changed_paths_file")
---- 变更路径元数据结束；未出现在当前分片的文件均视为未知，不得据此报告缺失 ---"
+  probe_prompt="$probe_base_prompt
+$(build_shard_scope_metadata "$changed_paths_file")"
   probe_tokens="$(estimate_prompt_tokens "$probe_prompt")"
   if (( probe_tokens > available_tokens )); then
     echo "本地代码审查失败：分片固定提示词估算需要 ${probe_tokens} 个输入 token，超过可用预算 ${available_tokens}；为避免静默截断，本次请求未发送。" >&2
@@ -3870,9 +3622,7 @@ $(cat "$changed_paths_file")
     chunk_prompt_examples_enabled=false
     probe_base_prompt="$(build_prompt "$probe_body" without-examples "" /dev/null)"
     probe_prompt="$probe_base_prompt
---- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
-$(cat "$changed_paths_file")
---- 变更路径元数据结束；未出现在当前分片的文件均视为未知，不得据此报告缺失 ---"
+$(build_shard_scope_metadata "$changed_paths_file")"
     probe_tokens="$(estimate_prompt_tokens "$probe_prompt")"
     budget_preflight_file="$(mktemp "${TMPDIR:-/tmp}/local-review-budget-preflight-examples-off.XXXXXX")"
     awk 'BEGIN { RS = ""; ORS = "\n\n" }
@@ -11691,9 +11441,17 @@ collect_presigned_replay_preflight() {
 can_return_presigned_preflight_on_model_failure() {
   local preflight_file="$1"
   local paths_file="$2"
-  local path_count finding_count
+  local response_file="${3:-}" failure_status="${4:-}" path_count finding_count
 
   [[ -s "$preflight_file" && -s "$paths_file" ]] || return 1
+  # A length-limited model response is known to be incomplete. Even when the
+  # deterministic preflight is complete, returning it as a successful review
+  # could hide an unrelated model finding that appeared before truncation.
+  # Transport/budget failures with no model body can still use the narrow
+  # deterministic fallback below.
+  if [[ "$failure_status" == 10 && -s "$response_file" ]]; then
+    return 1
+  fi
   grep -Fq '取消后仍可重放有效的预签名上传票据' "$preflight_file" || return 1
   path_count="$(awk 'NF { count++ } END { print count + 0 }' "$paths_file")"
   [[ "$path_count" -eq 1 ]] || return 1
@@ -14079,7 +13837,7 @@ if [[ "$needs_split" != true ]]; then
     exit 0
   fi
   if [[ -z "$specialist_channel" && ( "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 13 ) ]] &&
-     can_return_presigned_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file"; then
+     can_return_presigned_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file" "$response_file" "$initial_status"; then
     echo "本地代码审查：模型请求未完成，但当前差异仅包含一个已由确定性预检完整证明的预签名票据生命周期问题；返回该 P1，未将模型半截输出视为完整结果。" >&2
     cat "$build_preflight_file"
     exit 0
@@ -14279,9 +14037,7 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   # the model from treating a type shown in another shard as a missing type,
   # without materially increasing the prompt or context budget.
   chunk_prompt="$chunk_prompt
---- 本次提交全部变更路径（仅范围元数据，不是当前分片证据） ---
-$(cat "$changed_paths_file")
---- 变更路径元数据结束；未出现在当前分片的文件均视为未知，不得据此报告缺失 ---"
+$(build_shard_scope_metadata "$changed_paths_file")"
   chunk_status=0
   original_num_predict="$num_predict"
   num_predict="$chunk_num_predict"

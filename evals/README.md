@@ -28,7 +28,7 @@ python3 scripts/prepare-reviewbench-candidates.py \
   --output /private/path/reviewbench-candidates.jsonl
 ```
 准备本地只读 Git 镜像后，`scripts/verify-vcc-eval-candidates.py` 可通过私有 canonical-repository 到本地路径的 JSON map 检查 parent、精确新增行和当前源码行号；验证器不联网、不应用补丁、不改变 `pending-human-label`。缺少证据的行会明确报告 `missing-local-repo`、`line-not-added` 等状态，对应回归为 `bash evals/test-vcc-eval-verifier.sh`。
-当前还会对新增代码中把 token/secret 直接拼进 URL 查询参数或路径的明确模式、通过 `TOKEN_HEADER`（含先赋给局部变量或大写类常量别名）从 URL 查询参数读取令牌的模式、新增配置中的硬编码凭据（含指向非本机 endpoint 的高置信配置项）、同一 hunk 中移除 `fileStorageService.delete(...)` 但仍删除 `fileRepository` 元数据的对象生命周期回归，以及同一 SQL 文件中唯一 `CREATE DATABASE/SCHEMA` 与唯一 `USE` 名称不一致的 schema 迁移回归做确定性预检；凭据值不会写入 finding。别名按当前源码的方法范围保存：同一文件跨 hunk 仍能召回，不同方法复用同名局部变量不会串线；支持多级直接别名和跨行赋值，多行 `getParameter(...)`、多行方法签名、下一行左花括号、Java text block 以及字符串/注释中的花括号不会破坏边界识别。预检证据会路由到同一文件的每个分片，避免大文件后续分片以不同措辞重复报告同一问题；最终聚合按文件/行号/高置信风险族做语义去重并保留严重度最高的条目，不只依赖字节相等。若模型段同时含有 URL/除法重复和租户、SSRF、并发等独立根因，会保留整段，不会为了去重隐藏其他问题。
+当前还会对新增代码中把 token/secret 直接拼进 URL 查询参数或路径的明确模式、通过 `TOKEN_HEADER`（含先赋给局部变量或大写类常量别名）从 URL 查询参数读取令牌的模式、新增配置中的硬编码凭据（含指向非本机 endpoint 的高置信配置项）、同一 hunk 中移除 `fileStorageService.delete(...)` 但仍删除 `fileRepository` 元数据的对象生命周期回归，以及同一 SQL 文件中唯一 `CREATE DATABASE/SCHEMA` 与唯一 `USE` 名称不一致的 schema 迁移回归做确定性预检；凭据值不会写入 finding。别名按当前源码的方法范围保存：同一文件跨 hunk 仍能召回，不同方法复用同名局部变量不会串线；支持多级直接别名和跨行赋值，多行 `getParameter(...)`、多行方法签名、下一行左花括号、Java text block 以及字符串/注释中的花括号不会破坏边界识别。预检证据会路由到同一文件的每个分片，避免大文件后续分片以不同措辞重复报告同一问题；最终聚合只对正文相同（仅规范化尾部分隔空白）的模型块做通用去重，不再仅凭文件/行号/风险大类合并不同根因。各类确定性预检仍可在有明确源码证据时移除同根因的模型复述；若模型段同时含有 URL/除法重复和租户、SSRF、并发等独立根因，会保留整段，不会为了去重隐藏其他问题。
 对于同一提交中可直接证明的 Java `Integer` 除法空值拆箱和分母为零模式，也会执行窄范围确定性预检；普通 `int` 运算和带可见保护的代码不在该规则内。这样 `java-divide` 与 `java-token-url` 不再依赖模型某次采样是否恰好命中，模型仍负责发现其它上下文相关问题。
 除法签名恢复按源码方法的花括号范围前向解析，不会从前一个方法借用 `Integer` 参数；复杂分母（例如三元表达式、成员访问和调用）不再把第一个标识符强行当作分母，交给模型结合上下文判断。简单标识符后继续出现 `+`、比较或调用表达式外层运算时，仍保留对实际分母的检测。
 切换 profile 或模型后，建议使用新的 `--out-dir` 和 `--labels-dir`；不要把旧 profile 的人工标签直接套到新结果上。
@@ -271,9 +271,9 @@ scorecard 汇总器也有独立的输入校验回归：
 
 历史评测清单完整性：`run-history.sh` 与 `prepare-history-labels.sh` 在创建输出目录前拒绝控制字符、未转义 TAB/列数漂移、非法 commit/parent 和路径遍历值；`test-history.sh` 已覆盖这些 fail-closed 分支。ERP 幂等候选 `0e6006b` 的旧金标已纠偏：并发缺陷属于父版本，目标提交已通过 `FOR UPDATE`、`request_no` 唯一键和重复键处理补齐；当前两轮运行均为 clean 且结果稳定，因此不计入召回分母。存量数据库缺少迁移脚本是独立的升级风险，不能与该提交的业务并发金标混为一谈；会话重放候选因 Ollama 并行争用导致分片超时，也不计入指标。
 
-预签名长尾恢复：单个 Java 文件且唯一确定性 P1 是取消后重放预签名票据时，模型长度截断或传输失败可以安全回退到该确定性 finding；存在第二个预检根因或独立租户/权限/SQL/SSRF/凭据证据时继续 fail-closed。该条件已加入证据过滤回归，当前共 16 个用例，避免把不完整模型输出伪装成完整审查。
+预签名长尾恢复：确定性预检仍会在模型传输失败且没有任何模型正文时作为诊断回退；一旦收到 `done_reason=length` 的模型正文，整次审查统一 fail-closed，即使正文看起来只是重复预检，也不返回成功结果。这样不会把未知的截断后缀伪装成完整审查；对应边界已加入证据过滤回归。
 
-受控稳定性记录：`SYNTHETIC_REVIEW_RUNS=5 ./evals/run-synthetic.sh` 已串行通过，11 类正例各 5/5、10 类 clean 对照共 50/50、预签名 5/5，输出哈希稳定；新增路径遍历、SSRF、命令注入和危险反序列化正/负夹具也纳入完整门禁，证据过滤回归保持 21 个用例，预检回归覆盖反序列化正负边界。个人高性能入口仍默认 32K，资源不足时只对单文件单预检形状恢复；传输超时、长度截断和不完整响应仍显式失败。
+受控稳定性记录：`SYNTHETIC_REVIEW_RUNS=5 ./evals/run-synthetic.sh` 已串行通过，11 类正例各 5/5、10 类 clean 对照共 50/50、预签名 5/5，输出哈希稳定；新增路径遍历、SSRF、命令注入和危险反序列化正/负夹具也纳入完整门禁，证据过滤回归保持 21 个用例，预检回归覆盖反序列化正负边界。个人高性能入口仍默认 32K；资源不足时只有单文件、单一确定性预检且过滤后没有任何模型 finding 的窄形状可以恢复，任何独立 finding 都保持 fail-closed，一般传输超时、长度截断和不完整响应仍显式失败。
 
 最近三组真实 clean holdout 也已记录：`platform-job:0885d7d8`（密码 CSRF 修复，2/2 分片、44 秒）、`platform-job:e5a84a1b`（bigint 兼容性修复，1/1 分片、34 秒）和 `platform-ai-service:ddc7b767`（SSE 错误内容协商修复，3/3 分片、27 秒）。三组均完整返回 clean，并经人工确认没有当前提交引入的 P0/P1；它们只用于跨功能簇精度与稳定性覆盖，不计入阶段一召回分母。
 
@@ -281,9 +281,9 @@ scorecard 汇总器也有独立的输入校验回归：
 
 `platform-job:cb1bd548` 会话重放候选的串行重跑在第 31/59 分片触发行号越界（实际 `application.properties` 最后一行 74，模型报告到 76），因此结果保持失败和不完整。严格位置门禁在这里阻止了把确定性预检或前 30 个分片的半截结果伪装成完整审查。
 
-真实 `platform-job:ae26cb0c` 暴露了模型对 RPC 出站 SSRF 的漏报：4/4 分片完整、130 秒却返回 clean；人工确认控制器把请求参数 `executorAddress` 直接传入 `NetComClientProxy`，后续提交已改为从数据库日志加载地址。运行器新增窄范围三元证据预检（请求映射 + `String executorAddress` + 新增 RPC sink），并将 `evals/test-filter-evidence.sh` 扩展为 14 个场景；重复模型段和同形状的长度截断只在无独立根因时恢复，只有这三项在同一变更 Java 控制器中同时可见时才输出 P1。
+真实 `platform-job:ae26cb0c` 暴露了模型对 RPC 出站 SSRF 的漏报：4/4 分片完整、130 秒却返回 clean；人工确认控制器把请求参数 `executorAddress` 直接传入 `NetComClientProxy`，后续提交已改为从数据库日志加载地址。运行器新增窄范围三元证据预检（请求映射 + `String executorAddress` + 新增 RPC sink），并将 `evals/test-filter-evidence.sh` 扩展为 14 个场景；完整响应中的同根因模型复述仍由专用证据过滤处理，但任何长度截断都统一 fail-closed，只有三项源码证据同时可见时才输出 P1。
 
-最新复跑已完成 5/5 分片、154 秒并准确输出单条 P1（`gold=1`、`found=1`、`predicted=1`、无误报、定位准确）；首片模型重复达到长度上限时由直接地址预检恢复，其他长度截断仍保持失败闭门。第二轮 186 秒结果文本与运行签名一致，正式 scorecard 标记 `repeat_stable=true`。
+最新复跑已完成 5/5 分片、154 秒并准确输出单条 P1（`gold=1`、`found=1`、`predicted=1`、无误报、定位准确）；当前版本不再把首片长度截断当作成功恢复，截断只保留诊断并让整次审查失败闭门。第二轮 186 秒结果文本与运行签名一致，正式 scorecard 标记 `repeat_stable=true`。
 
 中文路径回归：Git diff 使用 `core.quotePath=false`，使包含中文文件名的分片头与 NUL 安全路径索引保持一致；`evals/test-sharding.sh` 包含无模型中文文件名分片夹具。真实 `platform-hr-service:a8bf560` 复核中 28 个分片均成功，避免因路径显示编码差异把完整审查误判为失败。
 

@@ -51,7 +51,7 @@ if [[ "${LOCAL_REVIEW_FAKE_CLEAN:-}" == true ]] || {
   printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
   exit 0
 fi
-printf '{"response":"P1 A.txt:1 - 认证令牌从 URL 查询参数读取，分片变体 %s。\\n影响：令牌可能进入访问日志。\\n修复建议：改用受保护的请求头。\\n验证方式：检查代理日志。","done":true,"done_reason":"stop"}\n' "$count"
+printf '%s\n' '{"response":"P1 A.txt:1 - 认证令牌从 URL 查询参数读取。\\n影响：令牌可能进入访问日志。\\n修复建议：改用受保护的请求头。\\n验证方式：检查代理日志。","done":true,"done_reason":"stop"}'
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
@@ -98,6 +98,10 @@ fi
 grep -E '^chunk_paths[[:space:]]+chunk-[0-9]{4}[[:space:]]+[^[:space:]]' "$trace_file" >/dev/null || {
   echo 'sharding trace did not record chunk paths' >&2
   cat "$trace_file" >&2
+  exit 1
+}
+grep -F '每条 finding 的文件和行号必须来自当前分片实际展示的差异/上下文代码' "$capture" >/dev/null || {
+  echo 'shard prompt did not enforce current-shard evidence locations' >&2
   exit 1
 }
 if awk -F '\t' '$1 == "chunk_prompt" && ($3 !~ /^[1-9][0-9]*$/ || $4 !~ /^[1-9][0-9]*$/) { bad = 1 } END { exit(bad ? 1 : 0) }' "$trace_file"; then

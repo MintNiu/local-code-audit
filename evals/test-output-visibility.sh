@@ -94,4 +94,29 @@ grep -F 'PREFLIGHT_SAME_LOCATION' <<<"$same_location_output" >/dev/null || {
   exit 1
 }
 
+# Two model findings may share one line and broad family while describing
+# different exploit roots. Location/family-only semantic dedup must not hide
+# either finding under the all-findings contract.
+same_family_file="$fixture_root/same-family.txt"
+cat >"$same_family_file" <<'EOF'
+P1 src/main/java/example/Access.java:42 - TENANT_ROOT_A：查询 employee 表未带当前租户过滤，可能读取其他租户数据。
+影响：租户边界可能被绕过。
+修复建议：绑定当前租户条件并补充隔离测试。
+验证方式：使用两个租户分别查询并断言结果互不相交。
+
+P1 src/main/java/example/Access.java:42 - TENANT_ROOT_B：同一请求还可通过 ownerId 绕过租户边界，导致越权访问。
+影响：攻击者可利用 ownerId 读取不属于当前租户的记录。
+修复建议：按当前租户校验 ownerId，并覆盖越权回归。
+验证方式：使用跨租户 ownerId 请求确认返回 403 或空结果。
+EOF
+same_family_output="$(dedup_exact_findings <"$same_family_file")"
+grep -F 'TENANT_ROOT_A' <<<"$same_family_output" >/dev/null || {
+  echo 'same-family root A was hidden by dedup' >&2
+  exit 1
+}
+grep -F 'TENANT_ROOT_B' <<<"$same_family_output" >/dev/null || {
+  echo 'same-family root B was hidden by dedup' >&2
+  exit 1
+}
+
 printf 'output visibility regression passed\n'

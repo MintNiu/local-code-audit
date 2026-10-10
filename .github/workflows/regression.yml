@@ -30,6 +30,8 @@ jobs:
           ./evals/test-mybatis-dedup.sh
           ./evals/test-path-dedup.sh
           ./evals/test-sharding.sh
+          ./evals/test-filter-evidence.sh
+          ./evals/test-output-visibility.sh
           ./evals/test-shard-preflight-routing.sh
           ./evals/test-shard-integrity.sh
           ./evals/test-config-findings.sh
