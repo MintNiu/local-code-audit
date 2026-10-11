@@ -6,12 +6,13 @@ import org.springframework.web.client.RestTemplate;
 
 final class RemoteFetcher {
     private static final Set<String> ALLOWED_HOSTS = Set.of("api.internal.example");
+    private static final RestTemplate CLIENT = new RestTemplate();
 
     String fetch(String target) {
         URI uri = URI.create(target);
         if (!"https".equalsIgnoreCase(uri.getScheme()) || !ALLOWED_HOSTS.contains(uri.getHost())) {
             throw new IllegalArgumentException("unsupported target");
         }
-        return new RestTemplate().getForObject(uri, String.class);
+        return CLIENT.getForObject(uri, String.class);
     }
 }
