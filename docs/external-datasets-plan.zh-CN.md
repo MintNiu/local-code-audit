@@ -37,6 +37,8 @@ before, after, comments, tests, split, provenance, verification
 `audit-finding` 的正例还必须把 finding 锚定到 `file_path`、`files` 或
 `changed_files` 中的一个声明路径；如果记录提供 `changed_lines` 或
 `source_code_complete=true`，验证器会逐条检查 finding 行号是否落在变更范围和完整源码长度内。
+finding 的 `severity` 只能使用 `P0`、`P1`、`P2`、`P3` 或 `信息`，`evidence` 必须是非空字符串；
+`changed_lines` 只能使用正整数或升序范围，形如反向范围、非法文本的记录直接拒绝。
 没有这些锚点的评论、CVE 或修复提交只能保留为候选元数据，不能直接进入
 positive gold，避免把错误行号带入训练或 holdout。
 

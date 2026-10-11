@@ -17,6 +17,7 @@ from pathlib import Path
 ALLOWED_SPLITS = {"external-smoke", "train", "dev", "holdout"}
 ALLOWED_LABELS = {"positive", "clean"}
 ALLOWED_TASKS = {"review-comment", "audit-finding"}
+ALLOWED_SEVERITIES = {"P0", "P1", "P2", "P3", "信息"}
 REQUIRED = {
     "id",
     "source",
@@ -76,6 +77,32 @@ def line_in_declared_ranges(row: dict, line: int) -> bool | None:
                     if int(start) <= line <= int(end):
                         return True
     return False
+
+
+def validate_changed_lines(value: object) -> bool:
+    """Validate optional changed-line metadata without guessing malformed ranges."""
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        if isinstance(item, int):
+            if item < 1:
+                return False
+            continue
+        if not isinstance(item, str):
+            return False
+        text = item.strip()
+        if text.isdigit():
+            if int(text) < 1:
+                return False
+            continue
+        if "-" not in text:
+            return False
+        start, end = (part.strip() for part in text.split("-", 1))
+        if not start.isdigit() or not end.isdigit():
+            return False
+        if int(start) < 1 or int(end) < int(start):
+            return False
+    return True
 
 
 def validate(path: Path) -> tuple[list[str], Counter[str], Counter[str]]:
@@ -157,6 +184,8 @@ def validate(path: Path) -> tuple[list[str], Counter[str], Counter[str]]:
             fail(errors, line_no, "positive record must include findings")
         elif task == "audit-finding" and label == "positive" and not declared_paths(row):
             fail(errors, line_no, "positive audit-finding must declare file_path, files, or changed_files")
+        if "changed_lines" in row and not validate_changed_lines(row["changed_lines"]):
+            fail(errors, line_no, "changed_lines must be a list of positive lines or ascending ranges")
         for finding in findings:
             if not isinstance(finding, dict):
                 fail(errors, line_no, "each finding must be an object")
@@ -164,6 +193,12 @@ def validate(path: Path) -> tuple[list[str], Counter[str], Counter[str]]:
             for key in ("severity", "path", "line", "evidence"):
                 if key not in finding:
                     fail(errors, line_no, f"finding missing {key}")
+            severity = finding.get("severity")
+            if severity not in ALLOWED_SEVERITIES:
+                fail(errors, line_no, "finding severity must be one of P0/P1/P2/P3/信息")
+            evidence = finding.get("evidence")
+            if not isinstance(evidence, str) or not evidence.strip():
+                fail(errors, line_no, "finding evidence must be a non-empty string")
             path = finding.get("path")
             if not isinstance(path, str) or not path.strip():
                 fail(errors, line_no, "finding path must be a non-empty string")

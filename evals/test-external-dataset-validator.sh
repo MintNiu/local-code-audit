@@ -36,4 +36,12 @@ if python3 "$repo_root/scripts/validate-external-dataset.py" "$fixture_root/miss
   exit 1
 fi
 
+cat >"$fixture_root/bad-finding-shape.jsonl" <<'EOF'
+{"id":"bad-finding-shape","source":{"name":"example","url":"https://example.invalid/data"},"license":"Apache-2.0","split":"external-smoke","repository":"example/repo","commit":"shape","language":"java","task":"audit-finding","label":"positive","root_causes":["security"],"file_path":"src/main/java/Example.java","changed_lines":["20-10"],"findings":[{"severity":"high","path":"src/main/java/Example.java","line":20,"evidence":"   "}]}
+EOF
+if python3 "$repo_root/scripts/validate-external-dataset.py" "$fixture_root/bad-finding-shape.jsonl" >/dev/null 2>&1; then
+  echo 'expected malformed severity/range/evidence to fail' >&2
+  exit 1
+fi
+
 echo 'external dataset validator regression passed'

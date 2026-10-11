@@ -14,7 +14,7 @@
 
 曾尝试加入针对该模式的专门系统规则；目标候选的误报数量下降，但合成 clean 门禁随即出现 `java-token-header` 和 `java-ssrf-safe` 漂移。为保护既有安全负例基线，已撤销这次提示词实验，重新生成 tuned 模型并恢复稳定 SYSTEM SHA-256 `9fbd6ae7cf23e5fa4503c9cdfe1d5e97dfea6419f91583b2bf5e53bd06d95de8`。结论是：不能用一个低价值外部候选的局部误报下降，交换全局 clean 边界回归；后续应优先通过更窄的离线诊断集和人工确认的独立根因验证，再决定是否修改规则。
 
-同日还收紧了外部数据验证器：`audit-finding` 正例必须声明 `file_path`、`files` 或 `changed_files`，每条 finding 的路径必须命中声明集合，提供 `changed_lines` 时行号必须落在范围内；只有显式 `source_code_complete=true` 才按完整源码长度校验。该门禁修复了“评论有行号但没有可复核变更文件”的数据质量缺口，且通过 Juliet、路径错配、缺失元数据和 split 泄漏回归；它不把任何外部样本自动升级为 gold。
+同日还收紧了外部数据验证器：`audit-finding` 正例必须声明 `file_path`、`files` 或 `changed_files`，每条 finding 的路径必须命中声明集合，提供 `changed_lines` 时行号必须落在范围内；只有显式 `source_code_complete=true` 才按完整源码长度校验。进一步要求 severity 只能是 `P0/P1/P2/P3/信息`、evidence 非空，且拒绝反向或非法的 `changed_lines` 范围。该门禁修复了“评论有行号但没有可复核变更文件”以及“标签字段存在但内容不可训练”的数据质量缺口，且通过 Juliet、路径错配、缺失元数据、非法范围、空证据和 split 泄漏回归；它不把任何外部样本自动升级为 gold。
 
 ### 2026-10-05～06：历史候选静态分流与评测提速
 
