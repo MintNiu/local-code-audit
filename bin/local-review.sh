@@ -14088,6 +14088,15 @@ $(build_shard_scope_metadata "$changed_paths_file")"
   write_review_trace "$trace_line"
   num_predict="$original_num_predict"
   if [[ "$chunk_status" -ne 0 ]]; then
+    if [[ "$chunk_status" -eq 12 ]] &&
+       can_return_migration_delete_preflight_on_model_failure "$chunk_merge_preflight_file" "$chunk_paths_file" "$chunk_response" "$chunk_status"; then
+      echo "本地代码审查：分片 ${chunk_name} 的迁移问题文件定位无法验证，但该分片的单一迁移删除风险已由确定性预检完整证明；保留规范 P1 并继续其余分片。" >&2
+      cat "$chunk_merge_preflight_file" >"$chunk_output"
+      printf 'findings\n' >"$chunk_kind"
+      chunk_status=0
+    fi
+  fi
+  if [[ "$chunk_status" -ne 0 ]]; then
     emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
     echo "本地代码审查失败：以下是已完成分片的原始结果（仅供定位，整次审查不完整，不能视为通过）：" >&2
     for completed_output in "$chunk_output_dir"/*.txt; do
