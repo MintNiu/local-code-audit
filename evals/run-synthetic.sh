@@ -96,7 +96,7 @@ run_review() {
       OLLAMA_REVIEW_TOP_K="${PRESIGNED_REVIEW_TOP_K:-1}" \
       OLLAMA_REVIEW_TOP_P="${PRESIGNED_REVIEW_TOP_P:-1}" \
         "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
-    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" || "$name" == "java-open-redirect-safe" || "$name" == "java-cors-safe" || "$name" == "java-weak-password-hash-safe" || "$name" == "java-fail-open-safe" || "$name" == "java-check-then-act-safe" || "$name" == "java-partial-side-effect-safe" || "$name" == "java-mybatis-raw-substitution-safe" || "$name" == "java-url-prefix-whitelist-safe" || "$name" == "java-authorization-annotation-safe" ]]; then
+    elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" || "$name" == "java-open-redirect-safe" || "$name" == "java-cors-safe" || "$name" == "java-weak-password-hash-safe" || "$name" == "java-fail-open-safe" || "$name" == "java-check-then-act-safe" || "$name" == "java-partial-side-effect-safe" || "$name" == "java-mybatis-raw-substitution-safe" || "$name" == "java-url-prefix-whitelist-safe" || "$name" == "java-authorization-annotation-safe" || "$name" == "java-path-safe" ]]; then
       # These new clean security boundaries need only the canonical marker.
       # Limit optional prose so a local model cannot spend the whole timeout
       # repeating non-actionable parser/query commentary; done=true and the

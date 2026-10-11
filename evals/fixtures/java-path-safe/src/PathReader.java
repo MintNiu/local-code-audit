@@ -2,6 +2,7 @@ package example;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 
 final class PathReader {
@@ -14,8 +15,11 @@ final class PathReader {
         if (!target.startsWith(canonicalRoot)) {
             throw new IllegalArgumentException("path escapes root");
         }
-        Path realTarget = target.toRealPath();
-        if (!realTarget.startsWith(canonicalRoot)) {
+        if (Files.isSymbolicLink(target)) {
+            throw new IllegalArgumentException("symbolic links are not allowed");
+        }
+        Path realTarget = target.toRealPath(LinkOption.NOFOLLOW_LINKS);
+        if (Files.isSymbolicLink(realTarget) || !realTarget.startsWith(canonicalRoot)) {
             throw new IllegalArgumentException("path escapes root");
         }
         return Files.readString(realTarget);
