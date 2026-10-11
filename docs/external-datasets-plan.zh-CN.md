@@ -34,6 +34,12 @@ repo_id, task_type, cwe, severity, files, changed_lines,
 before, after, comments, tests, split, provenance, verification
 ```
 
+`audit-finding` 的正例还必须把 finding 锚定到 `file_path`、`files` 或
+`changed_files` 中的一个声明路径；如果记录提供 `changed_lines` 或
+`source_code_complete=true`，验证器会逐条检查 finding 行号是否落在变更范围和完整源码长度内。
+没有这些锚点的评论、CVE 或修复提交只能保留为候选元数据，不能直接进入
+positive gold，避免把错误行号带入训练或 holdout。
+
 按 `repo_id + commit`、漏洞/CVE/CWE 谱系和时间切分 train/dev/holdout。同一仓库的相邻修复、同一漏洞的不同语言改写和后续修复提交不得跨 split。holdout 不进入 few-shot，也不参与规则设计。
 
 ## 采样和指标
