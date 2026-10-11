@@ -3166,6 +3166,42 @@ if [[ "$(printf '%s\n' "$migration_output" | grep -c 'sql/migration/V20260927__e
   exit 1
 fi
 
+# A one-character path hallucination in an otherwise migration-only model
+# finding must not hide the deterministic, fully evidenced deletion finding.
+# The fallback is deliberately narrow and should return the canonical path.
+cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"response":"P1 sql/igration/V20260927__existing_database.sql:1-2 - 删除版本化迁移脚本会中断已有数据库升级路径。\n影响：模型输出路径拼写错误。\n修复建议：保留迁移。\n验证方式：执行升级。","done":true,"done_reason":"stop"}'
+EOF
+chmod +x "$fake_bin/curl"
+fallback_repo="$tmp_dir/migration-fallback-repo"
+mkdir -p "$fallback_repo/sql/migration"
+cat >"$fallback_repo/README.md" <<'EOF'
+已有数据库必须执行 sql/migration 版本化迁移。
+EOF
+cat >"$fallback_repo/sql/migration/V20260927__existing_database.sql" <<'EOF'
+-- Migration applies to existing databases.
+ALTER TABLE old_table ADD COLUMN uploaded_at TIMESTAMP;
+EOF
+git -C "$fallback_repo" init -q
+git -C "$fallback_repo" add .
+git -C "$fallback_repo" commit -qm fallback-base
+rm "$fallback_repo/sql/migration/V20260927__existing_database.sql"
+if ! migration_fallback_output="$(PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned "$repo_root/bin/local-review.sh" --repo "$fallback_repo")"; then
+  echo 'migration preflight fallback rejected a single malformed model location' >&2
+  exit 1
+fi
+printf '%s\n' "$migration_fallback_output" | grep -F 'P1 sql/migration/V20260927__existing_database.sql:1-2' >/dev/null || {
+  echo 'migration preflight fallback omitted canonical deleted path' >&2
+  printf '%s\n' "$migration_fallback_output" >&2
+  exit 1
+}
+if printf '%s\n' "$migration_fallback_output" | grep -F 'sql/igration/' >/dev/null; then
+  echo 'migration preflight fallback exposed malformed model path' >&2
+  printf '%s\n' "$migration_fallback_output" >&2
+  exit 1
+fi
+
 # The migration-deletion case intentionally exercises malformed model output;
 # restore the hermetic clean response before the following schema-snapshot
 # assertions so that their result is attributable only to the new preflight.

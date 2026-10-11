@@ -7216,6 +7216,31 @@ can_return_weak_password_hash_preflight_on_model_failure() {
   return 0
 }
 
+can_return_migration_delete_preflight_on_model_failure() {
+  local preflight_file="$1"
+  local paths_file="$2"
+  local response_file="${3:-}" failure_status="${4:-}" path_count finding_count response_text
+
+  # This fallback is intentionally narrower than the normal preflight merge:
+  # it is only safe when the diff is one deleted versioned migration and the
+  # model produced one migration-themed finding that failed location
+  # validation.  An incomplete/truncated or transport response may hide an
+  # unrelated finding, so those statuses remain fail-closed.
+  [[ "$failure_status" == 12 ]] || return 1
+  [[ -s "$preflight_file" && -s "$paths_file" && -s "$response_file" ]] || return 1
+  grep -Fq '删除版本化迁移脚本会中断已有数据库升级路径' "$preflight_file" || return 1
+  path_count="$(awk 'NF { count++ } END { print count + 0 }' "$paths_file")"
+  [[ "$path_count" -eq 1 ]] || return 1
+  grep -Eq '(^|/)(sql|db)/migration/V[0-9]{8}[^/]*\.sql$' "$paths_file" || return 1
+  finding_count="$(grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$preflight_file" || true)"
+  [[ "$finding_count" -eq 1 ]] || return 1
+  response_text="$(jq -r '.response // empty' <"$response_file" 2>/dev/null || true)"
+  [[ -n "$response_text" ]] || return 1
+  [[ "$(printf '%s\n' "$response_text" | grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' || true)" -eq 1 ]] || return 1
+  printf '%s\n' "$response_text" | grep -Eiq '迁移|migration|已有数据库|升级路径|数据库升级' || return 1
+  return 0
+}
+
 collect_check_then_act_preflight() {
   local diff_file="$1"
   local output_file="$2"
@@ -13845,6 +13870,12 @@ if [[ "$needs_split" != true ]]; then
   if [[ -z "$specialist_channel" && ( "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 12 || "$initial_status" -eq 13 ) ]] &&
      can_return_weak_password_hash_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file"; then
     echo "本地代码审查：模型请求未完成，但当前差异仅包含一个已由确定性预检完整证明的弱密码哈希问题；返回该 P1，未将模型半截输出视为完整结果。" >&2
+    cat "$build_preflight_file"
+    exit 0
+  fi
+  if [[ -z "$specialist_channel" && "$initial_status" -eq 12 ]] &&
+     can_return_migration_delete_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file" "$response_file" "$initial_status"; then
+    echo "本地代码审查：模型迁移问题的文件定位无法验证，但当前单一迁移删除风险已由确定性预检完整证明；返回该 P1，未将其他不完整模型内容视为完整结果。" >&2
     cat "$build_preflight_file"
     exit 0
   fi
