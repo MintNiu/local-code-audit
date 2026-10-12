@@ -6698,7 +6698,7 @@ collect_java_resource_shutdown_preflight() {
   local diff_file="$1"
   local output_file="$2"
   local source_root="$3"
-  local candidates candidate_path candidate_line source_file
+  local candidates candidate_path candidate_line source_file resource_scope
 
   candidates="$(mktemp "/tmp/local-review-java-resource-shutdown-candidates.XXXXXX")"
   awk '
@@ -6721,28 +6721,12 @@ collect_java_resource_shutdown_preflight() {
     source_file="$source_root/$candidate_path"
     path_has_symlink_component "$candidate_path" && continue
     [[ -f "$source_file" ]] || continue
-    if ! awk -v target="$candidate_line" '
-      { lines[NR] = $0 }
-      END {
-        start = target - 70
-        if (start < 1) start = 1
-        resource_open = 0
-        safe_scope = 0
-        for (i = start; i <= target; i++) {
-          context = lines[i]
-          sub(/\/\/.*$/, "", context)
-          if (context ~ /^[[:space:]]*(public|private|protected|static)[^;]*\(/ ||
-              context ~ /^[[:space:]]*[A-Za-z_$][A-Za-z0-9_$<>,.?]*[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*\([^;{}]*\)[[:space:]]*\{/) {
-            resource_open = 0
-            safe_scope = 0
-          }
-          if (context ~ /try[[:space:]]*\(/ ||
-              context ~ /new[[:space:]]+(FileReader|FileInputStream|BufferedReader|InputStreamReader)[[:space:]]*\(/) resource_open = 1
-          if (context ~ /finally[[:space:]]*\{?/) safe_scope = 1
-        }
-        exit (resource_open && !safe_scope) ? 0 : 1
-      }
-    ' "$source_file"; then
+    # Bind resource creation and cleanup to the candidate receiver and its
+    # containing method.  The helper masks comments/literals, handles
+    # multiline try-with-resources headers, and ignores unrelated finally/TWR
+    # blocks elsewhere in the same method.
+    resource_scope="$(python3 "$script_dir/java-resource-scope.py" "$source_file" "$candidate_line" 2>/dev/null || true)"
+    if [[ "$resource_scope" != leak ]]; then
       continue
     fi
     printf '%s\n' \

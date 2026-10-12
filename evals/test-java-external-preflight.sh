@@ -506,11 +506,13 @@ cat >"$shutdown_repo/src/main/java/testcases/ShutdownFixture.java" <<'EOF'
 package testcases;
 
 import java.io.FileReader;
+import java.net.Socket;
 
 class ShutdownFixture {
     void bad() throws Exception {
         FileReader reader = new FileReader("input.txt");
         reader.read();
+        /* cleanup should be moved to finally */
         reader.close();
     }
 }
@@ -551,6 +553,86 @@ if printf '%s\n' "$safe_shutdown_output" | grep -F '文件资源仅在成功路�
   printf '%s\n' "$safe_shutdown_output" >&2
   exit 1
 fi
+
+rm "$shutdown_repo/src/main/java/testcases/ShutdownFixture.java"
+cat >"$shutdown_repo/src/main/java/testcases/ShutdownFixture.java" <<'EOF'
+package testcases;
+
+import java.io.FileReader;
+
+class ShutdownFixture {
+    void bad() throws Exception {
+        FileReader reader = new FileReader("input.txt");
+        /*
+         * Documentation mentions finally { reader.close(); }, but this is
+         * still the success-path-only close below.
+         */
+        reader.close();
+    }
+
+    void tryWithResources() throws Exception {
+        try (FileReader reader = new FileReader("input.txt")) {
+            reader.read();
+            reader.close();
+        }
+    }
+
+    void safeAfterBad() throws Exception {
+        FileReader reader = new FileReader("input.txt");
+        try {
+            reader.read();
+        } finally {
+            reader.close();
+        }
+    }
+
+    void mixed() throws Exception {
+        FileReader first = new FileReader("first.txt");
+        try {
+            first.read();
+        } finally {
+            first.close();
+        }
+        FileReader second = new FileReader("second.txt");
+        second.close();
+    }
+
+    void mixedTryWithResources() throws Exception {
+        try (FileReader managed = new FileReader("managed.txt")) {
+            managed.read();
+            managed.close();
+        }
+        FileReader leaked = new FileReader("leaked.txt");
+        leaked.close();
+    }
+
+    void multilineTryWithResources() throws Exception {
+        try (
+                FileReader managed = new FileReader("multiline.txt")
+        ) {
+            managed.close();
+        }
+    }
+
+    void socketTryWithResources() throws Exception {
+        try (Socket socket = new Socket("localhost", 80)) {
+            socket.close();
+        }
+    }
+}
+EOF
+boundary_shutdown_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-shutdown-boundary" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$shutdown_repo")"
+boundary_shutdown_count="$(printf '%s\n' "$boundary_shutdown_output" | grep -Fc '文件资源仅在成功路径关闭' || true)"
+[[ "$boundary_shutdown_count" == 3 ]] || {
+  echo "resource-shutdown comment/method/TWR boundary expected three findings, got $boundary_shutdown_count" >&2
+  printf '%s\n' "$boundary_shutdown_output" >&2
+  exit 1
+}
 
 lock_repo="$fixture_root/lock-repo"
 git -C "$fixture_root" init -q lock-repo

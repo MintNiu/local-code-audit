@@ -1286,3 +1286,13 @@ system 角色/API 样本的真实运行进一步发现角色/API 预检存在同
 同日增加公开发布安全门禁：公开仓库的 tracked 文件不得包含本机绝对工作区路径、RFC1918 `192.168.*` 地址或 Platform 内部测试凭据拼写；当前树中的夹具和 README 已改为占位值，`evals/test-public-release-safety.sh` 纳入 `test-preflight.sh`。旧提交历史仍保留曾经公开过的字符串，未在没有明确授权的情况下重写历史；任何真实凭据都应轮换。该门禁只保护发布边界，不改变模型质量指标。
 
 随后核验 VCC-Eval 的 UAA `CVE-2019-11274` 候选：引入提交 `929577b8c6dc83637ae044717ba573d91d01ee95` 在 `ScimGroupEndpoints` 把 `@RequestParam filter` 原样拼入异常消息，异常链会把 `message/error_description` 写入 JSON 响应；修复提交改为 `HtmlUtils.htmlEscape(filter)`，仓库 LICENSE/NOTICE 为 Apache-2.0。VCC 元数据路径与真实历史路径不一致，且官方 split 标为 `train`，因此只作为私有 tuning-source/诊断样本，不进入 external-smoke 统计或 Platform 冻结 scorecard。为保留该类高危证据，新增 `collect_java_reflected_error_xss_preflight` 及正负回归：映射 HTTP 方法中请求绑定值进入异常消息且无 HTML/JSON 上下文编码时报告 P1，显式编码和内部异常保持 clean；该预检命中仍不计作模型原生命中。
+
+### 2026-10-12：收紧 Java 文件资源关闭预检的作用域
+
+复核 Juliet Java smoke 时发现，旧的资源关闭预检用固定行窗口看到任意 `finally` 或 `try (` 就跳过当前候选。这样会把同一方法中已经安全关闭的资源误当成后续资源的安全证据，也会被注释、字符串和多行 try-with-resources 头干扰。该问题属于运行器证据归属错误，不能靠扩大模型提示词解决。
+
+现在预检先用 `java-method-window.py` 确定候选所属方法，再对方法范围做注释/字符串屏蔽，并把 `close()` 绑定到同一接收者的 `new FileReader`、`FileInputStream`、`BufferedReader` 或 `InputStreamReader` 创建。只有当前关闭调用确实位于该接收者的 try-with-resources 主体或 `finally` 主体时才视为安全；同一方法中其他资源的安全块、注释文字、字符串文字和无关的 `Socket` TWR 不会改变当前候选结论。多行 TWR 头、先安全后泄漏、先泄漏后安全三类边界均加入 `evals/test-java-external-preflight.sh`，并由完整 `evals/test-preflight.sh` 覆盖。
+
+同轮对本机私有的 43 条 Juliet Java smoke（33 条正例、10 条 clean、17 个 CWE 类别）做了只读复核。当前确定性预检在 CWE259/321/327/328/400/598/601/613/614 等窄模式上能稳定补齐代码证据；CWE338/369/566/609/667/833 等需要更完整的数据流或控制流语义，仍不能用标签关键词替代模型或人工判断。六条此前模型漏报的 CWE321、327、400、598、614、835 正例在当前 tuned profile 的单样本复测中均被发现，三个 clean 对照保持 clean；这只是外部诊断证据，未写入 Platform 严格 scorecard，也未把模型发现和预检发现合并计作同一来源。
+
+该修复不扩大可疑资源类型集合，也不把未确认的 Juliet CWE 直接升级成规则；所有原始压缩包、源码、JSONL、模型输出和许可证记录继续保存在本机私有评测目录。公开仓库只提交解析器、回归夹具和本次证据边界，确保后续评测能够区分模型原生能力、确定性保护和人工确认结果。

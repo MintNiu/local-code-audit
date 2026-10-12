@@ -154,7 +154,7 @@ def mask_comments_only(text: str) -> str:
 
 def main() -> int:
     output_mode = sys.argv[3] if len(sys.argv) == 4 else ""
-    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and output_mode not in ("--masked", "--masked-comments")) or not sys.argv[2].isdigit():
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and output_mode not in ("--masked", "--masked-comments", "--span")) or not sys.argv[2].isdigit():
         return 2
     path = Path(sys.argv[1])
     target_line = int(sys.argv[2])
@@ -237,6 +237,9 @@ def main() -> int:
             continue
         start_line = text.count("\n", 0, header_start)
         end_line = text.count("\n", 0, close) + 1
+        if output_mode == "--span":
+            sys.stdout.write(f"{start_line + 1}\t{end_line}\n")
+            return 0
         sys.stdout.write("".join(lines[start_line:end_line]))
         return 0
     return 0

@@ -80,6 +80,11 @@ if printf '%s\n' "$java_window_masked_comments_output" | grep -F '@PreAuthorize'
   echo 'Java method window masked-comments mode leaked comments' >&2
   exit 1
 fi
+java_window_span="$(python3 "$repo_root/bin/java-method-window.py" "$java_window_fixture" "$java_window_target_line" --span)"
+[[ "$java_window_span" == *$'\t'* ]] || {
+  echo 'Java method window span mode did not return a line range' >&2
+  exit 1
+}
 
 cat >"$fake_bin/ollama" <<'EOF'
 #!/usr/bin/env bash
