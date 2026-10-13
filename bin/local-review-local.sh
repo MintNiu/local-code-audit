@@ -31,5 +31,5 @@ export OLLAMA_REVIEW_TOP_P="${OLLAMA_REVIEW_TOP_P:-0.9}"
 local_review_data_dir="${LOCAL_REVIEW_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/local-review}"
 export LOCAL_REVIEW_EXAMPLES_FILE="${LOCAL_REVIEW_EXAMPLES_FILE:-$local_review_data_dir/examples.md}"
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True).parent)' "${BASH_SOURCE[0]}")"
 exec "$script_dir/local-review.sh" "$@"

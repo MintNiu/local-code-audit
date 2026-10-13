@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Global entry points may contain multiple (including relative) symlinks.
+# Resolve the executable before looking up its sibling Python helpers.
+script_dir="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True).parent)' "${BASH_SOURCE[0]}")"
 java_method_window_script="$script_dir/java-method-window.py"
 
 # Keep Chinese model-output filters in a UTF-8 locale even when the caller
@@ -6857,14 +6859,14 @@ collect_java_double_checked_locking_preflight() {
     source_file="$source_root/$candidate_path"
     path_has_symlink_component "$candidate_path" && continue
     [[ -f "$source_file" ]] || continue
-    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" --masked 2>/dev/null || true)"
+    method_text="$(python3 "$java_method_window_script" "$source_file" "$candidate_line" --masked-exact 2>/dev/null || true)"
     candidate_field_name=""
     if [[ -z "$method_text" ]]; then
       candidate_field_name="$(sed -n "${candidate_line}p" "$source_file" | grep -Eo '[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[[:space:]]*null' | sed -E 's/[[:space:]]*=.*//' | head -n 1 || true)"
       [[ -n "$candidate_field_name" ]] || continue
       while IFS= read -r method_candidate_line; do
         [[ "$method_candidate_line" =~ ^[0-9]+$ ]] || continue
-        method_text="$(python3 "$java_method_window_script" "$source_file" "$method_candidate_line" --masked 2>/dev/null || true)"
+        method_text="$(python3 "$java_method_window_script" "$source_file" "$method_candidate_line" --masked-exact 2>/dev/null || true)"
         if [[ -n "$method_text" ]] && printf '%s\n' "$method_text" | grep -Eq "if[[:space:]]*\\([[:space:]]*${candidate_field_name}[[:space:]]*==[[:space:]]*null"; then
           break
         fi
@@ -6873,16 +6875,6 @@ collect_java_double_checked_locking_preflight() {
     fi
     [[ -n "$method_text" ]] || continue
     printf '%s\n' "$method_text" | grep -Eq 'synchronized[[:space:]]*\(' || continue
-    if printf '%s\n' "$method_text" | awk '
-      {
-        if ($0 ~ /\{/ && $0 ~ /\(/ && $0 ~ /synchronized/ &&
-            $0 !~ /^[[:space:]]*synchronized[[:space:]]*\(/ &&
-            $0 !~ /^[[:space:]]*(if|for|while|switch|catch)[[:space:]]*\(/) found = 1
-      }
-      END { exit (found ? 0 : 1) }
-    '; then
-      continue
-    fi
     field_names="$(printf '%s\n' "$method_text" | grep -Eo 'if[[:space:]]*\([[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*==[[:space:]]*null' | sed -E 's/.*if[[:space:]]*\([[:space:]]*([A-Za-z_$][A-Za-z0-9_$]*)[[:space:]]*==.*/\1/' | LC_ALL=C sort -u)"
     if [[ -z "$field_names" && -n "$candidate_field_name" ]]; then
       field_names="$candidate_field_name"
@@ -6890,55 +6882,10 @@ collect_java_double_checked_locking_preflight() {
     [[ -n "$field_names" ]] || continue
     while IFS= read -r field_name; do
       [[ -n "$field_name" ]] || continue
-      structural_state="$(printf '%s\n' "$method_text" | awk -v field_name="$field_name" '
-        {
-          line = $0
-          normalized = line
-          gsub(/[^A-Za-z0-9_$=]+/, " ", normalized)
-          token_count = split(normalized, tokens, /[[:space:]]+/)
-          null_check = 0
-          assignment = 0
-          for (i = 1; i <= token_count - 3; i++) {
-            if (tokens[i] == "if" && tokens[i + 1] == field_name && tokens[i + 2] == "==" && tokens[i + 3] == "null") null_check = 1
-          }
-          for (i = 1; i <= token_count - 1; i++) {
-            if (tokens[i] == field_name && tokens[i + 1] == "=") assignment = 1
-          }
-          if (!sync_active && null_check) outer_seen = 1
-          if (outer_seen && !sync_active && line ~ /synchronized[[:space:]]*\(/) {
-            sync_active = 1
-            sync_base = brace_depth
-          }
-          if (sync_active && brace_depth > sync_base && null_check) inner_seen = 1
-          if (sync_active && brace_depth > sync_base && inner_seen && assignment) assignment_seen = 1
-          braces = line
-          gsub(/[^{}]/, "", braces)
-          for (i = 1; i <= length(braces); i++) {
-            brace = substr(braces, i, 1)
-            if (brace == "{") brace_depth++
-            else if (brace_depth > 0) brace_depth--
-          }
-          if (sync_active && brace_depth <= sync_base) sync_active = 0
-          if (!method_started && line ~ /\([^;{}]*\)[[:space:]]*\{/) method_started = 1
-          if (method_started && line ~ /\([^;{}]*\)/ && line !~ /^[[:space:]]*(if|for|while|switch|catch|synchronized)[[:space:]]*\(/) {
-            header = line
-            sub(/^[^(]*\(/, "", header)
-            sub(/\).*/, "", header)
-            gsub(/[^A-Za-z0-9_$]+/, " ", header)
-            header_count = split(header, header_tokens, /[[:space:]]+/)
-            for (i = 1; i <= header_count; i++) if (header_tokens[i] == field_name) shadowed = 1
-          }
-          if (method_started && line ~ /;/ && line !~ /\(/ && index(line, field_name) > 0 &&
-              line ~ /(^|[^[:alnum:]_])static([^[:alnum:]_]|$)/) {
-            local_decl = line
-            gsub(/[^A-Za-z0-9_$]+/, " ", local_decl)
-            local_count = split(local_decl, local_tokens, /[[:space:]]+/)
-            for (i = 1; i <= local_count; i++) if (local_tokens[i] == field_name) shadowed = 1
-          }
-        }
-        END { print (outer_seen + 0) ":" (inner_seen + 0) ":" (assignment_seen + 0) ":" (shadowed + 0) }
-      ' || true)"
-      [[ "$structural_state" == 1:1:1:0 ]] || continue
+      # Structural ranges keep outer-if, monitor and inner-if evidence in
+      # the same execution scope, independent of brace placement or line count.
+      structural_state="$(printf '%s\n' "$method_text" | python3 "$script_dir/java-dcl-scope.py" "$field_name")"
+      [[ "$structural_state" == unsafe ]] || continue
       if ! awk -v field_name="$field_name" '
         {
           code = $0

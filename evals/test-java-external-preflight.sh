@@ -7,6 +7,9 @@ fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
 trap 'rm -rf "$fixture_root"' EXIT
 mkdir -p "$fake_bin" "$repo"
+installed_bin="$fixture_root/installed bin"
+LOCAL_REVIEW_BIN_DIR="$installed_bin" bash "$repo_root/scripts/install-global.sh" >/dev/null
+ln -s local-review "$installed_bin/relative-review"
 
 cat >"$fake_bin/ollama" <<'EOF'
 #!/usr/bin/env bash
@@ -522,7 +525,7 @@ shutdown_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
   OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
-  "$repo_root/bin/local-review.sh" --repo "$shutdown_repo")"
+  "$installed_bin/local-review-local" --repo "$shutdown_repo")"
 printf '%s\n' "$shutdown_output" | grep -F '文件资源仅在成功路径关闭' >/dev/null
 
 rm "$shutdown_repo/src/main/java/testcases/ShutdownFixture.java"
@@ -817,7 +820,7 @@ package testcases;
 class DoubleCheckFixture {
     private static Object value = null;
 
-    static Object removedVolatile() {
+    static Object safe() {
         if (value == null) {
             synchronized (DoubleCheckFixture.class) {
                 if (value == null) {
@@ -837,6 +840,40 @@ field_removal_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
   "$repo_root/bin/local-review.sh" --repo "$double_check_repo")"
 printf '%s\n' "$field_removal_output" | grep -F '未声明 volatile 的双重检查锁' >/dev/null
 
+cat >"$double_check_repo/src/main/java/testcases/SplitBraceFixture.java" <<'EOF'
+package testcases;
+
+class SplitBraceFixture {
+    private static Object value = null;
+
+    static Object splitBrace()
+    {
+        if (value == null)
+        {
+            synchronized (SplitBraceFixture.class)
+            {
+                if (value == null)
+                {
+                    value = new Object();
+                    audit(value);
+                }
+            }
+        }
+        return value;
+    }
+
+    private static void audit(Object observed) {}
+}
+EOF
+split_brace_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
+  OLLAMA_REVIEW_LOCK_DIR="$fixture_root/lock-double-check-split-brace" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_NUM_CTX=65536 OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$installed_bin/relative-review" --repo "$double_check_repo")"
+printf '%s\n' "$split_brace_output" | grep -E '^P1 .*SplitBraceFixture.java:[0-9]+ - .*未声明 volatile 的双重检查锁' >/dev/null
+rm "$double_check_repo/src/main/java/testcases/SplitBraceFixture.java"
+
 rm "$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java"
 cat >"$double_check_repo/src/main/java/testcases/DoubleCheckFixture.java" <<'EOF'
 package testcases;
@@ -850,6 +887,20 @@ class DoubleCheckFixture {
                 if (value == null) {
                     value = new Object();
                 }
+            }
+        }
+        return value;
+    }
+
+    static Object multipleBlocks() {
+        if (value == null) {
+            synchronized (DoubleCheckFixture.class) {
+                if (value == null) {
+                    audit();
+                }
+            }
+            synchronized (DoubleCheckFixture.class) {
+                value = new Object();
             }
         }
         return value;
@@ -887,7 +938,7 @@ safe_dcl_boundary_output="$(PATH="$fake_bin:$PATH" TMPDIR="$fixture_root" \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   "$repo_root/bin/local-review.sh" --repo "$double_check_repo")"
 if printf '%s\n' "$safe_dcl_boundary_output" | grep -F '未声明 volatile 的双重检查锁' >/dev/null; then
-  echo 'method-synchronized, no-assignment, or shadowed DCL was incorrectly reported' >&2
+  echo 'method-synchronized, separate-block, no-assignment, or shadowed DCL was incorrectly reported' >&2
   printf '%s\n' "$safe_dcl_boundary_output" >&2
   exit 1
 fi

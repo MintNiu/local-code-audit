@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Print the Java method containing a one-based source line."""
 
+from bisect import bisect_left
 from pathlib import Path
 import re
 import sys
@@ -154,7 +155,7 @@ def mask_comments_only(text: str) -> str:
 
 def main() -> int:
     output_mode = sys.argv[3] if len(sys.argv) == 4 else ""
-    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and output_mode not in ("--masked", "--masked-comments", "--span")) or not sys.argv[2].isdigit():
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and output_mode not in ("--masked", "--masked-exact", "--masked-comments", "--span")) or not sys.argv[2].isdigit():
         return 2
     path = Path(sys.argv[1])
     target_line = int(sys.argv[2])
@@ -176,11 +177,14 @@ def main() -> int:
     # generic calls, and signatures whose parameters span multiple lines.
     paren_stack = []
     paren_open_for_close = {}
+    header_boundaries = []
     for index, character in enumerate(masked):
         if character == "(":
             paren_stack.append(index)
         elif character == ")" and paren_stack:
             paren_open_for_close[index] = paren_stack.pop()
+        elif character in ";{}" and not paren_stack:
+            header_boundaries.append(index)
 
     method_name_re = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*[ \t]*$")
     control_names = {"if", "for", "while", "switch", "catch", "try", "synchronized"}
@@ -210,11 +214,10 @@ def main() -> int:
         if method_name in control_names:
             continue
 
-        header_start = max(
-            masked.rfind(";", 0, name_match.start()),
-            masked.rfind("{", 0, name_match.start()),
-            masked.rfind("}", 0, name_match.start()),
-        ) + 1
+        # Annotation arguments may contain array braces. Only separators
+        # outside parentheses delimit a declaration header.
+        boundary_index = bisect_left(header_boundaries, name_match.start()) - 1
+        header_start = header_boundaries[boundary_index] + 1 if boundary_index >= 0 else 0
         header = masked[header_start:brace_index]
         # Anonymous classes and lambdas can also have a parenthesized prefix
         # followed by a brace, but they are not Java method declarations.
@@ -239,6 +242,9 @@ def main() -> int:
         end_line = text.count("\n", 0, close) + 1
         if output_mode == "--span":
             sys.stdout.write(f"{start_line + 1}\t{end_line}\n")
+            return 0
+        if output_mode == "--masked-exact":
+            sys.stdout.write(masked[header_start:close + 1])
             return 0
         sys.stdout.write("".join(lines[start_line:end_line]))
         return 0

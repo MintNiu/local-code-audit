@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bash "$repo_root/evals/test-public-release-safety.sh"
+PYTHONDONTWRITEBYTECODE=1 python3 "$repo_root/evals/test-java-dcl-scope.py"
 "$repo_root/evals/test-aacr-review-dataset.sh"
 "$repo_root/evals/test-specialist-channel.sh"
 "$repo_root/evals/test-publishing-external-ticket-token-preflight.sh"
@@ -85,6 +86,12 @@ java_window_span="$(python3 "$repo_root/bin/java-method-window.py" "$java_window
   echo 'Java method window span mode did not return a line range' >&2
   exit 1
 }
+java_window_masked_exact_output="$(python3 "$repo_root/bin/java-method-window.py" "$java_window_fixture" "$java_window_target_line" --masked-exact)"
+printf '%s\n' "$java_window_masked_exact_output" | grep -F 'private void target(' >/dev/null
+if printf '%s\n' "$java_window_masked_exact_output" | grep -F 'private void next()' >/dev/null; then
+  echo 'Java method window masked-exact mode crossed into the next method' >&2
+  exit 1
+fi
 
 cat >"$fake_bin/ollama" <<'EOF'
 #!/usr/bin/env bash
