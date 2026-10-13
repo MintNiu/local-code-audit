@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bash "$repo_root/evals/test-public-release-safety.sh"
 PYTHONDONTWRITEBYTECODE=1 python3 "$repo_root/evals/test-java-dcl-scope.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$repo_root/evals/test-java-method-sidecar.py"
+bash "$repo_root/evals/test-java-method-sidecar.sh"
 "$repo_root/evals/test-aacr-review-dataset.sh"
 "$repo_root/evals/test-specialist-channel.sh"
 "$repo_root/evals/test-publishing-external-ticket-token-preflight.sh"
@@ -153,6 +155,55 @@ PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" OLLAMA_SHOW_LOG="$show_log" \
   exit 1
 }
 : >"$show_log"
+
+cat >"$repo/src/main/java/com/example/api/client/MethodSidecar.java" <<'EOF'
+package com.example.api.client;
+
+final class MethodSidecar {
+    static Object target(Object input) {
+        return input;
+    }
+
+    static Object next() {
+        return new Object();
+    }
+}
+EOF
+git -C "$repo" add src/main/java/com/example/api/client/MethodSidecar.java
+git -C "$repo" commit -qm method-sidecar-base
+cat >"$repo/src/main/java/com/example/api/client/MethodSidecar.java" <<'EOF'
+package com.example.api.client;
+
+final class MethodSidecar {
+    static Object target(Object input) {
+        audit(input);
+        return input == null ? new Object() : input;
+    }
+
+    static Object next() {
+        return new Object();
+    }
+}
+EOF
+PATH="$fake_bin:$PATH" TMPDIR="$tmp_dir" LOCAL_REVIEW_CAPTURE="$capture" \
+  OLLAMA_REVIEW_JAVA_METHOD_SIDECAR=true OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_BYTES=6000 \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  "$repo_root/bin/local-review.sh" --repo "$repo" >"$review_output"
+sidecar_section="$(jq -r '.prompt' "$capture" | sed -n '/--- 当前变更方法窗口（源码证据，非预检/,/--- 变更方法窗口结束 ---/p')"
+[[ -n "$sidecar_section" ]] || {
+  echo 'Java method sidecar was not included in the model prompt' >&2
+  exit 1
+}
+grep -F 'static Object target(' <<<"$sidecar_section" >/dev/null || {
+  echo 'Java method sidecar omitted the changed method' >&2
+  exit 1
+}
+if grep -F 'static Object next(' <<<"$sidecar_section" >/dev/null; then
+  echo 'Java method sidecar crossed into an adjacent method' >&2
+  printf '%s\n' "$sidecar_section" >&2
+  exit 1
+fi
+rm "$repo/src/main/java/com/example/api/client/MethodSidecar.java"
 
 cat >"$fake_bin/textconv" <<'EOF'
 #!/usr/bin/env bash

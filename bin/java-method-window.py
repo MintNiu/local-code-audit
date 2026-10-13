@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the Java method containing a one-based source line."""
+"""Print a Java method window, or all declaration spans in one bounded scan."""
 
 from bisect import bisect_left
 from pathlib import Path
@@ -155,7 +155,8 @@ def mask_comments_only(text: str) -> str:
 
 def main() -> int:
     output_mode = sys.argv[3] if len(sys.argv) == 4 else ""
-    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and output_mode not in ("--masked", "--masked-exact", "--masked-comments", "--span")) or not sys.argv[2].isdigit():
+    allowed_modes = {"--masked", "--masked-exact", "--masked-comments", "--span", "--all-spans"}
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and output_mode not in allowed_modes) or not sys.argv[2].isdigit():
         return 2
     path = Path(sys.argv[1])
     target_line = int(sys.argv[2])
@@ -163,9 +164,10 @@ def main() -> int:
     masked = mask_non_code(text)
     starts = [0]
     starts.extend(match.end() for match in re.finditer("\n", text))
-    if target_line < 1 or target_line > len(starts):
+    all_spans_mode = output_mode == "--all-spans"
+    if not all_spans_mode and (target_line < 1 or target_line > len(starts)):
         return 0
-    target_offset = starts[target_line - 1]
+    target_offset = None if all_spans_mode else starts[target_line - 1]
     output_text = masked
     if output_mode == "--masked-comments":
         output_text = mask_comments_only(text)
@@ -188,6 +190,7 @@ def main() -> int:
 
     method_name_re = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*[ \t]*$")
     control_names = {"if", "for", "while", "switch", "catch", "try", "synchronized"}
+    all_spans = []
     for brace_index, character in enumerate(masked):
         if character != "{":
             continue
@@ -236,10 +239,22 @@ def main() -> int:
                 if depth == 0:
                     close = index
                     break
-        if close is None or not (header_start <= target_offset <= close):
+        if close is None:
             continue
         start_line = text.count("\n", 0, header_start)
         end_line = text.count("\n", 0, close) + 1
+        if all_spans_mode:
+            # Whole-line legacy windows intentionally retain a little context.
+            # Batch sidecars instead need exact declaration boundaries: the
+            # preceding method's closing brace is not part of this method.
+            declaration_start = header_start
+            while declaration_start < brace_index and masked[declaration_start].isspace():
+                declaration_start += 1
+            start_line = text.count("\n", 0, declaration_start)
+            all_spans.append((start_line + 1, end_line))
+            continue
+        if not (header_start <= target_offset <= close):
+            continue
         if output_mode == "--span":
             sys.stdout.write(f"{start_line + 1}\t{end_line}\n")
             return 0
@@ -248,6 +263,9 @@ def main() -> int:
             return 0
         sys.stdout.write("".join(lines[start_line:end_line]))
         return 0
+    if all_spans_mode:
+        for start_line, end_line in all_spans:
+            sys.stdout.write(f"{start_line}\t{end_line}\n")
     return 0
 
 

@@ -85,6 +85,15 @@ local-review --repo /path/to/repo
 
 每个分片还会收到本次提交全部变更文件的路径清单。清单只作为范围元数据，不附加其他文件源码；它帮助模型区分“实现在另一个分片”与“确实缺失”，但当前分片未展示的内容仍不能作为问题证据。
 
+Java 审查可以在私有 A/B 评测中选择性启用有界的方法上下文 sidecar：
+
+```bash
+OLLAMA_REVIEW_JAVA_METHOD_SIDECAR=true \
+local-review --repo /path/to/repo
+```
+
+它默认关闭。启用后只读取当前工作树中、且当前差异存在新增行的 Java 方法，把它们作为“仅供理解”的证据上下文发送；不会跟随符号链接，也不会把源码内容写入 trace。单方法或总字节预算容纳不下时会省略整个方法；加入 sidecar 后若实际输入预算不足，运行器会回退到原始的有界提示词。只有在私有 A/B 对照确认没有误报和延迟回归后才应长期启用，并且 sidecar 结果在独立验证前不能计入模型原生召回率。可调参数为 `OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_BYTES`、`OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_METHOD_BYTES` 和 `OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_METHODS`。
+
 如果单个 hunk 仍然超过字节预算，或检测到 Git combined diff（`diff --cc` / `diff --combined`），命令会明确拒绝，不会把超预算内容作为不安全的完整提示词发送给模型。
 
 字节预算只约束收集到的 Git diff；项目规则、显式上下文文件、README 和系统提示词还会额外占用上下文。它们较大时，应提高 `OLLAMA_REVIEW_NUM_CTX` 或进一步拆分审查。

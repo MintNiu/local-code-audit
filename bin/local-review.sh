@@ -5,6 +5,7 @@ set -euo pipefail
 # Resolve the executable before looking up its sibling Python helpers.
 script_dir="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True).parent)' "${BASH_SOURCE[0]}")"
 java_method_window_script="$script_dir/java-method-window.py"
+java_method_sidecar_script="$script_dir/java-method-sidecar.py"
 
 # Keep Chinese model-output filters in a UTF-8 locale even when the caller
 # inherited `LC_ALL=C`; macOS awk treats non-ASCII character classes as byte
@@ -100,6 +101,12 @@ retry_attempts="${OLLAMA_REVIEW_RETRY_ATTEMPTS:-2}"
 # protocol. Evaluation runs can select one narrow risk family without
 # silently changing the personal high-performance profile.
 specialist_channel="${OLLAMA_REVIEW_SPECIALIST_CHANNEL:-}"
+# Optional bounded Java method context. It is disabled by default until a
+# private A/B evaluation proves recall gain without clean-set drift.
+java_method_sidecar_enabled="${OLLAMA_REVIEW_JAVA_METHOD_SIDECAR:-false}"
+java_method_sidecar_max_bytes="${OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_BYTES:-6000}"
+java_method_sidecar_max_method_bytes="${OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_METHOD_BYTES:-4000}"
+java_method_sidecar_max_methods="${OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_METHODS:-6}"
 # Reserve part of the model context for tokenizer variance, request metadata,
 # and a small amount of runtime overhead.  The guard below rejects an
 # over-budget request before it reaches Ollama instead of allowing the model
@@ -2708,6 +2715,7 @@ build_prompt() {
   local prefix="$prompt_prefix"
   local chunk_status_file="${3:-}"
   local preflight_file="${4:-$build_preflight_file}"
+  local method_sidecar_file="${5:-}"
   local mybatis_clues=""
   if [[ "${2:-with-examples}" == "without-examples" ]]; then
     prefix="$chunk_prompt_prefix"
@@ -2752,7 +2760,43 @@ build_prompt() {
     printf '%s' "$mybatis_clues"
   fi
   printf '%s\n' "$diff_text"
+  if [[ -n "$method_sidecar_file" && -s "$method_sidecar_file" ]]; then
+    printf '\n'
+    cat "$method_sidecar_file"
+  fi
   printf '\n--- 以上材料结束；审查规则已作为系统指令发送 ---\n'
+}
+
+write_java_method_sidecar() {
+  local diff_file="$1"
+  local output_file="$2"
+  local sidecar_trace
+  : >"$output_file"
+  [[ "$java_method_sidecar_enabled" == true ]] || return 0
+  if ! [[ "$java_method_sidecar_max_bytes" =~ ^[1-9][0-9]*$ &&
+          "$java_method_sidecar_max_method_bytes" =~ ^[1-9][0-9]*$ &&
+          "$java_method_sidecar_max_methods" =~ ^[1-9][0-9]*$ ]]; then
+    echo "本地代码审查：Java 方法 sidecar 参数无效，已跳过 sidecar。" >&2
+    return 0
+  fi
+  python3 "$java_method_sidecar_script" "$repo_root" "$diff_file" \
+    "$java_method_sidecar_max_bytes" "$java_method_sidecar_max_method_bytes" \
+    "$java_method_sidecar_max_methods" >"$output_file" 2>/dev/null || : >"$output_file"
+  if [[ -n "$review_trace_file" && -s "$output_file" ]]; then
+    printf -v sidecar_trace 'method_sidecar\t%s\t%s' \
+      "$(wc -c <"$output_file" | tr -d ' ')" "$java_method_sidecar_max_methods"
+    write_review_trace "$sidecar_trace"
+  fi
+}
+
+check_method_sidecar_prompt_budget() {
+  # Optional context must fit every enabled pass, including the additional
+  # specialist system instruction, using the caller's actual output budget.
+  local review_system="$review_system"
+  if [[ -n "$specialist_channel" ]]; then
+    review_system+=$'\n\n'"$(specialist_instruction)"
+  fi
+  check_prompt_budget "$1"
 }
 
 estimate_prompt_tokens() {
@@ -13761,12 +13805,25 @@ fi
 if [[ "$needs_split" != true ]]; then
   initial_status=0
   initial_start="$(date +%s)"
+  initial_method_sidecar_file="$chunk_dir/initial.method-sidecar"
+  write_java_method_sidecar "$chunk_input_file" "$initial_method_sidecar_file"
   if [[ "$chunk_preflight_prompt_enabled" == true && "$chunk_prompt_examples_enabled" == true ]]; then
-    initial_prompt="$(build_prompt "$diff_material")"
+    initial_prompt="$(build_prompt "$diff_material" with-examples "" "$build_preflight_file" "$initial_method_sidecar_file")"
   elif [[ "$chunk_preflight_prompt_enabled" == true ]]; then
-    initial_prompt="$(build_prompt "$diff_material" without-examples "" "$build_preflight_file")"
+    initial_prompt="$(build_prompt "$diff_material" without-examples "" "$build_preflight_file" "$initial_method_sidecar_file")"
   else
-    initial_prompt="$(build_prompt "$diff_material" without-examples "" /dev/null)"
+    initial_prompt="$(build_prompt "$diff_material" without-examples "" /dev/null "$initial_method_sidecar_file")"
+  fi
+  if [[ -s "$initial_method_sidecar_file" ]] && ! check_method_sidecar_prompt_budget "$initial_prompt" 2>/dev/null; then
+    echo "本地代码审查：Java 方法 sidecar 超出当前上下文预算，已回退到原始差异。" >&2
+    : >"$initial_method_sidecar_file"
+    if [[ "$chunk_preflight_prompt_enabled" == true && "$chunk_prompt_examples_enabled" == true ]]; then
+      initial_prompt="$(build_prompt "$diff_material")"
+    elif [[ "$chunk_preflight_prompt_enabled" == true ]]; then
+      initial_prompt="$(build_prompt "$diff_material" without-examples "" "$build_preflight_file")"
+    else
+      initial_prompt="$(build_prompt "$diff_material" without-examples "" /dev/null)"
+    fi
   fi
   run_one_prompt "$initial_prompt" "$response_file" "$response_output_file" "$response_kind_file" "$changed_paths_file" "$timeout_seconds" || initial_status=$?
   printf -v trace_line 'initial_status\t%s\t%s' "$initial_status" "$(( $(date +%s) - initial_start ))"
@@ -13992,17 +14049,29 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   else
     : >"$chunk_prompt_preflight_file"
   fi
-  chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_prompt_preflight_file")"
-  rm -f "$chunk_prompt_preflight_file"
+  original_num_predict="$num_predict"
+  num_predict="$chunk_num_predict"
+  chunk_method_sidecar_file="$chunk_output_dir/$chunk_name.method-sidecar"
+  write_java_method_sidecar "$chunk_file" "$chunk_method_sidecar_file"
+  chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_prompt_preflight_file" "$chunk_method_sidecar_file")"
   # Give each shard the complete changed-path inventory as scope metadata.
   # This is intentionally paths-only (no extra source content): it prevents
   # the model from treating a type shown in another shard as a missing type,
   # without materially increasing the prompt or context budget.
   chunk_prompt="$chunk_prompt
 $(build_shard_scope_metadata "$changed_paths_file")"
+  if [[ -s "$chunk_method_sidecar_file" ]] && ! check_method_sidecar_prompt_budget "$chunk_prompt" 2>/dev/null; then
+    echo "本地代码审查：${chunk_name} 的 Java 方法 sidecar 超出当前上下文预算，已回退到原始差异。" >&2
+    : >"$chunk_method_sidecar_file"
+    # Keep the same bounded preflight material used by the first prompt. The
+    # unbounded shard file may itself exceed the context budget and would make
+    # a sidecar fallback fail for an unrelated reason.
+    chunk_prompt="$(build_prompt "$chunk_text" without-examples "$chunk_status_file" "$chunk_prompt_preflight_file")"
+    chunk_prompt="$chunk_prompt
+$(build_shard_scope_metadata "$changed_paths_file")"
+  fi
+  rm -f "$chunk_prompt_preflight_file"
   chunk_status=0
-  original_num_predict="$num_predict"
-  num_predict="$chunk_num_predict"
   if [[ -n "$review_trace_file" ]]; then
     chunk_prompt_bytes="$(printf '%s' "$chunk_prompt" | wc -c | tr -d ' ')"
     chunk_prompt_tokens="$(estimate_prompt_tokens "$chunk_prompt")"

@@ -101,6 +101,15 @@ When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (core default `30
 
 Each shard also receives a paths-only inventory of all files changed by the commit. This is scope metadata, not extra source context: it helps the model distinguish “implemented in another shard” from “missing”, while preserving the rule that absence from the current shard is never evidence of a defect.
 
+Java reviews can opt into a bounded method-context sidecar for a private A/B evaluation:
+
+```bash
+OLLAMA_REVIEW_JAVA_METHOD_SIDECAR=true \
+local-review --repo /path/to/repo
+```
+
+It is disabled by default. When enabled, the helper reads only current-worktree Java methods that contain added lines in the current diff, sends those windows as evidence-only context, and never follows symlinks or writes source content to the trace. Whole methods are omitted when the per-method or total byte budget cannot hold them; if the resulting prompt exceeds the actual input budget, the runner falls back to the original bounded prompt. Tune `OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_BYTES`, `OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_METHOD_BYTES`, and `OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_METHODS` only while recording an A/B result. Do not count a sidecar-assisted result as model-native recall until a private clean-set comparison confirms no false-positive or latency regression.
+
 An individual hunk that still exceeds the byte budget, or a Git combined diff (`diff --cc` / `diff --combined`), is rejected explicitly instead of being sent as an unsafe oversized prompt.
 
 The byte budget applies to collected Git diff material only. Project rules, explicit context files, README content, and the system prompt are additional context; raise `OLLAMA_REVIEW_NUM_CTX` or split the review further when those inputs are large.
