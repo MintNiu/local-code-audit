@@ -3135,7 +3135,7 @@ validate_response() {
       }
       return 0
     }
-    function check_paragraph(    explicit_line_pattern, has_location, first_line_pattern, first_line, has_changed_path, has_impact, has_fix, has_verification) {
+    function check_paragraph(    explicit_line_pattern, has_location, first_line_pattern, first_line, has_changed_path, has_impact, has_fix, has_verification, has_empty_title) {
       if (paragraph == "") return
       first_line = paragraph
       sub(/\n.*/, "", first_line)
@@ -3149,7 +3149,12 @@ validate_response() {
       has_impact = (paragraph ~ /(^|[[:space:]\n])*(影响|[Ii]mpact)[：:]/)
       has_fix = (paragraph ~ /(^|[[:space:]\n])*(修复建议|修复|[Ff]ix|[Rr]emediation)[：:]/)
       has_verification = (paragraph ~ /(^|[[:space:]\n])*(验证方式|验证|[Vv]erification|[Tt]est)[：:]/)
-      if (paragraph !~ first_line_pattern || !has_location || (require_changed_path && !has_changed_path) || !has_impact || !has_fix || !has_verification) invalid = 1
+      # A severity/path/location header with only a trailing dash is not a
+      # usable finding.  The sidecar A/B exposed that models can otherwise
+      # emit a complete-looking paragraph whose actual issue description is
+      # empty; fail closed instead of returning a low-signal finding.
+      has_empty_title = (first_line ~ /[[:space:]]-[[:space:]]*$/)
+      if (paragraph !~ first_line_pattern || !has_location || has_empty_title || (require_changed_path && !has_changed_path) || !has_impact || !has_fix || !has_verification) invalid = 1
     }
     {
       if ($0 ~ /^[[:space:]]*$/) {
