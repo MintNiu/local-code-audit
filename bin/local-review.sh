@@ -71,6 +71,10 @@ temperature="${OLLAMA_REVIEW_TEMPERATURE:-0}"
 seed="${OLLAMA_REVIEW_SEED:-42}"
 top_k="${OLLAMA_REVIEW_TOP_K:-40}"
 top_p="${OLLAMA_REVIEW_TOP_P:-0.9}"
+# Empty means omitted, not false. Only an explicit environment setting enables
+# the read-only capability probe and adds a typed top-level `think` field.
+thinking_json=""
+thinking_probe_resolve=""
 num_ctx="${OLLAMA_REVIEW_NUM_CTX:-16384}"
 num_predict="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
 keep_alive="${OLLAMA_REVIEW_KEEP_ALIVE:-0}"
@@ -375,6 +379,41 @@ case "$specialist_channel" in
     ;;
 esac
 
+if [[ "${OLLAMA_REVIEW_THINK+x}" == x ]]; then
+  case "$OLLAMA_REVIEW_THINK" in
+    true|false) thinking_json="$OLLAMA_REVIEW_THINK" ;;
+    low|medium|high|xhigh) thinking_json="\"${OLLAMA_REVIEW_THINK}\"" ;;
+    *)
+      echo "OLLAMA_REVIEW_THINK 必须显式设为 true、false、low、medium、high 或 xhigh；空值不受支持。" >&2
+      exit 2
+      ;;
+  esac
+  # Opt-in capability discovery must stay on the configured local daemon:
+  # reject credentials, paths, redirects and remote hosts rather than probing
+  # an external endpoint. Pin localhost itself to loopback instead of DNS.
+  if [[ ! "$ollama_api_url" =~ ^(https?)://(127\.0\.0\.1|\[::1\]|localhost)(:0*([0-9]{1,5}))?$ ]]; then
+    echo "OLLAMA_REVIEW_THINK 能力探测仅支持 OLLAMA_HOST 为本机 http(s)://127.0.0.1、[::1] 或 localhost origin（可带端口）。" >&2
+    exit 2
+  fi
+  thinking_probe_scheme="${BASH_REMATCH[1]}"
+  thinking_probe_host="${BASH_REMATCH[2]}"
+  thinking_probe_port="${BASH_REMATCH[4]:-}"
+  if [[ -n "$thinking_probe_port" ]] && (( 10#$thinking_probe_port < 1 || 10#$thinking_probe_port > 65535 )); then
+    echo "OLLAMA_REVIEW_THINK 能力探测的 OLLAMA_HOST 端口必须在 1-65535 范围内。" >&2
+    exit 2
+  fi
+  if [[ -n "$thinking_probe_port" ]]; then
+    thinking_probe_port="$((10#$thinking_probe_port))"
+  fi
+  if [[ "$thinking_probe_host" == localhost ]]; then
+    if [[ -z "$thinking_probe_port" ]]; then
+      thinking_probe_port=80
+      [[ "$thinking_probe_scheme" != https ]] || thinking_probe_port=443
+    fi
+    thinking_probe_resolve="localhost:${thinking_probe_port}:127.0.0.1"
+  fi
+fi
+
 status_file="$(mktemp "${TMPDIR:-/tmp}/local-review-status.XXXXXX")"
 staged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-staged.XXXXXX")"
 unstaged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-unstaged.XXXXXX")"
@@ -393,6 +432,57 @@ ensure_review_deadline() {
     echo "本地代码审查失败：${stage}前已达到整次审查总超时 ${total_timeout_seconds} 秒，拒绝继续使用不完整证据。" >&2
     return 124
   fi
+}
+
+validate_ollama_thinking() {
+  [[ -n "$thinking_json" ]] || return 0
+  ensure_review_deadline "OLLAMA_REVIEW_THINK 能力探测" || return $?
+  local remaining_seconds=$((review_deadline_epoch - $(date +%s)))
+  local probe_timeout="$ollama_probe_timeout_seconds"
+  if (( remaining_seconds <= 0 )); then
+    echo "OLLAMA_REVIEW_THINK 能力探测前已达到整次审查总超时。" >&2
+    return 124
+  fi
+  if (( probe_timeout > remaining_seconds )); then
+    probe_timeout="$remaining_seconds"
+  fi
+  local request_file response_file http_status failure=""
+  if ! request_file="$(mktemp "${TMPDIR:-/tmp}/local-review-thinking-show.XXXXXX")"; then
+    echo "OLLAMA_REVIEW_THINK 能力探测无法创建请求临时文件。" >&2
+    return 2
+  fi
+  response_file="${request_file}.response"
+  active_request_body_file="$request_file"
+  active_request_error_file="$response_file"
+  local probe_curl_args=(--disable --noproxy '*' --silent --show-error --fail
+    --connect-timeout "$probe_timeout" --max-time "$probe_timeout")
+  if [[ -n "$thinking_probe_resolve" ]]; then
+    probe_curl_args+=(--resolve "$thinking_probe_resolve")
+  fi
+  if ! jq -n --arg model "$model" '{model: $model}' >"$request_file"; then
+    failure="无法构造模型元数据请求"
+  elif ! http_status="$(curl "${probe_curl_args[@]}" \
+      "$ollama_api_url/api/show" -H 'Content-Type: application/json' \
+      --data-binary "@$request_file" --output "$response_file" --write-out '%{http_code}')"; then
+    failure="模型元数据请求失败或超时"
+  elif [[ "$http_status" != 200 ]]; then
+    failure="模型元数据请求未返回 HTTP 200（不跟随重定向）"
+  elif ! jq -es --argjson requested "$thinking_json" '
+      length == 1 and (.[0] |
+        type == "object" and (has("error") | not) and
+        (.thinking | type == "object") and (.thinking.values | type == "array") and
+        any(.thinking.values[]; . == $requested))
+      ' "$response_file" >/dev/null 2>&1; then
+    failure="选定模型的 /api/show 未公布匹配类型的 thinking.values，或元数据无效"
+  fi
+  rm -f "$request_file" "$response_file"
+  active_request_body_file=""
+  active_request_error_file=""
+  if [[ -n "$failure" ]]; then
+    printf 'OLLAMA_REVIEW_THINK=%s 无法使用：%s；未发送推理请求。\n' "$OLLAMA_REVIEW_THINK" "$failure" >&2
+    return 2
+  fi
+  ensure_review_deadline "OLLAMA_REVIEW_THINK 能力探测完成" || return $?
 }
 
 print_file_if_exists() {
@@ -2503,6 +2593,7 @@ if [[ "$model_overridden" == true || -n "${OLLAMA_REVIEW_MODEL:-}" || "$default_
   exit 2
 fi
 ensure_review_deadline "模型探测完成" || exit 124
+validate_ollama_thinking || exit $?
 
 if [[ -n "${LOCAL_REVIEW_RESOLVED_MODEL_FILE:-}" ]]; then
   if ! printf '%s\n' "$model" >"$LOCAL_REVIEW_RESOLVED_MODEL_FILE"; then
@@ -2862,6 +2953,7 @@ invoke_ollama() {
     --arg num_ctx "$num_ctx" \
     --arg num_predict "$num_predict" \
     --arg keep_alive "$keep_alive" \
+    --arg thinking_json "$thinking_json" \
     '{
       model: $model,
       system: $system,
@@ -2876,7 +2968,7 @@ invoke_ollama() {
           num_ctx: ($num_ctx | tonumber),
           num_predict: ($num_predict | tonumber)
       }
-  }' >"$request_body_file"; then
+  } + (if $thinking_json == "" then {} else {think: ($thinking_json | fromjson)} end)' >"$request_body_file"; then
     rm -f "$request_body_file"
     active_request_body_file=""
     active_request_error_file=""
@@ -2901,6 +2993,16 @@ invoke_ollama() {
       effective_timeout="$remaining_seconds"
     fi
 
+    # Record the verified request option only when an inference attempt is
+    # reached, not when an earlier input/budget check prevented the request.
+    if (( attempt == 1 )); then
+      if [[ -n "$thinking_json" ]]; then
+        write_review_trace $'think_sent\ttrue'
+        write_review_trace $'think_json\t'"$thinking_json"
+      else
+        write_review_trace $'think_sent\tfalse'
+      fi
+    fi
     if curl --silent --show-error --fail \
         --connect-timeout 10 --max-time "$effective_timeout" \
         "$ollama_api_url/api/generate" \

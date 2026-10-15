@@ -91,12 +91,20 @@ For an A/B test, override settings for one invocation:
 
 ```bash
 OLLAMA_REVIEW_MODEL=devstral-small-2-review \
-OLLAMA_REVIEW_NUM_CTX=32768 \
+OLLAMA_REVIEW_NUM_CTX=16384 \
 OLLAMA_REVIEW_NUM_PREDICT=4096 \
 local-review --repo /path/to/repo
 ```
 
-The default context is 16k; set `OLLAMA_REVIEW_NUM_CTX=32768` for larger changes when the machine has enough memory. The default output budget is 4096 tokens. If the output reaches the limit, the command fails and reports truncation instead of returning an incomplete review. Large changes should be reviewed by file or module.
+The default context is 16k. Prefer file/module sharding for large changes; 32k is an explicit experimental override, not a recommended fix for latency or missed findings. The default output budget is 4096 tokens. If the output reaches the limit, the command fails and reports truncation instead of returning an incomplete review.
+
+For an explicitly selected, already-installed experimental model, `OLLAMA_REVIEW_THINK`
+can request `false`, `true`, `low`, `medium`, `high`, or `xhigh`. The configured local
+daemon's `/api/show` must advertise that exact JSON value and type; unsupported,
+empty, invalid, or unverifiable settings fail before inference. With this variable
+unset, no `think` field or extra capability request is added. Boolean `false` is
+not omission or the string `"false"`. Request traces record the sent setting;
+this option does not download a model, change defaults, or waive format/quality gates.
 
 When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (core default `3000`), `local-review` automatically performs deterministic file- and unified-hunk-boundary sharding. Each shard is reviewed separately; only byte-identical repeated paragraphs are removed during aggregation, while distinct findings remain visible. The general command uses `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` and `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048`; the personal high-performance wrapper uses a validated 6000-byte default and raises the shard output budget to 4096. Any shard timeout, truncation, or invalid output fails the whole review and prints completed shards only as diagnostic output.
 
@@ -175,9 +183,13 @@ or successful model generation on every call. See [evals/goal.md](evals/goal.md)
 for the independent acceptance target and current status.
 
 Latest verification (2026-10-15): the complete model-independent regression
-passed 82/82 local suites, including sidecar fallback, prompt-budget coverage,
-dependency diagnostics, and the native-canary collector. Remote CI is not yet
-green: its full run exposed two environment-dependent regression failures.
+passed 83/83 local suites in 538.99 seconds, including sidecar fallback,
+prompt-budget coverage, dependency diagnostics, the native-canary collector,
+and 27 opt-in thinking-option scenarios. Before this opt-in addition, the
+[remote CI run for `ad9920a`](https://github.com/MintNiu/local-code-audit/actions/runs/38757857910)
+passed all 82 then-existing suites in 670.79 seconds. The earlier 80/82 remote result
+remains in the tuning log; its unresolved preflight failure must not be
+attributed to a locale or production-filter fix without evidence.
 The real-model five-round gate is **not passing**: after 60 successful
 executions it stopped on a resource-ownership false positive in
 `java-command-safe`. Experimental prompt variants have not replaced the
