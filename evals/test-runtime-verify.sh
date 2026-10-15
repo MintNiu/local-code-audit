@@ -20,8 +20,30 @@ fi
 EOF
 chmod +x "$fake_bin/ollama"
 
-grep -F 'OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-32768}"' "$repo_root/bin/local-review-local.sh" >/dev/null || {
-  echo 'personal high-performance wrapper lost its 32K default context' >&2
+grep -F 'OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-16384}"' "$repo_root/bin/local-review-local.sh" >/dev/null || {
+  echo 'personal high-performance wrapper lost its validated 16K default context' >&2
+  exit 1
+}
+
+# The personal wrapper must default to 16K while preserving an explicit
+# 32K override for callers that have measured a larger review.
+wrapper_test_dir="$fixture_root/wrapper"
+mkdir -p "$wrapper_test_dir"
+cp "$repo_root/bin/local-review-local.sh" "$wrapper_test_dir/local-review-local.sh"
+cat >"$wrapper_test_dir/local-review.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${OLLAMA_REVIEW_NUM_CTX:?}"
+EOF
+chmod +x "$wrapper_test_dir/local-review-local.sh" "$wrapper_test_dir/local-review.sh"
+default_ctx="$(OLLAMA_REVIEW_NUM_CTX= "$wrapper_test_dir/local-review-local.sh" --probe)"
+[[ "$default_ctx" == "16384" ]] || {
+  echo "personal wrapper default context drifted: $default_ctx" >&2
+  exit 1
+}
+override_ctx="$(OLLAMA_REVIEW_NUM_CTX=32768 "$wrapper_test_dir/local-review-local.sh" --probe)"
+[[ "$override_ctx" == "32768" ]] || {
+  echo "personal wrapper ignored explicit 32K override: $override_ctx" >&2
   exit 1
 }
 

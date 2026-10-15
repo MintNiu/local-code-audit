@@ -10,6 +10,8 @@ out_dir="$fixture_root/results"
 repeat_out="$fixture_root/repeated-results"
 labels_out="$fixture_root/labels"
 trap 'rm -rf "$fixture_root"' EXIT
+# Hermetic transports must not share the live reviewer's process lock.
+export OLLAMA_REVIEW_LOCK_DIR="$fixture_root/ollama.lock"
 
 mkdir -p "$fake_bin" "$repo/src"
 cat >"$fake_bin/ollama" <<'EOF'
@@ -36,6 +38,13 @@ if [[ -n "${HISTORY_TEST_CURL_COUNT:-}" ]]; then
 fi
 if [[ -n "${HISTORY_TEST_MAX_DIFF_FILE:-}" ]]; then
   printf '%s\n' "${OLLAMA_REVIEW_MAX_DIFF_BYTES:-unset}" >"$HISTORY_TEST_MAX_DIFF_FILE"
+fi
+if [[ -n "${HISTORY_TEST_NUM_CTX_FILE:-}" ]]; then
+  for argument in "$@"; do
+    if [[ "$argument" == @* ]]; then
+      jq -r '.options.num_ctx' "${argument#@}" >"$HISTORY_TEST_NUM_CTX_FILE"
+    fi
+  done
 fi
 printf '{"response":"未发现阻塞问题","done":true,"done_reason":"stop"}\n'
 EOF
@@ -91,8 +100,9 @@ grep -F '列数与表头不一致' "$fixture_root/tab-stderr" >/dev/null
 [[ ! -e "$fixture_root/tab-results" ]]
 
 stderr_file="$fixture_root/stderr"
-PATH="$fake_bin:$PATH" \
+env -u OLLAMA_REVIEW_NUM_CTX PATH="$fake_bin:$PATH" \
   HISTORY_TEST_CURL_COUNT="$fixture_root/first-curl-count" \
+  HISTORY_TEST_NUM_CTX_FILE="$fixture_root/default-num-ctx" \
   LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
   OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
   OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
@@ -102,6 +112,8 @@ PATH="$fake_bin:$PATH" \
 grep -F "跳过重复提交清单行：$commit" "$stderr_file" >/dev/null
 grep -F $'status\tcompleted' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'output_complete\ttrue' "$out_dir/$commit.meta.tsv" >/dev/null
+grep -Fx $'num_ctx\t16384' "$out_dir/$commit.meta.tsv" >/dev/null
+grep -Fx '16384' "$fixture_root/default-num-ctx" >/dev/null
 grep -F $'configured_max_diff_bytes\t60000' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'chunk_count\t1' "$out_dir/$commit.meta.tsv" >/dev/null
 grep -F $'stderr_file\t' "$out_dir/$commit.meta.tsv" >/dev/null
@@ -113,6 +125,22 @@ if grep -F 'transient transport warning' "$out_dir/$commit.txt" >/dev/null; then
   exit 1
 fi
 grep -F 'transient transport warning' "$out_dir/$commit.stderr.log" >/dev/null
+
+# The personal history runner must match the 16K wrapper default both in the
+# actual Ollama request and the evaluation metadata. An explicit 32K override
+# remains supported; history evaluation must not silently rewrite it.
+context_override_out="$fixture_root/context-override-results"
+PATH="$fake_bin:$PATH" \
+  HISTORY_TEST_NUM_CTX_FILE="$fixture_root/override-num-ctx" \
+  LOCAL_REVIEW_EXAMPLES_FILE=/dev/null \
+  OLLAMA_REVIEW_MODEL=devstral-small-2-review-tuned \
+  OLLAMA_REVIEW_NUM_CTX=32768 \
+  OLLAMA_REVIEW_MAX_DIFF_BYTES=60000 \
+  "$repo_root/evals/run-history.sh" \
+    --repo "$repo" --manifest "$manifest" --out-dir "$context_override_out" \
+    >"$fixture_root/context-override-stdout" 2>"$fixture_root/context-override-stderr"
+grep -Fx $'num_ctx\t32768' "$context_override_out/$commit.meta.tsv" >/dev/null
+grep -Fx '32768' "$fixture_root/override-num-ctx" >/dev/null
 
 # When the personal profile is left at its default, a small diff just above
 # 6KB should use the validated 12KB shard budget to avoid an unnecessary

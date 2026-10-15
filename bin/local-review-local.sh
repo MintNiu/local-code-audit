@@ -4,14 +4,14 @@ set -euo pipefail
 # Personal high-performance profile. Values remain overridable per invocation.
 # It keeps the same evidence and security gates as local-review; only runtime
 # budgets, model residency, and the local private examples path are changed.
-# The personal profile keeps a 32K request window so fixed audit rules,
-# explicit context, and routed preflight evidence do not make real multi-file
-# reviews fail before inference. Callers may lower this deliberately, but the
-# default must favor complete review output over a smaller context footprint.
-export OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-32768}"
+# The personal profile keeps the validated 16K request window used by recent
+# repeatable runs. Callers may explicitly raise it for an unusually large
+# review, but the default must preserve the known latency and fail-closed
+# behavior instead of silently switching to the slower 32K path.
+export OLLAMA_REVIEW_NUM_CTX="${OLLAMA_REVIEW_NUM_CTX:-16384}"
 export OLLAMA_REVIEW_NUM_PREDICT="${OLLAMA_REVIEW_NUM_PREDICT:-4096}"
 # 6KB is the personal default: it halves the shard count on large commits
-# while keeping each request well below the 32K input window.  Override it
+# while keeping each request well below the 16K input window.  Override it
 # for exceptionally long-tail repositories; the budget guard still shrinks
 # it when fixed rules/context leave less room.
 export OLLAMA_REVIEW_MAX_DIFF_BYTES="${OLLAMA_REVIEW_MAX_DIFF_BYTES:-6000}"

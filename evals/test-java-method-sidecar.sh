@@ -265,8 +265,25 @@ large_repo="$fixture_root/large-repo"
 generate_large_repo "$large_repo" yes
 repo="$large_repo"
 assert_fallback_pair unsplit-preflight single
-assert_fallback_pair unsplit-no-preflight single OLLAMA_REVIEW_NUM_CTX=12288
-grep -F '从模型分片提示中移除' "$fixture_root/unsplit-no-preflight-baseline/stderr" >/dev/null
+# Derive a real boundary from the captured prompt: with the exact small-diff
+# planner, a fixed 12K context can now fit the full preflight. Reserve 128 fewer
+# input tokens than the observed full prompt needs, while leaving ample room
+# for the same diff without its three optional preflight paragraphs.
+full_prompt_bytes="$(jq '[.system, .prompt] | map(utf8bytelength) | add' \
+  "$fixture_root/unsplit-preflight-baseline/request-001.json")"
+no_preflight_ctx=$(( (full_prompt_bytes + 2) / 3 + 256 + 256 - 128 ))
+assert_fallback_pair unsplit-no-preflight single "OLLAMA_REVIEW_NUM_CTX=$no_preflight_ctx"
+for capture_kind in baseline fallback; do
+  capture="$fixture_root/unsplit-no-preflight-$capture_kind"
+  if prompt_for "$capture/request-001.json" | grep -q '^P1 LargeSample.java:'; then
+    echo 'unsplit sidecar fallback restored disabled preflight context' >&2
+    exit 1
+  fi
+  [[ "$(grep -c '^P1 LargeSample.java:' "$capture/output")" == 3 ]] || {
+    echo 'unsplit context-budget fallback hid a deterministic finding' >&2
+    exit 1
+  }
+done
 
 # Split fallback must reuse the bounded (or disabled) preflight file, not the
 # original unbounded three-finding file. All three findings still reach the

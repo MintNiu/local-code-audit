@@ -64,10 +64,11 @@ local-review-local --repo /path/to/repo --base origin/main
 ```
 
 `local-review-local` keeps the same evidence, security, and truncation gates. Its
-default budget is the validated 32k/4096 personal profile and
-it keeps the model resident for consecutive reviews; this preserves enough
-context for routed cross-file evidence without using the slower 32k/8192 output
-budget that timed out on some real cross-repository diffs.
+default budget is the validated 16k/4096 personal profile and
+it keeps the model resident for consecutive reviews. This is the recent,
+repeatable path with bounded latency; explicitly set `OLLAMA_REVIEW_NUM_CTX=32768`
+only for an unusually large review after accepting the higher latency and
+re-running the relevant evaluation.
 It keeps the validated general-purpose decoding defaults
 (`OLLAMA_REVIEW_TOP_K=40`, `OLLAMA_REVIEW_TOP_P=0.9`). For a focused,
 high-impact check you can opt into greedy decoding with
@@ -116,6 +117,13 @@ The byte budget applies to collected Git diff material only. Project rules, expl
 
 Transient Ollama transport failures are retried up to two times within the total review timeout by default. The personal high-performance wrapper uses a 2400-second total budget to accommodate many serial shards; set `OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS` explicitly for a fail-fast limit. Set `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` to disable retries or tune it for local stability. The launcher also estimates the input budget for system rules, context, and diff before sending; tune `OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` when you need a different safety margin.
 
+For a small diff, the launcher first budgets the complete initial prompt so
+examples and preflight context remain available when they fit. Optional context
+is removed only when that estimate exceeds the input budget; all deterministic
+findings still appear in the final merge. A failed initial request triggers a
+fresh shard-budget calculation. Evaluation metadata records `budget_mode` as
+`initial` or `shard` to distinguish these two estimates.
+
 For diagnostic A/B runs only, set `OLLAMA_REVIEW_SPECIALIST_CHANNEL` to `auth-tenant`, `concurrency-state`, or `external-io`. The runner performs one additional serial, narrow risk-family pass and unions both complete outputs; the default is empty, so normal reviews keep one request. Any specialist timeout, truncation, or invalid output fails closed, and specialist union results are not counted as model-native scorecard recall until independently validated.
 
 The output gate rejects generic or incomplete summaries: every finding paragraph must include a severity, a file/line location that matches a changed file or an explicitly supplied context file, and explicit `影响：`, `修复建议：`, and `验证方式：` fields. A basename is accepted only when it is unambiguous in the review set.
@@ -156,7 +164,23 @@ For Git path-move semantics, run `bash evals/test-rename-evidence.sh`. It verifi
 
 The repository also runs the model-independent regression suites in GitHub Actions on macOS for every push and pull request. This catches parser, sharding, aggregation, label-migration, and runtime-verifier regressions without requiring Ollama or exposing private review data.
 
-The current gate is intentionally strict: it fails on extra P0–P3 findings, contradictory output, API errors, timeouts, or truncation. See [evals/goal.md](evals/goal.md) for the acceptance target and current status.
+The synthetic gate checks 23 positive and 22 clean development fixtures five
+times each, plus explicit truncation handling. Clean fixtures reject findings;
+positive fixtures check known risk families, not every possible extra false
+positive. Thirteen security-clean fixtures use 512 output tokens and greedy
+decoding, and the presigned fixture also uses greedy decoding. Results include
+deterministic preflight, filtering, and narrowly documented recovery paths, so
+passing this gate is not evidence of model-native recall, zero false positives,
+or successful model generation on every call. See [evals/goal.md](evals/goal.md)
+for the independent acceptance target and current status.
+
+Latest verification (2026-10-15): the complete model-independent regression
+passed 80/80 suites, including sidecar fallback and prompt-budget coverage.
+The real-model five-round gate is **not passing**: after 60 successful
+executions it stopped on a resource-ownership false positive in
+`java-command-safe`. Experimental prompt variants have not replaced the
+defaults. See the [tuning log](docs/tuning-process.zh-CN.md) for the failures
+and the distinction between raw model output and wrapper results.
 
 For private historical-commit evaluation, use [evals/README.md](evals/README.md) and keep the manifest, raw outputs, and labels outside this public repository.
 

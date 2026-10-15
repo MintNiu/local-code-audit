@@ -66,7 +66,7 @@ local-review-local
 local-review-local --repo /path/to/repo --base origin/main
 ```
 
-它保留证据、权限和安全检查，默认使用已验证的 32k/4096 个人高性能预算，并在连续审查时保留模型；真实跨仓库大 diff 曾证明把输出预算提高到 8192 会增加超时。仍可用同一组 `OLLAMA_REVIEW_*` 环境变量临时覆盖。`local-review` 是保守基线，`local-review-local` 提供个人本地高性能默认值；两者都可使用本机私有 few-shot 数据。
+它保留证据、权限和安全检查，默认使用近期可重复验证的 16k/4096 个人高性能预算，并在连续审查时保留模型。只有在确实需要处理超大审查时才显式设置 `OLLAMA_REVIEW_NUM_CTX=32768`，并重新评估耗时与失败率；真实跨仓库大 diff 曾证明盲目增大上下文或输出预算会增加超时。仍可用同一组 `OLLAMA_REVIEW_*` 环境变量临时覆盖。`local-review` 是保守基线，`local-review-local` 提供个人本地高性能默认值；两者都可使用本机私有 few-shot 数据。
 
 实测同一个 clean 样例：保留模型 5 分钟时连续两次约 23 秒、4 秒；每次卸载时约 20 秒、21 秒。因此本地高性能版默认保留模型用于连续审查；更关注电量时可设置 `OLLAMA_REVIEW_KEEP_ALIVE=0`。
 
@@ -81,7 +81,7 @@ local-review --repo /path/to/repo
 
 默认上下文为 16k；机器内存充足且变更较大时可设置 `OLLAMA_REVIEW_NUM_CTX=32768`。默认输出上限为 4096 tokens。如果输出达到上限，命令会明确报告截断并失败，不会把半截审计结果当作成功。大型变更应按文件或模块拆分审查。
 
-当收集到的 diff 超过 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（通用命令默认 `3000`，个人高性能 profile 也默认 `3000`）时，`local-review` 会按文件边界、再按 unified diff hunk 边界自动进行确定性分片。每个分片独立审查，最后完整拼接结果；只删除字节完全相同的重复段落，不同问题都会保留。分片默认使用 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180`；通用命令输出预算为 `2048`，个人高性能 profile 为 `4096`。任何分片超时、截断或输出格式不合格都会使整次审查失败，已完成分片只作为诊断输出。
+当收集到的 diff 超过 `OLLAMA_REVIEW_MAX_DIFF_BYTES`（通用命令默认 `3000`，个人高性能 profile 默认 `6000`）时，`local-review` 会按文件边界、再按 unified diff hunk 边界自动进行确定性分片。每个分片独立审查，最后完整拼接结果；只删除字节完全相同的重复段落，不同问题都会保留。分片默认使用 `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180`；通用命令输出预算为 `2048`，个人高性能 profile 为 `4096`。任何分片超时、截断或输出格式不合格都会使整次审查失败，已完成分片只作为诊断输出。
 
 每个分片还会收到本次提交全部变更文件的路径清单。清单只作为范围元数据，不附加其他文件源码；它帮助模型区分“实现在另一个分片”与“确实缺失”，但当前分片未展示的内容仍不能作为问题证据。
 
@@ -99,6 +99,8 @@ local-review --repo /path/to/repo
 字节预算只约束收集到的 Git diff；项目规则、显式上下文文件、README 和系统提示词还会额外占用上下文。它们较大时，应提高 `OLLAMA_REVIEW_NUM_CTX` 或进一步拆分审查。
 
 Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最多重试 2 次；个人高性能入口默认给多分片串行审查预留 2400 秒，也可显式设置 `OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS` 让它更快失败。可用 `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` 关闭重试，或按本机稳定性调整。脚本还会按保守字节估算检查系统规则、上下文和 diff 的输入预算；可用 `OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` 调整预留空间。
+
+小差异先按完整初始提示词估算，能容纳时保留示例和预检上下文，仅在实际估算超预算时移除可选内容；确定性发现仍完整合并到最终结果。初始请求失败后会重新计算分片预算，不沿用初始请求的预算结论。评测元数据通过 `budget_mode=initial|shard` 区分两种估算方式。
 
 仅在诊断/A-B 评测时，可设置 `OLLAMA_REVIEW_SPECIALIST_CHANNEL=auth-tenant`、`concurrency-state` 或 `external-io`。审查器会在基础审查后串行追加一次窄范围专项复核，并合并两次完整结果；默认值为空，因此日常审查仍只发一个请求。专项超时、截断或格式无效时整次 fail-closed；在独立验证前，专项合并结果不计入模型原生严格召回率。
 
@@ -127,7 +129,9 @@ Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最�
 
 仓库还会在 GitHub Actions 的 macOS 环境中，对每次 push 和 Pull Request 自动运行不依赖 Ollama 的回归套件，覆盖预检、分片、聚合、标签迁移和运行态校验；不会上传模型输出或私有审计数据。这样解析器规则变更不会等到本地再次使用时才暴露回归。
 
-当前门槛故意设置得严格：出现额外 P0～P3 问题、矛盾输出、API 错误、超时或截断都会失败。验收目标和当前状态见 [evals/goal.md](evals/goal.md)。
+合成门禁对 23 个正例、22 个 clean 开发夹具各运行五轮，另验收显式截断处理。clean 夹具拒绝问题段，正例检查已知风险族，但不能排除所有额外误报；13 个安全 clean 夹具使用 512 输出预算和 greedy 解码，预签名票据夹具也使用 greedy。结果包含确定性预检、过滤及已记录的窄范围恢复路径，因此全绿不代表模型原生召回达标、零误报或每次模型生成都成功。独立验收目标和当前状态见 [evals/goal.md](evals/goal.md)。
+
+最新验证（2026-10-15）：完整无模型工程回归通过 80/80 个套件，包含 sidecar 回退和提示预算覆盖。真实模型五轮门禁**尚未通过**：前 60 次执行通过，随后在 `java-command-safe` 的资源所有权误报处停止。实验提示候选没有替换默认配置；失败记录及原始模型输出与包装器结果的区别见[调优过程](docs/tuning-process.zh-CN.md)。
 
 真实历史提交评测请按照 [evals/README.md](evals/README.md) 使用，并将清单、原始输出和人工标签保存在公开仓库之外。
 

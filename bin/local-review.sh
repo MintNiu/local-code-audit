@@ -117,6 +117,7 @@ input_reserve_tokens="${OLLAMA_REVIEW_INPUT_RESERVE_TOKENS:-1024}"
 resolved_chunk_bytes_file="${OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE:-}"
 review_trace_file="${OLLAMA_REVIEW_TRACE_FILE:-}"
 chunk_budget_preflight_reserve_tokens=512
+resolved_budget_mode=shard
 active_request_body_file=""
 active_request_error_file=""
 current_evidence_file=""
@@ -2578,7 +2579,7 @@ MyBatis 原始替换预检边界：保留“MyBatis Mapper 将表达式”预检
 声明式权限注解删除：如果差异把同一个控制器中多个方法的 `@PreAuthorize`、`@RequiresPermissions` 或等价授权注解注释/删除，必须把它视为当前差异直接证明的 P1 授权回归；按控制器或同一授权根因合并为一条，并在文件路径后列出全部受影响方法/行号范围。不要再为同一批被注释的注解输出信息级“可读性/维护性”问题；只有存在不同授权机制或不同资源边界的独立根因时才拆分。
 变量与空指针证据边界：只有当前差异或同一方法可见源码明确展示变量未声明、未初始化、不可达赋值或可达的 null 值时，才报告“变量未定义/可能空指针”。如果调用方法的返回值已经赋给同名局部变量，不得仅凭方法名、猜测返回值或业务分支未使用就声称变量未定义或必然为空；同一证据只保留一条具体问题。
 
-有问题时按 P0、P1、P2、P3、信息排序。每条问题首行必须以 `P0 path/to/File.java:12-15 -` 或 `信息 path/to/File.java:12 -` 开头，随后在同一段连续输出问题、证据、影响、修复建议和验证方式；问题段内部不得插入空行，不要使用 Markdown 粗体标题。每条问题都必须明确包含 `影响：`、`修复建议：` 和 `验证方式：` 三个字段，否则视为不完整结果并失败。不要输出无级别的 Problem/Evidence/Impact 清单。若没有任何可修复问题（包括没有 P0-P3 或信息级问题），最终输出必须且只能是“未发现阻塞问题”；不得把“实现正确”“符合契约”“没有风险”写成信息级问题。若有问题时只输出问题段，绝不输出该短语，也不要添加总评或总结。
+有问题时按 P0、P1、P2、P3、信息排序。每条问题首行格式为 `P1 path/to/File.java:12-15 - 具体问题标题` 或 `信息 path/to/File.java:12 - 具体问题标题`；必须在同一行的 ` - ` 后写出非空、可由代码证明的实际问题，不能只写级别和位置，也不能照抄“具体问题标题”占位符。随后在同一段连续输出证据、影响、修复建议和验证方式；问题段内部不得插入空行，不要使用 Markdown 粗体标题。每条问题都必须明确包含 `影响：`、`修复建议：` 和 `验证方式：` 三个字段，否则视为不完整结果并失败。不要输出无级别的 Problem/Evidence/Impact 清单。若没有任何可修复问题（包括没有 P0-P3 或信息级问题），最终输出必须且只能是“未发现阻塞问题”；不得把“实现正确”“符合契约”“没有风险”写成信息级问题。若有问题时只输出问题段，绝不输出该短语，也不要添加总评或总结。
 
 输出协议补充：只要输出了任意一个 P0、P1、P2、P3 或信息问题，就禁止再附带“未发现阻塞问题”“无阻塞问题”“文档与代码一致，无需修复”或其他 clean/总评段；这类附带段没有独立影响、修复建议和验证方式时尤其必须省略。要么只输出完整问题段，要么在确实没有任何问题时只输出唯一的 clean 短语。
 
@@ -3518,6 +3519,7 @@ write_chunk_budget_metadata() {
     printf 'chunk_budget_available_tokens\t%s\n' "$available_tokens"
     printf 'chunk_budget_preflight_reserve_tokens\t%s\n' "$chunk_budget_preflight_reserve_tokens"
     printf 'chunk_budget_adjusted\t%s\n' "$adjusted"
+    printf 'budget_mode\t%s\n' "$resolved_budget_mode"
   } >"$resolved_chunk_bytes_file"; then
     echo "本地代码审查失败：无法写入分片预算元数据文件: $resolved_chunk_bytes_file" >&2
     return 11
@@ -3571,12 +3573,66 @@ build_shard_scope_metadata() {
 
 resolve_chunk_budget() {
   local configured_bytes="$1"
+  local budget_mode="${2:-initial}"
   local available_tokens probe_tokens remaining_tokens budget_bytes
   local probe_prompt probe_body probe_base_prompt probe_variable_prompt
   local probe_base_tokens probe_variable_tokens dynamic_reserve_tokens budget_preflight_file budget_prompt_preflight_file
+  local initial_available_tokens initial_prompt_tokens initial_prompt
   local adjusted=false
 
   effective_max_diff_bytes="$configured_bytes"
+  resolved_budget_mode=shard
+  chunk_preflight_prompt_enabled=true
+  chunk_prompt_examples_enabled=true
+  chunk_budget_preflight_reserve_tokens=512
+  # For an unsplit review, size the actual initial prompt before applying the
+  # shard heuristic below.  The shard probe intentionally reserves room for a
+  # potentially large hunk, but that conservative reserve used to discard
+  # examples and deterministic preflight even when a small diff still fit.
+  # Prefer the richest combination that fits the real initial request, while
+  # keeping the fail-closed budget check in run_one_prompt as the final guard.
+  if [[ "$budget_mode" == initial ]] && (( diff_bytes <= configured_bytes )); then
+    initial_available_tokens=$(( num_ctx - num_predict - input_reserve_tokens ))
+    initial_prompt="$(build_prompt "$diff_material" with-examples "" "$build_preflight_file")"
+    initial_prompt_tokens="$(estimate_prompt_tokens "$initial_prompt")"
+    if (( initial_prompt_tokens <= initial_available_tokens )); then
+      chunk_preflight_prompt_enabled=true
+      chunk_prompt_examples_enabled=true
+      resolved_budget_mode=initial
+      chunk_budget_preflight_reserve_tokens=0
+      write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$initial_prompt_tokens" "$initial_available_tokens" "$adjusted" || return $?
+      return 0
+    fi
+
+    chunk_prompt_examples_enabled=false
+    initial_prompt="$(build_prompt "$diff_material" without-examples "" "$build_preflight_file")"
+    initial_prompt_tokens="$(estimate_prompt_tokens "$initial_prompt")"
+    if (( initial_prompt_tokens <= initial_available_tokens )); then
+      chunk_preflight_prompt_enabled=true
+      resolved_budget_mode=initial
+      chunk_budget_preflight_reserve_tokens=0
+      echo "本地代码审查：完整提示超出输入预算，已移除人工示例；当前差异与确定性预检仍完整发送。" >&2
+      write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$initial_prompt_tokens" "$initial_available_tokens" "$adjusted" || return $?
+      return 0
+    fi
+
+    initial_prompt="$(build_prompt "$diff_material" without-examples "" /dev/null)"
+    initial_prompt_tokens="$(estimate_prompt_tokens "$initial_prompt")"
+    if (( initial_prompt_tokens <= initial_available_tokens )); then
+      chunk_preflight_prompt_enabled=false
+      resolved_budget_mode=initial
+      chunk_budget_preflight_reserve_tokens=0
+      echo "本地代码审查：输入预算不足以携带人工示例和可选确定性预检上下文，已从模型提示中移除；完整预检结果仍会在模型完成后合并。" >&2
+      write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$initial_prompt_tokens" "$initial_available_tokens" "$adjusted" || return $?
+      return 0
+    fi
+
+    # Keep the reduced optional-context choice for the generic probe as well;
+    # restoring examples here would make that probe reject the same request
+    # before the final, more useful budget diagnostic is emitted.
+    chunk_preflight_prompt_enabled=false
+  fi
+
   # Shards use their own output budget.  Size the shard cap against that
   # budget rather than the (usually larger) initial-request budget; the
   # initial request still goes through check_prompt_budget independently.
@@ -3602,6 +3658,17 @@ resolve_chunk_budget() {
   probe_prompt="$probe_base_prompt
 $(build_shard_scope_metadata "$changed_paths_file")"
   probe_tokens="$(estimate_prompt_tokens "$probe_prompt")"
+  # Examples are optional even when their size alone overflows the fixed
+  # probe. Retry without them before rejecting a review that can still fit
+  # the mandatory rules and real diff.
+  if (( probe_tokens > available_tokens )) && [[ "$chunk_prompt_examples_enabled" == true ]]; then
+    chunk_prompt_examples_enabled=false
+    probe_base_prompt="$(build_prompt "$probe_body" without-examples "" /dev/null)"
+    probe_prompt="$probe_base_prompt
+$(build_shard_scope_metadata "$changed_paths_file")"
+    probe_tokens="$(estimate_prompt_tokens "$probe_prompt")"
+    echo "本地代码审查：人工示例超过分片固定输入预算，已移除人工示例并继续计算差异预算。" >&2
+  fi
   if (( probe_tokens > available_tokens )); then
     echo "本地代码审查失败：分片固定提示词估算需要 ${probe_tokens} 个输入 token，超过可用预算 ${available_tokens}；为避免静默截断，本次请求未发送。" >&2
     write_chunk_budget_metadata "$configured_bytes" "$configured_bytes" "$probe_tokens" "$available_tokens" "$adjusted" || return $?
@@ -13796,7 +13863,7 @@ resolve_review_budget() {
   if [[ -n "$specialist_channel" ]]; then
     review_system+=$'\n\n'"$(specialist_instruction)"
   fi
-  resolve_chunk_budget "$1"
+  resolve_chunk_budget "$@"
 }
 if ! resolve_review_budget "$max_diff_bytes"; then
   emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
@@ -13873,6 +13940,13 @@ if [[ "$needs_split" != true ]]; then
     exit 0
   fi
   if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 && "$initial_status" -ne 12 && "$initial_status" -ne 13 ]]; then
+    emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
+    exit 1
+  fi
+  # A fitting initial request does not establish a shard budget: shards add
+  # scope metadata and may reserve a different output size. Re-plan after a
+  # recoverable initial failure before splitting, including optional context.
+  if ! resolve_review_budget "$max_diff_bytes" shards-only; then
     emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
     exit 1
   fi
