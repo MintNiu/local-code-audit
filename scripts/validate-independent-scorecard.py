@@ -62,7 +62,9 @@ def main() -> int:
             expected_header = "\t".join(REQUIRED)
             fail(f"表头必须严格为：{expected_header}")
 
-        seen: set[tuple[str, str]] = set()
+        seen: dict[tuple[str, str], int] = {}
+        commit_identities: dict[str, tuple[str, str, int]] = {}
+        strict_commits: set[str] = set()
         status_counts: Counter[str] = Counter()
         gold = found = complete = stable = located = 0
         rows = 0
@@ -76,21 +78,36 @@ def main() -> int:
                 fail(f"第 {line_number} 行 repo 无效")
             if not HEX_RE.fullmatch(commit) or not HEX_RE.fullmatch(parent):
                 fail(f"第 {line_number} 行 commit/parent 必须是 7-64 位十六进制")
+            commit, parent = commit.lower(), parent.lower()
+            if commit in commit_identities:
+                previous_repo, previous_parent, previous_line = commit_identities[commit]
+                if repo != previous_repo:
+                    fail(f"第 {previous_line} 行与第 {line_number} 行同一 commit {commit} "
+                         f"使用不同 repo 标签：{previous_repo} / {repo}；请显式裁定仓库身份")
+                if parent != previous_parent:
+                    fail(f"第 {previous_line} 行与第 {line_number} 行同一 commit {commit} "
+                         f"存在冲突 parent：{previous_parent} / {parent}；请显式裁定父提交")
+            else:
+                commit_identities[commit] = (repo, parent, line_number)
             key = (commit, cluster)
             if key in seen:
-                fail(f"第 {line_number} 行重复 commit + feature_cluster：{commit}/{cluster}")
-            seen.add(key)
+                fail(f"第 {seen[key]} 行与第 {line_number} 行重复 commit + feature_cluster：{commit}/{cluster}")
+            seen[key] = line_number
             if not cluster or any(ch.isspace() for ch in cluster):
                 fail(f"第 {line_number} 行 feature_cluster 无效")
 
             metrics = row[4:7] + [row[9]]
             if any(not NONNEGATIVE_RE.fullmatch(value) for value in metrics):
                 fail(f"第 {line_number} 行指标必须是非负整数")
-            row_gold, row_found, _predicted, row_location = map(int, metrics)
+            row_gold, row_found, row_predicted, row_location = map(int, metrics)
             if row_found > row_gold:
                 fail(f"第 {line_number} 行 p0_p1_found 不能大于 gold_p0_p1")
+            if row_found > row_predicted:
+                fail(f"第 {line_number} 行 p0_p1_found 不能大于 predicted_candidates")
             if row_location not in (0, 1):
                 fail(f"第 {line_number} 行 location_accurate 必须为 0 或 1")
+            if row_location > row_found:
+                fail(f"第 {line_number} 行 location_accurate 不能大于 p0_p1_found")
             if row[7] not in ("true", "false") or row[8] not in ("true", "false"):
                 fail(f"第 {line_number} 行 output_complete/repeat_stable 必须为 true 或 false")
             if row[10] not in STATUSES:
@@ -101,6 +118,7 @@ def main() -> int:
             rows += 1
             status_counts[row[10]] += 1
             if row[10] == "manual-confirmed":
+                strict_commits.add(commit)
                 gold += row_gold
                 found += row_found
                 complete += row[7] == "true"
@@ -109,6 +127,8 @@ def main() -> int:
 
     recall = "n/a" if gold == 0 else f"{found * 100 / gold:.1f}%"
     print(f"rows={rows}")
+    print(f"strict_records={status_counts['manual-confirmed']}")
+    print(f"strict_unique_commits={len(strict_commits)}")
     print(f"strict_gold_p0_p1={gold}")
     print(f"strict_p0_p1_found={found}")
     print(f"strict_recall={recall}")

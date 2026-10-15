@@ -182,6 +182,12 @@ executions it stopped on a resource-ownership false positive in
 defaults. See the [tuning log](docs/tuning-process.zh-CN.md) for the failures
 and the distinction between raw model output and wrapper results.
 
+The independent scorecard also requires reconciliation: root-cause records
+were being confused with unique commits, and the audit found identity and
+count conflicts. The validator now rejects those conflicts and reports record
+and commit counts separately. Previous recall figures are not current
+acceptance evidence until the labels and run identities are reconciled.
+
 For private historical-commit evaluation, use [evals/README.md](evals/README.md) and keep the manifest, raw outputs, and labels outside this public repository.
 
 Use `evals/prepare-history-labels.sh` to create non-overwriting private TSV label templates before calculating recall and false-positive rates.

@@ -67,7 +67,9 @@ python3 scripts/prepare-reviewbench-candidates.py \
 ./evals/summarize-scorecard.sh ~/.local/share/local-review/evals/platform-api-labels/stage1-consolidated-scorecard.tsv
 ```
 
-冻结阶段一的私有 `independent-probe-results.tsv` 还应先通过独立表校验器。它把 `label_status` 作为唯一计分开关，防止把 `tuning-source` 或条件样本误算为 holdout，并同时检查 TSV 列数、提交号、重复根因、完整性和定位字段：
+冻结阶段一的私有 `independent-probe-results.tsv` 还应先通过独立表校验器。它把 `label_status` 作为唯一计分开关，防止把 `tuning-source` 或条件样本误算为 holdout，并同时检查 TSV 列数、提交号、重复根因、完整性和定位字段。同一提交的仓库标签或父提交冲突、命中数超过候选数、定位数超过命中数都会使校验失败；同一仓库/提交内不同根因可以分别保留。`strict_records` 是人工确认记录数，`strict_unique_commits` 才是按规范化提交号统计的提交数，两者不能互换。
+
+该命令校验表结构和内部一致性，不校验人工标签是否正确，也不证明当前运行配置、根因独立性或阶段一验收。不同 feature 名称仍可能描述同一根因，须核对原代码和证据后裁定，不能凭字符串相似度自动合并。
 
 ```bash
 python3 ./scripts/validate-independent-scorecard.py \
