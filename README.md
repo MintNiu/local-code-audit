@@ -175,8 +175,9 @@ or successful model generation on every call. See [evals/goal.md](evals/goal.md)
 for the independent acceptance target and current status.
 
 Latest verification (2026-10-15): the complete model-independent regression
-passed 81/81 suites, including sidecar fallback, prompt-budget coverage, and
-the native-canary collector.
+passed 82/82 local suites, including sidecar fallback, prompt-budget coverage,
+dependency diagnostics, and the native-canary collector. Remote CI is not yet
+green: its full run exposed two environment-dependent regression failures.
 The real-model five-round gate is **not passing**: after 60 successful
 executions it stopped on a resource-ownership false positive in
 `java-command-safe`. Experimental prompt variants have not replaced the

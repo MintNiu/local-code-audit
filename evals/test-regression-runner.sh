@@ -48,6 +48,12 @@ cat >"$fake_repo/evals/test-fail.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${REGRESSION_TEST_FAIL:-}" == 1 ]]; then
+  echo 'ROOT_CAUSE_FIRST' >&2
+  printf '%5000s\n' 'LONG_DIAGNOSTIC_LINE' >&2
+  for diagnostic_line in $(seq 1 20); do
+    echo "fixture detail $diagnostic_line" >&2
+  done
+  echo 'FINAL_DIAGNOSTIC_LAST' >&2
   exit 7
 fi
 EOF
@@ -89,6 +95,10 @@ assert len(locks) == 2 and len(set(locks)) == 2, locks
 failure = run("fast", "--test", "evals/test-fail.sh", fail=True)
 assert failure.returncode != 0, failure.stdout
 assert "test-fail.sh" in failure.stdout and "exit=7" in failure.stdout
+assert "ROOT_CAUSE_FIRST" in failure.stdout, failure.stdout
+assert "FINAL_DIAGNOSTIC_LAST" in failure.stdout, failure.stdout
+assert "…" in failure.stdout, failure.stdout
+assert len(failure.stdout) < 5000, len(failure.stdout)
 
 # full mode enumerates test-*.sh but excludes this self-test.
 full = run("full", "--jobs", "2")

@@ -118,12 +118,13 @@ def run_all(suites: list[Path], jobs: int) -> int:
             diagnostic = (result.stderr or result.stdout).strip()
             if diagnostic:
                 lines = diagnostic.splitlines()
-                if len(lines) > 8:
-                    lines = lines[-8:]
+                if len(lines) > 12:
+                    # A suite often prints the failure reason before a large
+                    # fixture dump. Keep that cause as well as the final lines.
+                    lines = lines[:4] + ["…"] + lines[-8:]
                 rendered = "\n  ".join(lines)
                 if len(rendered) > 4000:
-                    rendered = rendered[-4000:]
-                    rendered = "…" + rendered
+                    rendered = rendered[:1500] + "\n  …\n  " + rendered[-2400:]
                 print("  " + rendered)
     elapsed = time.monotonic() - started
     print(f"total: {elapsed:.2f}s suites={len(suites)} passed={len(suites) - failed} failed={failed}")
