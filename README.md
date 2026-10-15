@@ -31,7 +31,7 @@ If your shell cannot find the command after installation, add
 file) and open a new terminal.
 The audit boundary is authored in `bin/local-review.sh`; `scripts/sync-modelfile.sh` copies it into `config/Modelfile` for direct Ollama use. The `local-review` path additionally applies deterministic output gates. Re-run the sync script and rebuild the tuned model after changing rules that should also affect direct Ollama use.
 
-Prerequisites are a running Ollama service, the selected local model, Git, `jq`, `rg` (ripgrep), and Perl for output redaction. macOS already provides `curl`, `awk`, `tr`, `sort`, and `/usr/bin/perl`; check the required tools with `command -v ollama jq git curl awk tr sort rg perl`. On a Homebrew setup, install the missing utilities with `brew install jq ripgrep`.
+Prerequisites are a running Ollama service, the selected local model, Python 3, Git, `jq`, `rg` (ripgrep), and Perl for output redaction. macOS already provides `curl`, `awk`, `tr`, `sort`, and `/usr/bin/perl`; check the required tools with `command -v python3 ollama jq git curl awk tr sort rg perl`. On a Homebrew setup, install the missing utilities with `brew install jq ripgrep`.
 
 ## Usage
 

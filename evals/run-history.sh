@@ -489,7 +489,7 @@ while IFS=$'\t' read -r commit parent date subject status _rest; do
     for context_file in "${context_files[@]}"; do
       context_snapshot="$context_snapshot_dir/context-$context_index-${context_file##*/}"
       if ! cp "$context_file" "$context_snapshot"; then
-        echo "本次历史评测无效：无法冻结 context 文件 $context_file。" >&2
+        echo "本次历史评测无效：无法冻结 context 文件 ${context_file}。" >&2
         context_prepare_failed=true
         context_snapshot_complete=false
         break

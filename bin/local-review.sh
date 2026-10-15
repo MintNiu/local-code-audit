@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Global entry points may contain multiple (including relative) symlinks.
-# Resolve the executable before looking up its sibling Python helpers.
-script_dir="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True).parent)' "${BASH_SOURCE[0]}")"
-java_method_window_script="$script_dir/java-method-window.py"
-java_method_sidecar_script="$script_dir/java-method-sidecar.py"
-
 # Keep Chinese model-output filters in a UTF-8 locale even when the caller
 # inherited `LC_ALL=C`; macOS awk treats non-ASCII character classes as byte
 # patterns there.  Raw diff/source scanners temporarily use `LC_ALL=C` below
@@ -257,12 +251,18 @@ if [[ ! -d "$repo_dir" ]]; then
   exit 2
 fi
 
-for required_command in git ollama jq curl awk tr sort rg perl stat; do
+for required_command in python3 git ollama jq curl awk tr sort rg perl stat; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
-    echo "找不到必要命令: $required_command，请先安装并确保它在 PATH 中。" >&2
+    echo "找不到必要命令: ${required_command}，请先安装并确保它在 PATH 中。" >&2
     exit 2
   fi
 done
+
+# Resolve global symlinks only after --help and dependency validation, so a
+# missing Python installation receives the same explicit diagnostic.
+script_dir="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True).parent)' "${BASH_SOURCE[0]}")"
+java_method_window_script="$script_dir/java-method-window.py"
+java_method_sidecar_script="$script_dir/java-method-sidecar.py"
 
 repo_root="$(git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$repo_root" ]]; then
