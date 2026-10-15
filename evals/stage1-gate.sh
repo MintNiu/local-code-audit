@@ -94,7 +94,7 @@ if ! awk -F '\t' \
   {
     if (bad) next
     if (NF < required_count) { fail("第 " NR " 行列数不足"); next }
-    commit = $(column["commit"])
+    commit = tolower($(column["commit"]))
     split_name = $(column["split"])
     cluster = $(column["feature_cluster"])
     gold = $(column["gold_p0_p1"])
@@ -114,6 +114,8 @@ if ! awk -F '\t' \
     if (gold !~ /^[0-9]+$/ || found !~ /^[0-9]+$/ || candidates !~ /^[0-9]+$/ || false_positive !~ /^[0-9]+$/ || location !~ /^[0-9]+$/)
       fail("指标必须是非负整数: " commit)
     if (found + 0 > gold + 0) fail("p0_p1_found 不能大于 gold_p0_p1: " commit)
+    if (found + 0 > candidates + 0) fail("p0_p1_found 不能大于 predicted_candidates: " commit)
+    if (found + false_positive > candidates + 0) fail("命中数与误报数之和不能大于 predicted_candidates: " commit)
     if (location + 0 > found + 0) fail("location_accurate 不能大于 p0_p1_found: " commit)
     if (false_positive + 0 > candidates + 0) fail("false_positive_count 不能大于 predicted_candidates: " commit)
     if (complete != "true") fail("存在不完整运行: " commit)
