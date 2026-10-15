@@ -175,7 +175,8 @@ or successful model generation on every call. See [evals/goal.md](evals/goal.md)
 for the independent acceptance target and current status.
 
 Latest verification (2026-10-15): the complete model-independent regression
-passed 80/80 suites, including sidecar fallback and prompt-budget coverage.
+passed 81/81 suites, including sidecar fallback, prompt-budget coverage, and
+the native-canary collector.
 The real-model five-round gate is **not passing**: after 60 successful
 executions it stopped on a resource-ownership false positive in
 `java-command-safe`. Experimental prompt variants have not replaced the
@@ -187,6 +188,27 @@ were being confused with unique commits, and the audit found identity and
 count conflicts. The validator now rejects those conflicts and reports record
 and commit counts separately. Previous recall figures are not current
 acceptance evidence until the labels and run identities are reconciled.
+
+To compare native model behavior without the workflow's preflight or output
+filters, use the paired Java/Python/JavaScript development canary:
+
+```bash
+python3 scripts/run-native-canary.py \
+  --model devstral-small-2-review-tuned:latest \
+  --out-dir /private/path/new-native-canary-results
+```
+
+The model tag must already be installed and the output directory must be new
+and outside this public checkout. The tool sends only the shared contract and
+complete source diff, pins the installed model digest, and preserves every raw
+response. API completion is recorded separately from review format and manual
+semantic assessment; it is not a quality pass. These 16 original synthetic
+programs are development diagnostics, not an independent holdout. Optional
+`--thinking` values must be advertised by the local model. No model is downloaded
+and no default is changed. See [evals/README.md](evals/README.md) for the review
+procedure. If the local service cannot resolve the installed manifest by its
+digest, the read-only preflight refuses the run; it does not fall back to a
+mutable tag.
 
 For private historical-commit evaluation, use [evals/README.md](evals/README.md) and keep the manifest, raw outputs, and labels outside this public repository.
 

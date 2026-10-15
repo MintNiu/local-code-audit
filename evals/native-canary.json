@@ -1,0 +1,216 @@
+{
+  "schema_version": 1,
+  "dataset_type": "development-canary",
+  "not_holdout": true,
+  "provenance": "Original self-contained synthetic programs. No business source, credentials, model outputs, or machine-specific metadata are included.",
+  "fixtures": [
+    {
+      "id": "java-array-last/safe",
+      "group": "java-array-last",
+      "variant": "safe",
+      "source_path": "src/Main.java",
+      "contract": "输入是非空 int 数组，输出数组最后一个元素。空数组和无效整数不在本契约内。",
+      "source_code": "import java.util.Arrays;\n\npublic final class Main {\n    static int last(int[] values) {\n        return values[values.length - 1];\n    }\n\n    public static void main(String[] args) {\n        int[] values = Arrays.stream(args).mapToInt(Integer::parseInt).toArray();\n        System.out.println(last(values));\n    }\n}\n",
+      "gold": {
+        "has_defect": false,
+        "root_cause": null,
+        "primary_line": null
+      }
+    },
+    {
+      "id": "java-array-last/bug",
+      "group": "java-array-last",
+      "variant": "bug",
+      "source_path": "src/Main.java",
+      "contract": "输入是非空 int 数组，输出数组最后一个元素。空数组和无效整数不在本契约内。",
+      "source_code": "import java.util.Arrays;\n\npublic final class Main {\n    static int last(int[] values) {\n        return values[values.length];\n    }\n\n    public static void main(String[] args) {\n        int[] values = Arrays.stream(args).mapToInt(Integer::parseInt).toArray();\n        System.out.println(last(values));\n    }\n}\n",
+      "gold": {
+        "has_defect": true,
+        "root_cause": "把数组长度作为最后一个元素索引，必定越过合法上界。",
+        "primary_line": 5
+      }
+    },
+    {
+      "id": "java-string-value/safe",
+      "group": "java-string-value",
+      "variant": "safe",
+      "source_path": "src/Main.java",
+      "contract": "对两个非 null 字符串按字符内容判断相等；即使对象实例不同，只要内容相同也返回 true。输入恰为两个字符串。",
+      "source_code": "public final class Main {\n    static boolean sameValue(String left, String right) {\n        return left.equals(right);\n    }\n\n    public static void main(String[] args) {\n        System.out.println(sameValue(new String(args[0]), new String(args[1])));\n    }\n}\n",
+      "gold": {
+        "has_defect": false,
+        "root_cause": null,
+        "primary_line": null
+      }
+    },
+    {
+      "id": "java-string-value/bug",
+      "group": "java-string-value",
+      "variant": "bug",
+      "source_path": "src/Main.java",
+      "contract": "对两个非 null 字符串按字符内容判断相等；即使对象实例不同，只要内容相同也返回 true。输入恰为两个字符串。",
+      "source_code": "public final class Main {\n    static boolean sameValue(String left, String right) {\n        return left == right;\n    }\n\n    public static void main(String[] args) {\n        System.out.println(sameValue(new String(args[0]), new String(args[1])));\n    }\n}\n",
+      "gold": {
+        "has_defect": true,
+        "root_cause": "用引用身份 == 代替字符串值相等判断，两个不同实例的相同文本被误判为不相等。",
+        "primary_line": 3
+      }
+    },
+    {
+      "id": "java-comparator-overflow/safe",
+      "group": "java-comparator-overflow",
+      "variant": "safe",
+      "source_path": "src/Main.java",
+      "contract": "把所有合法 32 位有符号整数按数学数值升序输出，允许 MIN_VALUE 等边界值。",
+      "source_code": "import java.util.Arrays;\n\npublic final class Main {\n    public static void main(String[] args) {\n        Integer[] values = Arrays.stream(args).map(Integer::valueOf).toArray(Integer[]::new);\n        Arrays.sort(values, Integer::compare);\n        System.out.println(Arrays.toString(values));\n    }\n}\n",
+      "gold": {
+        "has_defect": false,
+        "root_cause": null,
+        "primary_line": null
+      }
+    },
+    {
+      "id": "java-comparator-overflow/bug",
+      "group": "java-comparator-overflow",
+      "variant": "bug",
+      "source_path": "src/Main.java",
+      "contract": "把所有合法 32 位有符号整数按数学数值升序输出，允许 MIN_VALUE 等边界值。",
+      "source_code": "import java.util.Arrays;\n\npublic final class Main {\n    public static void main(String[] args) {\n        Integer[] values = Arrays.stream(args).map(Integer::valueOf).toArray(Integer[]::new);\n        Arrays.sort(values, (left, right) -> left - right);\n        System.out.println(Arrays.toString(values));\n    }\n}\n",
+      "gold": {
+        "has_defect": true,
+        "root_cause": "比较器用 int 减法计算顺序，跨符号边界发生溢出并翻转比较符号。",
+        "primary_line": 6
+      }
+    },
+    {
+      "id": "java-long-precision/safe",
+      "group": "java-long-precision",
+      "variant": "safe",
+      "source_path": "src/Main.java",
+      "contract": "精确比较两个合法 64 位 long，分别以 -1、0、1 表示小于、等于、大于；不允许近似比较。",
+      "source_code": "public final class Main {\n    static int compareExact(long left, long right) {\n        return Long.compare(left, right);\n    }\n\n    public static void main(String[] args) {\n        System.out.println(compareExact(Long.parseLong(args[0]), Long.parseLong(args[1])));\n    }\n}\n",
+      "gold": {
+        "has_defect": false,
+        "root_cause": null,
+        "primary_line": null
+      }
+    },
+    {
+      "id": "java-long-precision/bug",
+      "group": "java-long-precision",
+      "variant": "bug",
+      "source_path": "src/Main.java",
+      "contract": "精确比较两个合法 64 位 long，分别以 -1、0、1 表示小于、等于、大于；不允许近似比较。",
+      "source_code": "public final class Main {\n    static int compareExact(long left, long right) {\n        return Double.compare((double) left, (double) right);\n    }\n\n    public static void main(String[] args) {\n        System.out.println(compareExact(Long.parseLong(args[0]), Long.parseLong(args[1])));\n    }\n}\n",
+      "gold": {
+        "has_defect": true,
+        "root_cause": "把 long 转为 double 后再比较，超过 2^53 的相邻整数可舍入到同一浮点值。",
+        "primary_line": 3
+      }
+    },
+    {
+      "id": "java-short-read/safe",
+      "group": "java-short-read",
+      "variant": "safe",
+      "source_path": "src/Main.java",
+      "contract": "完整读取给定内存流的数据并输出其 UTF-8 字节的十六进制。流已知每次 read 最多返回 2 字节。无外部文件和资源所有权要求。",
+      "source_code": "import java.io.ByteArrayInputStream;\nimport java.io.IOException;\nimport java.io.InputStream;\nimport java.nio.charset.StandardCharsets;\nimport java.util.HexFormat;\n\npublic final class Main {\n    public static void main(String[] args) throws IOException {\n        byte[] data = args[0].getBytes(StandardCharsets.UTF_8);\n        InputStream stream = new ByteArrayInputStream(data) {\n            @Override\n            public synchronized int read(byte[] target, int offset, int length) {\n                return super.read(target, offset, Math.min(length, 2));\n            }\n        };\n        byte[] buffer = stream.readNBytes(data.length);\n        System.out.println(HexFormat.of().formatHex(buffer));\n    }\n}\n",
+      "gold": {
+        "has_defect": false,
+        "root_cause": null,
+        "primary_line": null
+      }
+    },
+    {
+      "id": "java-short-read/bug",
+      "group": "java-short-read",
+      "variant": "bug",
+      "source_path": "src/Main.java",
+      "contract": "完整读取给定内存流的数据并输出其 UTF-8 字节的十六进制。流已知每次 read 最多返回 2 字节。无外部文件和资源所有权要求。",
+      "source_code": "import java.io.ByteArrayInputStream;\nimport java.io.IOException;\nimport java.io.InputStream;\nimport java.nio.charset.StandardCharsets;\nimport java.util.HexFormat;\n\npublic final class Main {\n    public static void main(String[] args) throws IOException {\n        byte[] data = args[0].getBytes(StandardCharsets.UTF_8);\n        InputStream stream = new ByteArrayInputStream(data) {\n            @Override\n            public synchronized int read(byte[] target, int offset, int length) {\n                return super.read(target, offset, Math.min(length, 2));\n            }\n        };\n        byte[] buffer = new byte[data.length];\n        stream.read(buffer);\n        System.out.println(HexFormat.of().formatHex(buffer));\n    }\n}\n",
+      "gold": {
+        "has_defect": true,
+        "root_cause": "把一次 read 当作完整读取并忽略实际字节数，输出了未填充缓冲区中的零字节。",
+        "primary_line": 17
+      }
+    },
+    {
+      "id": "python-mutable-default/safe",
+      "group": "python-mutable-default",
+      "variant": "safe",
+      "source_path": "src/main.py",
+      "contract": "未显式传 items 时，每次 append_item 都使用新的空列表。依次调用参数 1、2 后，第二次返回值必须仅包含 2。",
+      "source_code": "import json\nimport sys\n\n\ndef append_item(value, items=None):\n    if items is None:\n        items = []\n    items.append(value)\n    return items\n\n\nif __name__ == \"__main__\":\n    append_item(int(sys.argv[1]))\n    print(json.dumps(append_item(int(sys.argv[2])), separators=(\",\", \":\")))\n",
+      "gold": {
+        "has_defect": false,
+        "root_cause": null,
+        "primary_line": null
+      }
+    },
+    {
+      "id": "python-mutable-default/bug",
+      "group": "python-mutable-default",
+      "variant": "bug",
+      "source_path": "src/main.py",
+      "contract": "未显式传 items 时，每次 append_item 都使用新的空列表。依次调用参数 1、2 后，第二次返回值必须仅包含 2。",
+      "source_code": "import json\nimport sys\n\n\ndef append_item(value, items=[]):\n    items.append(value)\n    return items\n\n\nif __name__ == \"__main__\":\n    append_item(int(sys.argv[1]))\n    print(json.dumps(append_item(int(sys.argv[2])), separators=(\",\", \":\")))\n",
+      "gold": {
+        "has_defect": true,
+        "root_cause": "可变默认列表在函数定义时只创建一次，两次独立调用共享并累积上次状态。",
+        "primary_line": 5
+      }
+    },
+    {
+      "id": "python-boolean-text/safe",
+      "group": "python-boolean-text",
+      "variant": "safe",
+      "source_path": "src/main.py",
+      "contract": "把字符串 true 或 false（大小写不敏感）解析成对应布尔值，以 JSON 输出；其他字符串不在契约内。",
+      "source_code": "import json\nimport sys\n\n\ndef parse_flag(value):\n    return {\"true\": True, \"false\": False}[value.lower()]\n\n\nif __name__ == \"__main__\":\n    print(json.dumps(parse_flag(sys.argv[1])))\n",
+      "gold": {
+        "has_defect": false,
+        "root_cause": null,
+        "primary_line": null
+      }
+    },
+    {
+      "id": "python-boolean-text/bug",
+      "group": "python-boolean-text",
+      "variant": "bug",
+      "source_path": "src/main.py",
+      "contract": "把字符串 true 或 false（大小写不敏感）解析成对应布尔值，以 JSON 输出；其他字符串不在契约内。",
+      "source_code": "import json\nimport sys\n\n\ndef parse_flag(value):\n    return bool(value)\n\n\nif __name__ == \"__main__\":\n    print(json.dumps(parse_flag(sys.argv[1])))\n",
+      "gold": {
+        "has_defect": true,
+        "root_cause": "用字符串非空真值测试代替布尔文本解析，非空字符串 false 被解析为 true。",
+        "primary_line": 6
+      }
+    },
+    {
+      "id": "javascript-numeric-sort/safe",
+      "group": "javascript-numeric-sort",
+      "variant": "safe",
+      "source_path": "src/main.js",
+      "contract": "输入都是 -1000 到 1000 内的整数，按数值升序输出 JSON 数组；必须保持全部元素。",
+      "source_code": "const values = process.argv.slice(2).map(Number);\nvalues.sort((left, right) => left - right);\nconsole.log(JSON.stringify(values));\n",
+      "gold": {
+        "has_defect": false,
+        "root_cause": null,
+        "primary_line": null
+      }
+    },
+    {
+      "id": "javascript-numeric-sort/bug",
+      "group": "javascript-numeric-sort",
+      "variant": "bug",
+      "source_path": "src/main.js",
+      "contract": "输入都是 -1000 到 1000 内的整数，按数值升序输出 JSON 数组；必须保持全部元素。",
+      "source_code": "const values = process.argv.slice(2).map(Number);\nvalues.sort();\nconsole.log(JSON.stringify(values));\n",
+      "gold": {
+        "has_defect": true,
+        "root_cause": "Array.sort 未提供数字比较器，默认按字符串词典序排序，导致 10 排在 2 前。",
+        "primary_line": 2
+      }
+    }
+  ]
+}

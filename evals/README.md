@@ -2,6 +2,22 @@
 
 目标是把本地模型调成可重复、可验证的代码审计模型，而不是只追求输出更长。
 
+## 原生开发 canary
+
+`native-canary.json` 包含 8 组、16 份原创且自包含的 safe/bug 对照，Java 为主，另含 Python 和 JavaScript。每组两份程序使用完全相同的明确契约和显示路径，源代码按完整新增文件发送；组名、safe/bug 标签、gold 和运行真值都不进入请求。该集合已参与开发筛选，不是独立 holdout，不能用于宣称通用召回率达标。
+
+```bash
+python3 scripts/run-native-canary.py \
+  --model devstral-small-2-review-tuned:latest \
+  --out-dir /private/path/new-native-canary-results
+```
+
+先创建输出目录的父目录；结果目录本身必须不存在，且不能位于本公开仓库内。`--model` 必须精确匹配本地 `/api/tags` 的已安装名称；服务不能按 manifest digest 只读解析模型时拒绝运行，不会退回可变 tag。入口只访问显式 loopback Ollama，不下载模型、不改默认值、不调用 `local-review` 的确定性预检或过滤。每次固定安装 manifest digest、16K/4096、temperature=0、seed=42、top_k=40、top_p=0.9，以 seed=42 的盲序逐例执行。模型支持时可显式传 `--thinking false` 等 `/api/show` 公布的值；未传时保留模型默认值并记录这一事实。
+
+结果保留每次完整请求、原始 API JSON、原生回答、传输错误，以及 manifest 身份和实际 `/api/ps` 观察。退出 0 只表示 16 个 API 响应完整，不代表审查格式或结论正确。先逐条阅读所有原文，再分别记录格式有效性、实际根因命中、额外误报、定位和修复建议是否成立；不要把 API 的 `done=stop` 当成语义验收。遇到超时、长度截断或其他不完整响应会记为失败；连续两条不完整后停止，余下样例明确为未运行且不评分。中途人工停止的运行也只能按已有终态解释，不外推全量结果。
+
+对应无模型回归是 `bash evals/test-native-canary.sh`，使用本机受控假 HTTP 服务，不启动真实模型。
+
 ## 初始验收标准
 
 公开的合成回归入口是 `./evals/run-synthetic.sh`，目标、夹具和当前状态记录在 [goal.md](goal.md)。它用于每次调参后的快速回归，但不能替代真实历史提交评测。

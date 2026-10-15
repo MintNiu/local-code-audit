@@ -42,3 +42,5 @@ jobs:
           ./evals/test-scorecard-builder.sh
           ./evals/test-runtime-verify.sh
           ./evals/test-stage1-gate.sh
+          ./evals/test-independent-scorecard-validator.sh
+          ./evals/test-native-canary.sh
