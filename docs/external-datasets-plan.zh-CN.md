@@ -98,4 +98,6 @@ Paho 私有 smoke 还验证了输入处理边界：历史仓库包含非 UTF-8 J
 
 同日增加公开发布安全回归：tracked 文件扫描本机绝对路径、RFC1918 地址和内部 fixture 凭据；原始源码、完整 diff、模型权重和私有数据仍只允许出现在本机数据目录。当前发布树已清理这些值，但历史提交仍可能包含旧字符串；不自动重写公共历史，发现真实凭据时先轮换再单独评估历史清理方案。
 
-随后核验 VCC-Eval 的 UAA `CVE-2019-11274` Java 候选：引入提交 `929577b8c6dc83637ae044717ba573d91d01ee95` 将请求 `filter` 拼入 `ScimException`，异常处理器把消息写入 JSON `message/error_description`，修复提交使用 `HtmlUtils.htmlEscape`。真实代码仓库的 LICENSE/NOTICE 为 Apache-2.0，但 VCC metadata 的路径与当前历史路径不一致，且官方 split 是 `train`；在 parent/diff/修复映射、许可证和触发证据重新核验前，只保留为私有 tuning-source，不能称为 external-smoke 或外部金标。运行器新增窄范围 reflected-error XSS 预检和正负夹具，用于 fail-closed 保留证据，不回填冻结 scorecard。
+随后核验 VCC-Eval 的 UAA `CVE-2019-11274` Java 候选：引入提交 `929577b8c6dc83637ae044717ba573d91d01ee95` 将请求 `filter` 拼入 `ScimException`，异常处理器把消息写入 JSON `message/error_description`，修复提交使用 `HtmlUtils.htmlEscape`。真实代码仓库的 LICENSE/NOTICE 为 Apache-2.0，但 VCC metadata 的路径与当前历史路径不一致；`train` 是本地规范化器的分流，原始元数据没有官方 split 字段，不能称为官方训练划分。该候选已参与预检设计，保留为私有 tuning-source；在 parent/diff/修复映射、许可证和触发证据重新核验前，不能称为 external-smoke 或外部金标。运行器新增窄范围 reflected-error XSS 预检和正负夹具，用于 fail-closed 保留证据，不回填冻结 scorecard。
+
+2026-10-16 再核对原始 VCC-Eval 100 条记录，均没有 `split` 字段；现有 train/dev/external-smoke 来自本地 `split_for(repository, cve)` 的确定性哈希分流，也不代表曾真正训练或评测。仅在已有私有 Git 缓存范围内轻量筛查，没有发现本轮可直接进入新 smoke 的合格根因，保留一条仍需人工证明引入归因与影响的复核线索；缺 blob、无父对象、旧曝光和归因不足分别记录，不把它们混称为没有漏洞。没有下载、lazy fetch、新推理或原始标签改写，更不把未核验的 CVE 元数据计入 Platform 分母。

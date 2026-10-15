@@ -1441,3 +1441,15 @@ CI 的多文件 `bash -n` 原写法实际上只把第一个文件当脚本，其
 [`88ca8a6` 远端 CI](https://github.com/MintNiu/local-code-audit/actions/runs/38768886185) 在完整回归步骤失败；公开 check annotations 只有进程退出 1，日志下载返回 403，已登录浏览器工具也因初始化网络失败不可用。新增阶段一测试已在系统 Bash 3.2、BSD awk/sed、隔离 PATH、C/UTF-8 locale 下通过，仍没有证据认定它就是失败来源。此次先改善诊断可见性，不伪称修复了未知根因：运行器仅在真实 CI 失败时，追加套件名、退出码和既有首尾截断诊断的 error annotation，本地日志、阈值、测试集合和失败退出规则不变。
 
 原始诊断在 CI 中使用每次随机的 stop/resume token 包围，恢复命令解析后再发送 `%`、CR、LF 安全转义的摘要；依据 [GitHub 官方 workflow commands 文档](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#stopping-and-starting-workflow-commands)和 [官方 toolkit 的数据转义实现](https://github.com/actions/toolkit/blob/main/packages/core/src/command.ts)，防止故障文本伪造额外工作流命令。新增自测先复现旧实现缺少 annotation，再覆盖 stdout-only、stderr-only、无诊断、伪命令、随机 token、恢复及长度边界；自测的合成 annotation 不回显到真实 CI 日志。后续以新提交的完整远端结果继续定位，旧失败不删除。
+
+### 2026-10-16：完整回归收束与生成预算边界
+
+诊断提交 `49293e3` 在 `GITHUB_ACTIONS=true` 下的本地完整回归通过 83/83（534.18 秒），sidecar 套件 30.49 秒；同一 SHA 的[远端完整 CI](https://github.com/MintNiu/local-code-audit/actions/runs/38771203542)也返回成功，全部步骤通过。独立角色复核 CI-only 转义、防注入及退出行为，未发现明确新增问题。上一轮远端失败没有复现，根因仍未知；增加诊断可见性不能被描述成已修复某个生产缺陷。默认 tuned 运行态再次只读校验通过，SYSTEM 哈希未变，核心规则和日常默认模型没有切换。
+
+真实 Java 诊断随后只把传输时限对齐日常入口的 600 秒，原请求字节完全不变：289.096 秒返回 HTTP200，实际输入 7655 token、生成 4096 token，但 `done_reason=length`，审计正文为空。只读运行时证据确认 16K、66/66 层 GPU、约 15 token/秒，第一次请求是持续生成后被 180 秒客户端取消；重放复用了前缀缓存，没有重新加载或明显排队。服务日志的 `truncated=0` 表示输入未被截断，不能替代 API 的输出停止原因或报告完整性。
+
+为验证输入组织而非盲目加时，再从真实 parent/target 提取同一根因的两版完整方法，保持真实原文件行号并附必要原始调用链、helper、事务和历史契约。独立验证重建两版代码和上下文哈希后，单请求正文从 29953 降至 11387 字节，其余请求字段完全相同；但 281.038 秒后仍用尽 4096 生成 token，正文为空。实际输入已降至 3343 token，未接近 16K 输入上限，也未见输入截断；直接观测是输出预算耗尽，而不是已证明语义上下文充分。没有可以展示的完整模型 finding。这两次均为不完整生成，不计 clean、语义漏报或质量通过；方法级诊断不是整提交审查，也不是新独立根因。
+
+上述结果拒绝的是当前低预算贪心采样配方，不能直接外推为权重永远不可用。核对 [Qwen 官方模型说明](https://huggingface.co/Qwen/Qwen3.8-27B)与已安装 tag 的参数后发现：该模型思考模式推荐 `temperature=1.0`、`top_p=0.95`、`top_k=20`，而此前为了跨模型可重复对照，沿用了旧入口的 `0/0.9/40`。随后单独预登记官方采样组合的开发对照，仅改变这三个字段，仍是同一 digest、`think=low`、16K/4096、seed=42、同一精简 SYSTEM 和完全相同的方法级输入。原冻结配置、原始失败与金标均不改写；这只是新的参数配方，不是默认晋级或因果结论，也没有下载新模型、升到 32K、添加格式过滤器或业务特判。
+
+官方采样对照在 271.689 秒后同样以 `done_reason=length` 结束：输入 3343 token、生成 4096 token、正文 0 字节，仍不完整且语义不计分。独立角色回查实际请求与原始 Git 代码，确认只改三个采样字段，没有夹带 gold、后续修复或评审答案；新轮复用已驻留模型与 3339 个缓存输入 token，不能把墙钟差异全部归因于采样。该结果没有解决当前预算内的可用性问题，也不能证明扩大预算一定有效。暂停在这条输入上继续增加时限、上下文或重复采样，转而比较更适合本机的候选路线；默认模型与冻结配置保持不变。

@@ -182,14 +182,17 @@ passing this gate is not evidence of model-native recall, zero false positives,
 or successful model generation on every call. See [evals/goal.md](evals/goal.md)
 for the independent acceptance target and current status.
 
-Latest verification (2026-10-16): the complete model-independent regression
-passed 83/83 local suites in 466.13 seconds, including sidecar fallback,
+Latest verification (2026-10-16, `49293e3`): the complete model-independent regression
+passed 83/83 local suites in 534.18 seconds with `GITHUB_ACTIONS=true`, including sidecar fallback,
 prompt-budget coverage, dependency diagnostics, the native-canary collector,
 and 27 opt-in thinking-option scenarios. The stage-one gate now also rejects
 impossible hit/candidate counts and case-variant duplicate commit IDs; an
 additional positive test preserves legitimate unclassified candidates.
-The [remote CI run for `df496d6`](https://github.com/MintNiu/local-code-audit/actions/runs/38763536077)
-passed the complete workflow before this gate-only change. Before the opt-in thinking addition, the
+The [remote CI run for the same `49293e3` commit](https://github.com/MintNiu/local-code-audit/actions/runs/38771203542)
+also passed the complete workflow. The preceding `88ca8a6` remote failure did not
+reproduce; its cause remains unknown. CI-only safe failure annotations improve
+diagnostic visibility without changing the suite set or acceptance thresholds.
+Before the opt-in thinking addition, the
 [remote CI run for `ad9920a`](https://github.com/MintNiu/local-code-audit/actions/runs/38757857910)
 passed all 82 then-existing suites in 670.79 seconds. The earlier 80/82 remote result
 remains in the tuning log; its unresolved preflight failure must not be
