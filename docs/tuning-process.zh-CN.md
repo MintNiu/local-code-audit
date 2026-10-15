@@ -1431,3 +1431,13 @@ CI 的多文件 `bash -n` 原写法实际上只把第一个文件当脚本，其
 另完成一条真实 Kotlin 开发 smoke：只从原数据提取接口和实现的两段完整原始差异，不把 PR 评论、答案或修复说明送入请求。Qwen low 完整返回，识别出查询策略参数未进入实际选择分支的一个根因，没有额外独立误报；但 P1 影响没有证明、定位只部分重合，缓存有效性和修复兼容性也需补充前提。它是外部开发诊断，不是新 Java P0/P1 holdout，更不能回填旧请求遗漏关键文件时的漏报统计。
 
 在新 gold 审计之前，私有配置固定已安装模型 digest、`think=low`、16K/4096、原 SYSTEM/示例与个人入口预算；默认 Devstral 不变。三个角色按历史来源、Java 业务根因与安全对照分工，只读复核六个模块共 183 个 HEAD 可达、非 root、单父提交：60 个有旧推理或规则来源，123 个只是待核验候选，其中 40 个只有旧 pending/discovered 元数据，不因被枚举过就自动排除。候选数不等于 gold 数；没有证据的弱 P1、不属于该提交引入的风险和 root 初始基线不强行计入。业务源码、原始差异、模型请求与逐条结论全部留在私有目录。
+
+### 2026-10-16：真实输入覆盖与 CI 失败首因可见性
+
+冻结个人入口对一条完整历史安全变更的真实推理退出 0、API 完整、原始响应和最终输出均为 clean，耗时 81.685 秒；实际请求因既有预算保护移除了人工示例，不能声称每份请求都携带同一组示例。原仓库与私有快照的 HEAD、状态和物理 index 哈希均未改变。另一条 Java 业务开发样本先用替身传输采集输入，独立角色确认六片请求没有同时展示完整触发链，不能判为模型漏报；补齐必要原始上下文后，旧长规则的固定输入估算为 12041，超过 16K 配置下的 11264 输入预算，运行器在推理前拒绝。没有升到 32K、静默裁剪必要证据或修改业务源码。
+
+随后单独冻结已有精简原生 SYSTEM 的开发诊断，把原始差异、调用链、实际 Boolean helper 和历史契约放入同一请求；请求没有 gold、修复代码或评审答案，保守估算 10843 个输入 token。独立输入核验通过不等于质量通过：首轮在 180.011 秒传输超时，收到 0 字节，原始超时和空响应均保留，既不记 clean，也不记已确认语义漏报。该配方不是日常核心入口或独立 holdout，不能与此前八组合成 canary 的成功混成全量验收。私有采集器另有 18 项 Python 3.9 无网络测试，覆盖原文字节、参数冻结、重定向、归档安全与 Git 只读边界。
+
+[`88ca8a6` 远端 CI](https://github.com/MintNiu/local-code-audit/actions/runs/38768886185) 在完整回归步骤失败；公开 check annotations 只有进程退出 1，日志下载返回 403，已登录浏览器工具也因初始化网络失败不可用。新增阶段一测试已在系统 Bash 3.2、BSD awk/sed、隔离 PATH、C/UTF-8 locale 下通过，仍没有证据认定它就是失败来源。此次先改善诊断可见性，不伪称修复了未知根因：运行器仅在真实 CI 失败时，追加套件名、退出码和既有首尾截断诊断的 error annotation，本地日志、阈值、测试集合和失败退出规则不变。
+
+原始诊断在 CI 中使用每次随机的 stop/resume token 包围，恢复命令解析后再发送 `%`、CR、LF 安全转义的摘要；依据 [GitHub 官方 workflow commands 文档](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#stopping-and-starting-workflow-commands)和 [官方 toolkit 的数据转义实现](https://github.com/actions/toolkit/blob/main/packages/core/src/command.ts)，防止故障文本伪造额外工作流命令。新增自测先复现旧实现缺少 annotation，再覆盖 stdout-only、stderr-only、无诊断、伪命令、随机 token、恢复及长度边界；自测的合成 annotation 不回显到真实 CI 日志。后续以新提交的完整远端结果继续定位，旧失败不删除。

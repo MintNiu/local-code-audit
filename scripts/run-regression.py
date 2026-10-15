@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -100,6 +101,12 @@ def run_suite(path: Path) -> SuiteResult:
         return SuiteResult(path, time.monotonic() - started, 1, "", f"无法启动测试套件：{exc}")
 
 
+def escape_workflow_data(value: str) -> str:
+    """Encode one GitHub workflow-command message, without property fields."""
+
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def run_all(suites: list[Path], jobs: int) -> int:
     started = time.monotonic()
     results: dict[Path, SuiteResult] = {}
@@ -112,10 +119,17 @@ def run_all(suites: list[Path], jobs: int) -> int:
     failed = 0
     for suite in suites:
         result = results[suite]
+        annotation_enabled = os.environ.get("GITHUB_ACTIONS") == "true" and result.returncode != 0
+        if annotation_enabled:
+            # Diagnostics are untrusted data. Indentation alone does not stop
+            # Actions from interpreting embedded workflow commands in the log.
+            command_token = uuid.uuid4().hex
+            print(f"::stop-commands::{command_token}")
         print(f"{suite.name}: {result.elapsed:.2f}s exit={result.returncode}")
         if result.returncode != 0:
             failed += 1
             diagnostic = (result.stderr or result.stdout).strip()
+            rendered = ""
             if diagnostic:
                 lines = diagnostic.splitlines()
                 if len(lines) > 12:
@@ -126,6 +140,12 @@ def run_all(suites: list[Path], jobs: int) -> int:
                 if len(rendered) > 4000:
                     rendered = rendered[:1500] + "\n  …\n  " + rendered[-2400:]
                 print("  " + rendered)
+            if annotation_enabled:
+                print(f"::{command_token}::")
+                message = f"{suite.name}: exit={result.returncode}"
+                if rendered:
+                    message += "\n" + rendered
+                print("::error title=Regression suite failed::" + escape_workflow_data(message))
     elapsed = time.monotonic() - started
     print(f"total: {elapsed:.2f}s suites={len(suites)} passed={len(suites) - failed} failed={failed}")
     return 1 if failed else 0
