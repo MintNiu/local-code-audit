@@ -62,6 +62,20 @@ plaintext, may contain source excerpts, stay local, and are not auto-deleted.
 Treat them as private and do not commit them. Retention does not confirm a
 finding or turn a truncated/invalid response into a successful review.
 
+Workflow gates are not semantic certification: even exit code `0` does not prove
+a finding, severity, suggested repair, or absence of defects is correct.
+
+For an evidence-first review, use an existing trusted test task or a separately
+reviewed fixed probe, then pass its private text/JSON observations through the
+existing `--context /private/absolute/review-evidence.txt` option. Record the
+matching source/diff identity, exact command, relevant runtime/configuration,
+inputs, outputs and failures; verify that they still match the reviewed version.
+Keep counterevidence and complete logs private, and do not treat a few passing
+calls as universal safety. Do not run model-generated or untrusted repository
+code just to verify a claim. The command reads evidence; it does not execute it
+or automatically certify conclusions. This uses no new model, dependency or
+automatic judging stage, and does not establish a measured quality improvement.
+
 When a change deletes, renames, or changes a public API, DTO, or declarative client, the main repository review does not automatically read consumers from other repositories. First extract downstream interfaces, configuration, call sites, or tests from the Git ref matching the target change, then pass them explicitly with repeatable `--context`; otherwise the result is limited to the current repository. For historical evaluations, use `scripts/extract-context-snapshot.sh` to create a private snapshot:
 
 ```bash
