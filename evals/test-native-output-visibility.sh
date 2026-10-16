@@ -86,9 +86,12 @@ for name in ('curl', 'ollama', 'python3'):
     path = fake / name
     path.write_text('#!' + sys.executable + '\n' + fake_source)
     path.chmod(0o700)
-rg = shutil.which('rg')
-assert rg, 'rg is required to run the existing core'
-(fake / 'rg').symlink_to(Path(rg).resolve())
+# Keep the subprocess PATH closed while including caller-installed tools.
+# macOS versions differ: jq may be in /opt/homebrew/bin, not /usr/bin.
+for dependency in ('jq', 'rg'):
+    executable = shutil.which(dependency)
+    assert executable, dependency + ' is required to run the existing core'
+    (fake / dependency).symlink_to(Path(executable).resolve())
 scenarios = ['initial', 'personal', 'mixed', 'sharded', 'specialist', 'retry', 'nonzero',
              'length', 'done-false', 'unsupported', 'empty', 'invalid-json', 'wrong-type',
              'invalid-format', 'secret-controls', 'directory-file', 'symlink-dir',
@@ -152,6 +155,8 @@ def run_case(name):
     result = subprocess.run(command, env=env, cwd=repo, capture_output=True, timeout=75)
     (case / 'stderr').write_bytes(result.stderr)
     stdout, stderr = result.stdout.decode(), result.stderr.decode()
+    require((case / 'emitted.jsonl').is_file(),
+            name + ': no fake inference recorded; core exit=' + str(result.returncode), case)
     emitted = [json.loads(line) for line in (case / 'emitted.jsonl').read_text().splitlines()]
     failed = name in ('nonzero', 'length', 'done-false', 'unsupported', 'empty', 'invalid-json', 'wrong-type', 'invalid-format')
     require(result.returncode == (1 if failed else 0), name + ': return code changed', case)
