@@ -262,6 +262,7 @@ python3 scripts/prepare-juliet-java.py \
 DCL 预检要求带大括号的嵌套空判断与直接 `field = new Type(...)` 赋值；同行或下一行的大括号均按结构判断，不把相邻代码块拼成证据。工厂调用和暂不支持的语法仍交由模型审查，不直接产生本项确定性发现。快速解析回归为 `PYTHONDONTWRITEBYTECODE=1 python3 evals/test-java-dcl-scope.py`。外部安全集成套件还会在隔离目录实际安装并调用两个全局入口，覆盖相对符号链接和带空格路径。
 Java 命令注入预检单独检查变更中的 `Runtime.getRuntime().exec`/`ProcessBuilder`：只有当同一方法内的 `command`/`cmd`/`args`/`script` 变量明确来自请求参数、请求头、查询串或路径参数时才报告；常量命令和仅来自环境配置的命令保持 clean。正负回归为 `bash evals/test-java-command-injection-preflight.sh`，并已接入 `test-preflight.sh`。
 运行器还检查一个窄范围 SQL 交付升级边界：独立 delivery 脚本从旧版本的软删除父菜单列表移除 ID，但没有同时按应用、租户和角色范围恢复菜单及关系时，报告已有库升级风险；新库初始化脚本不能替代该升级证据。回归入口为 `evals/test-sql-menu-delivery-preflight.sh`。
+XXL-JOB 空令牌预检要求当前 API 方法的注解与受支持的首匹配 `/api/**` 放行规则共同提供证据，才报告条件性候选；不把健康检查的 `permitAll`、在先的认证/拒绝规则或相邻方法的注解拼成授权证据，并识别受支持的顶层空令牌拒绝保护。有效环境/Nacos 配置、必填请求头和实际网络可达性仍需独立验证，空回退本身不等于确认部署漏洞；暂不支持的安全链结构不作为放行证明。合成正负对照入口为 `bash evals/test-xxl-job-empty-token-preflight.sh`，本检查不会过滤模型原生候选。
 个人高性能入口还包含两条窄范围 ERP 履约并发预检：普通查询读取订单/明细后整行回写旧订单聚合，以及客户端明细顺序直接决定逐行更新或库存占用顺序。规则要求变更的 `SalesFulfillmentApplication` 与仓储实现同时提供代码证据，输出完整的 P1、影响、修复建议、验证方式和证据行；当可见锁/版本/CAS 保护或确定性明细排序时保持静默。这是确定性工程保护，不代表模型已经学会该模式。回归入口为 `evals/test-sales-fulfillment-preflight.sh`。
 每个模板先填写 `# verdict`（`clean` 或 `findings`）和 `# review_status`（完成后填 `complete`），再逐条标记发现；未完成或 `uncertain` 的记录不应计入汇总指标。
 

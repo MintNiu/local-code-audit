@@ -7949,7 +7949,7 @@ collect_xxl_job_empty_token_preflight() {
   # Security because the controller is expected to enforce
   # XXL-JOB-ACCESS-TOKEN itself.  If a change makes the configured token
   # default to empty, the controller's "only compare when configured" branch
-  # becomes an unauthenticated registry/callback surface.  Keep this rule
+  # may expose registry/callback operations under the stated conditions. Keep this rule
   # narrow to added application/platform-job YAML accessToken defaults and
   # require both sides of the current source contract before reporting.
   candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-xxl-empty-token-candidates.XXXXXX")"
@@ -7990,26 +7990,161 @@ collect_xxl_job_empty_token_preflight() {
   [[ -s "$candidates" ]] || { rm -f "$candidates"; return 0; }
   api_file="$source_root/xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/openapi/OpenApiController.java"
   security_file="$source_root/xxl-job-admin/src/main/java/com/bit/job/config/PlatformJobSecurityConfig.java"
-  api_method_text=""
-  security_ok=false
-  if [[ -f "$api_file" && -f "$security_file" ]] &&
-     ! path_has_symlink_component "xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/openapi/OpenApiController.java" &&
-     ! path_has_symlink_component "xxl-job-admin/src/main/java/com/bit/job/config/PlatformJobSecurityConfig.java"; then
-    api_line="$(grep -nF '@RequestMapping("/api/{uri}")' "$api_file" | head -1 | cut -d: -f1)"
-    if [[ "$api_line" =~ ^[0-9]+$ ]]; then
-      api_method_text="$(python3 "$java_method_window_script" "$api_file" "$api_line" 2>/dev/null || true)"
-    fi
+  if [[ ! -f "$api_file" || ! -f "$security_file" ]] ||
+     path_has_symlink_component "xxl-job-admin/src/main/java/com/xxl/job/admin/scheduler/openapi/OpenApiController.java" ||
+     path_has_symlink_component "xxl-job-admin/src/main/java/com/bit/job/config/PlatformJobSecurityConfig.java"; then
+    rm -f "$candidates"
+    return 0
   fi
-  if grep -Fq '"/api/**"' "$security_file" &&
-     grep -Eq 'requestMatchers[[:space:]]*\(' "$security_file" &&
-     grep -Fq '.permitAll()' "$security_file"; then
-    security_ok=true
-  fi
-  if [[ -z "$api_method_text" ||
-        -z "$(printf '%s\n' "$api_method_text" | grep -F '@XxlSso(login = false)' || true)" ||
-        -z "$(printf '%s\n' "$api_method_text" | grep -F '@RequestHeader(Const.XXL_JOB_ACCESS_TOKEN)' || true)" ||
-        -z "$(printf '%s\n' "$api_method_text" | grep -Eq 'StringTool\.isNotBlank\(XxlJobAdminBootstrap\.getInstance\(\)\.getAccessToken\(\)\)' && printf ok || true)" ||
-        "$security_ok" != true ]]; then
+  if ! python3 - "$java_method_window_script" "$api_file" "$security_file" 2>/dev/null <<'PY'
+import contextlib
+import io
+from pathlib import Path
+import re
+import runpy
+import sys
+
+helper, api_path, security_path = sys.argv[1:]
+support = runpy.run_path(helper)
+comments = support["mask_comments_only"]
+non_code = support["mask_non_code"]
+api = comments(Path(api_path).read_text(encoding="utf-8"))
+api_code = non_code(api)
+mappings = [m for m in re.finditer(r'@RequestMapping\s*\(\s*"/api/\{uri\}"\s*\)', api)
+            if api_code[m.start()] == "@"]
+if len(mappings) != 1:
+    raise SystemExit(1)
+line = api.count("\n", 0, mappings[0].start()) + 1
+window = io.StringIO()
+sys.argv = [helper, api_path, str(line), "--masked-comments"]
+with contextlib.redirect_stdout(window):
+    support["main"]()
+method = window.getvalue()
+code = non_code(method)
+token = r'XxlJobAdminBootstrap\s*\.\s*getInstance\s*\(\s*\)\s*\.\s*getAccessToken\s*\(\s*\)'
+window_mappings = [m for m in re.finditer(r'@RequestMapping\s*\(\s*"/api/\{uri\}"\s*\)', method)
+                   if code[m.start()] == "@"]
+if len(window_mappings) != 1:
+    raise SystemExit(1)
+declaration = window_mappings[0].start()
+# Legacy windows retain whole boundary lines, possibly including a class brace.
+# Start at this annotation; braces inside annotation/signature parentheses are
+# not the method body. Strings/comments are already masked for this scan.
+paren_depth = 0
+body = None
+for index in range(declaration, len(code)):
+    character = code[index]
+    if character == "(":
+        paren_depth += 1
+    elif character == ")":
+        paren_depth -= 1
+    elif character == "{" and paren_depth == 0:
+        body = index
+        break
+    elif character in ";}" and paren_depth == 0:
+        break
+    if paren_depth < 0:
+        break
+if body is None:
+    raise SystemExit(1)
+# Include this method's annotations in either order, but not a previous method
+# retained on the boundary line. Annotation-array braces are inside parentheses.
+header_start = 0
+header_parens = 0
+for index in range(declaration - 1, -1, -1):
+    character = code[index]
+    if character == ")":
+        header_parens += 1
+    elif character == "(":
+        header_parens -= 1
+    elif character in ";{}" and header_parens == 0:
+        header_start = index + 1
+        break
+    if header_parens < 0:
+        raise SystemExit(1)
+if header_parens != 0:
+    raise SystemExit(1)
+header = code[header_start:body]
+if not (re.search(r'@XxlSso\s*\(\s*login\s*=\s*false\s*\)', header)
+        and re.search(r'@RequestHeader\s*\(\s*Const\.XXL_JOB_ACCESS_TOKEN\s*\)', header)):
+    raise SystemExit(1)
+brace_depth = 1
+body_end = None
+for index in range(body + 1, len(code)):
+    brace_depth += (code[index] == "{") - (code[index] == "}")
+    if brace_depth == 0:
+        body_end = index
+        break
+if body_end is None:
+    raise SystemExit(1)
+comparison = re.compile(r'\bif\s*\(\s*StringTool\s*\.\s*isNotBlank\s*\(\s*' + token + r'\s*\)\s*&&').search(code, body + 1, body_end)
+if comparison is None:
+    raise SystemExit(1)
+# Walk only the known, flat request-validation prefix. Each recognized input
+# check terminates on failure, so any request reaching the old token comparison
+# must also encounter the subsequent top-level blank-token guard.
+constant = r'(?:"(?:[^"\\\r\n]|\\.)*"|[+-]?\d+|(?:[A-Za-z_$][\w$]*\.)*[A-Z_][A-Z_0-9]*)'
+failed_return = r'return\s+Response\s*\.\s*ofFail\s*\(\s*' + constant + r'\s*\)\s*;'
+# Bind simple String inputs to this method's signature, not fixture names.
+parameters = re.findall(r'\b(?:java\s*\.\s*lang\s*\.\s*)?String\s+([A-Za-z_$][\w$]*)\s*(?=[,)])', header)
+string_input = r'(?:' + '|'.join(re.escape(name) for name in sorted(set(parameters))) + r')' if parameters else r'(?!)'
+input_check = r'(?:!\s*"POST"\s*\.\s*equalsIgnoreCase\s*\(\s*request\s*\.\s*getMethod\s*\(\s*\)\s*\)|StringTool\s*\.\s*isBlank\s*\(\s*' + string_input + r'\s*\))'
+validation = r'\s*if\s*\(\s*' + input_check + r'\s*\)\s*(?:\{\s*' + failed_return + r'\s*\}|' + failed_return + r')'
+cursor = body + 1
+while cursor < comparison.start():
+    logging = re.match(r'\s*(?:log|logger)\s*\.\s*(?:trace|debug|info|warn|error)\s*\([^();{}]*\)\s*;', code[cursor:comparison.start()])
+    check = re.match(validation, method[cursor:comparison.start()])
+    step = logging or check
+    if step is None:
+        break
+    cursor += step.end()
+prefix = method[cursor:comparison.start()]
+blank = r'(?:StringTool\s*\.\s*isBlank\s*\(\s*' + token + r'\s*\)|!\s*StringTool\s*\.\s*isNotBlank\s*\(\s*' + token + r'\s*\))'
+guard = re.match(r'\s*if\s*\(\s*' + blank + r'\s*\)\s*', prefix)
+if guard:
+    arm = prefix[guard.end():].strip()
+    # No unknown statement, nested business call or success return is evidence
+    # of rejection; an outer if(flag) is never consumed as an input check.
+    reject = r'(?:' + failed_return + r'|throw\s+new\s+[A-Za-z_$][\w$.]*\s*\(\s*(?:' + constant + r'(?:\s*,\s*' + constant + r')*)?\s*\)\s*;)'
+    if re.fullmatch(r'(?:\{\s*' + reject + r'\s*\}|' + reject + r')', arm):
+        raise SystemExit(1)
+
+security = comments(Path(security_path).read_text(encoding="utf-8"))
+security_code = non_code(security)
+calls = list(re.finditer(r'\bauthorizeHttpRequests\s*\(', security_code))
+if len(calls) != 1 or re.search(r'\bsecurityMatchers?\s*\(', security_code):
+    raise SystemExit(1)
+# This bounded proof supports a single flat fluent lambda, not block lambdas,
+# custom matchers, multiple chains, or arbitrary Spring Security Java control flow.
+chain = re.match(r'authorizeHttpRequests\s*\(\s*([A-Za-z_$][\w$]*)\s*->\s*\1'
+                 r'((?:\s*\.\s*\w+\s*\([^()]*\))+)\s*\)', security[calls[0].start():])
+if chain is None:
+    raise SystemExit(1)
+steps = re.findall(r'\.\s*(\w+)\s*\(([^()]*)\)', chain[2])
+allowed = False
+for index in range(0, len(steps), 2):
+    if index + 1 == len(steps):
+        break
+    matcher, arguments = steps[index]
+    decision, decision_arguments = steps[index + 1]
+    if matcher != "requestMatchers" or not re.fullmatch(r'\s*"[^"\\]*"\s*(?:,\s*"[^"\\]*"\s*)*', arguments):
+        break
+    paths = re.findall(r'"([^"\\]*)"', arguments)
+    if "/api/**" in paths:
+        allowed = decision == "permitAll" and not decision_arguments.strip()
+        break
+    # Earlier broad/API-related matches take precedence; unknown wildcard
+    # prefixes cannot prove this endpoint is reached by a later permitAll.
+    if any(path == "/**" or path.startswith("/api") or
+           re.search(r'[*?{]', path.split("/", 2)[1] if path.startswith("/") else path)
+           for path in paths):
+        break
+    if decision not in {"permitAll", "authenticated", "fullyAuthenticated", "denyAll",
+                        "hasRole", "hasAnyRole", "hasAuthority", "hasAnyAuthority", "access"}:
+        break
+raise SystemExit(0 if allowed else 1)
+PY
+  then
     rm -f "$candidates"
     return 0
   fi
@@ -8017,10 +8152,10 @@ collect_xxl_job_empty_token_preflight() {
   locations="$(awk -F '\t' '{ printf "%s%s:%s", (seen++ ? ", " : ""), $1, $2 }' "$candidates")"
   IFS=$'\t' read -r first_path first_line <"$candidates"
   printf '%s\n%s\n%s\n%s\n%s\n\n' \
-    "P1 $first_path:$first_line - XXL-JOB OpenAPI 令牌允许空默认值，且 /api/** 放行后由控制器在令牌非空时才校验，形成认证 fail-open。" \
-    "影响：部署环境未提供 XXL_JOB_ACCESS_TOKEN 或网关令牌时，攻击者可携带任意或空请求头调用 registry、registryRemove、callback 等执行器管理接口，伪造注册、移除执行器或注入回调。" \
-    "修复建议：令牌缺失时启动失败或拒绝所有 /api/** 请求；不要用空默认值，生产配置必须显式提供高熵令牌，并让控制器对缺失配置采用默认拒绝。" \
-    "验证方式：分别清空环境变量、缺失请求头、发送错误令牌和发送正确令牌，确认前三者均返回拒绝且不进入 adminBiz，最后一种才成功；同时检查所有 Nacos/profile 配置没有空回退。" \
+    "P1 $first_path:$first_line - XXL-JOB OpenAPI 令牌允许空默认值，有条件风险候选：配置新增空回退，且所示 /api/** matcher 放行、控制器仅在配置令牌非空时比较；尚未认证实际部署风险。" \
+    "影响：仅当最终有效配置确为空、接口对不受信任方可达，且调用者提供所需请求头及有效请求体时，才可能伪造注册、移除执行器或注入回调；空回退不证明真实 Nacos/环境值为空，也未证明缺失请求头可绕过或接口公网可达。" \
+    "修复建议：在实际配置与部署边界核验风险；有效令牌为空时启动失败或明确拒绝执行器操作，并保持网络隔离和显式高熵令牌，不能只依靠默认值推断保护有效。" \
+    "验证方式：分别核验各 profile、Nacos 和环境覆盖后的有效配置、接口可达性；在隔离环境对空配置加已提供请求头/有效请求体、缺失请求头、错误令牌和正确令牌逐项验证实际拒绝与 adminBiz 调用情况，不把缺头绑定错误等同于空配置已受保护。" \
     "证据行：$locations" >>"$output_file"
   rm -f "$candidates"
   dedup_preflight_blocks "$output_file"
