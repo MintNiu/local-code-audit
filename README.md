@@ -44,6 +44,24 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
+Every parseable model final response is now retained **before filtering or retry**
+in a private local `final-candidates.jsonl` report, including excluded, repeated,
+unconfirmed, and incomplete candidates. The command announces its absolute path
+on stderr once per review. Read all candidate text with
+`jq -r '.final_text' /path/to/final-candidates.jsonl`; stdout remains the existing
+validated workflow result, not the complete original candidate list.
+
+Reports default to `~/.local/share/local-review/reports`. Use
+`--report-dir /private/absolute/directory` or `LOCAL_REVIEW_REPORT_DIR` to select
+another private directory (mode `0700`, report files `0600`; symlinks are refused).
+If creation, writing, or flushing fails, the complete sanitized final text falls
+back to stderr rather than disappearing. Only final text is retained, never the
+API envelope or non-final internal fields. Existing credential redaction still
+applies, but is not a guarantee that all secrets are detected: reports are
+plaintext, may contain source excerpts, stay local, and are not auto-deleted.
+Treat them as private and do not commit them. Retention does not confirm a
+finding or turn a truncated/invalid response into a successful review.
+
 When a change deletes, renames, or changes a public API, DTO, or declarative client, the main repository review does not automatically read consumers from other repositories. First extract downstream interfaces, configuration, call sites, or tests from the Git ref matching the target change, then pass them explicitly with repeatable `--context`; otherwise the result is limited to the current repository. For historical evaluations, use `scripts/extract-context-snapshot.sh` to create a private snapshot:
 
 ```bash
@@ -65,10 +83,9 @@ local-review-local --repo /path/to/repo --base origin/main
 
 `local-review-local` keeps the same evidence, security, and truncation gates. Its
 default budget is the validated 16k/4096 personal profile and
-it keeps the model resident for consecutive reviews. This is the recent,
-repeatable path with bounded latency; explicitly set `OLLAMA_REVIEW_NUM_CTX=32768`
-only for an unusually large review after accepting the higher latency and
-re-running the relevant evaluation.
+it keeps the model resident for consecutive reviews. Keep the current work at
+16K: the slower 32K route was rejected and is not being retried. For larger
+reviews, bound the relevant evidence and split the work instead.
 It keeps the validated general-purpose decoding defaults
 (`OLLAMA_REVIEW_TOP_K=40`, `OLLAMA_REVIEW_TOP_P=0.9`). For a focused,
 high-impact check you can opt into greedy decoding with
@@ -121,7 +138,7 @@ It is disabled by default. When enabled, the helper reads only current-worktree 
 
 An individual hunk that still exceeds the byte budget, or a Git combined diff (`diff --cc` / `diff --combined`), is rejected explicitly instead of being sent as an unsafe oversized prompt.
 
-The byte budget applies to collected Git diff material only. Project rules, explicit context files, README content, and the system prompt are additional context; raise `OLLAMA_REVIEW_NUM_CTX` or split the review further when those inputs are large.
+The byte budget applies to collected Git diff material only. Project rules, explicit context files, README content, and the system prompt are additional context; select the necessary complete evidence and split the review further when those inputs are large. Do not silently truncate evidence or relax the input guard.
 
 Transient Ollama transport failures are retried up to two times within the total review timeout by default. The personal high-performance wrapper uses a 2400-second total budget to accommodate many serial shards; set `OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS` explicitly for a fail-fast limit. Set `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` to disable retries or tune it for local stability. The launcher also estimates the input budget for system rules, context, and diff before sending; tune `OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` when you need a different safety margin.
 
@@ -172,6 +189,11 @@ For Git path-move semantics, run `bash evals/test-rename-evidence.sh`. It verifi
 
 The repository also runs the model-independent regression suites in GitHub Actions on macOS for every push and pull request. This catches parser, sharding, aggregation, label-migration, and runtime-verifier regressions without requiring Ollama or exposing private review data.
 
+`scripts/run-regression.py` gives each suite its own temporary private report
+directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
+responses never enter the user's persistent reports. Those fixture reports are
+removed with the suite's temporary files; ordinary review reports are retained.
+
 The synthetic gate checks 23 positive and 22 clean development fixtures five
 times each, plus explicit truncation handling. Clean fixtures reject findings;
 positive fixtures check known risk families, not every possible extra false
@@ -182,7 +204,17 @@ passing this gate is not evidence of model-native recall, zero false positives,
 or successful model generation on every call. See [evals/goal.md](evals/goal.md)
 for the independent acceptance target and current status.
 
-Latest verification (2026-10-16, `49293e3`): the complete model-independent regression
+The visibility-retention change passed all 84 then-existing model-independent
+local suites in 545.66 seconds. The subsequent synthetic stdout/stderr separation
+passed four targeted suites (17.63 seconds), including its new nine-scenario
+no-model test, history, signatures, and runner isolation. CI discovers the full
+85-suite set; these are engineering checks, not model-quality acceptance.
+Synthetic scores use only stdout, retain and show complete stderr separately,
+and automatically keep failed-run results even without `SYNTHETIC_KEEP_RESULTS=1`.
+Fake preflight reports use an isolated temporary directory; actual model reviews
+still retain their ordinary private candidate reports.
+
+Previous verification (2026-10-16, `49293e3`): the complete model-independent regression
 passed 83/83 local suites in 534.18 seconds with `GITHUB_ACTIONS=true`, including sidecar fallback,
 prompt-budget coverage, dependency diagnostics, the native-canary collector,
 and 27 opt-in thinking-option scenarios. The stage-one gate now also rejects

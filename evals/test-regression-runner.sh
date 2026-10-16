@@ -6,16 +6,37 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-regression-runner.XXXXXX")"
 trap 'rm -rf "$fixture_root"' EXIT
+mkdir -m 700 "$fixture_root/home"
+export HOME="$fixture_root/home" XDG_DATA_HOME="$fixture_root/home/data" XDG_CONFIG_HOME="$fixture_root/home/config"
+export PYTHONDONTWRITEBYTECODE=1
 
 fake_repo="$fixture_root/repo"
 mkdir -p "$fake_repo/scripts" "$fake_repo/evals" "$fixture_root/trace"
 cp "$repo_root/scripts/run-regression.py" "$fake_repo/scripts/run-regression.py"
 chmod +x "$fake_repo/scripts/run-regression.py"
 
+cat >"$fixture_root/trace/assert-isolation.sh" <<'EOF'
+[[ "${LOCAL_REVIEW_REPORT_DIR:?}" == "${TMPDIR:?}/native-reports" ]]
+[[ "$LOCAL_REVIEW_REPORT_DIR" != "${REGRESSION_TEST_INHERITED_REPORT_DIR:?}" ]]
+python3 - "$LOCAL_REVIEW_REPORT_DIR" <<'PY'
+from pathlib import Path
+import stat
+import sys
+directory = Path(sys.argv[1])
+assert directory.is_absolute() and directory.resolve() == directory
+assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+assert stat.S_IMODE(directory.parent.stat().st_mode) == 0o700
+assert not list(directory.iterdir()), 'report directory was shared or reused'
+PY
+printf 'fake final only\n' >"$LOCAL_REVIEW_REPORT_DIR/probe"
+printf '%s\n' "$LOCAL_REVIEW_REPORT_DIR" >>"$REGRESSION_TEST_TRACE/reports"
+EOF
+
 cat >"$fake_repo/evals/test-parallel-a.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 trace_dir="${REGRESSION_TEST_TRACE:?}"
+source "$trace_dir/assert-isolation.sh"
 [[ -d "${TMPDIR:?}" && -n "${OLLAMA_REVIEW_LOCK_DIR:?}" && ! -e "$OLLAMA_REVIEW_LOCK_DIR" ]]
 printf '%s\n' "$OLLAMA_REVIEW_LOCK_DIR" >>"$trace_dir/locks"
 mkdir "$OLLAMA_REVIEW_LOCK_DIR"
@@ -32,6 +53,7 @@ cat >"$fake_repo/evals/test-parallel-b.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 trace_dir="${REGRESSION_TEST_TRACE:?}"
+source "$trace_dir/assert-isolation.sh"
 [[ -d "${TMPDIR:?}" && -n "${OLLAMA_REVIEW_LOCK_DIR:?}" && ! -e "$OLLAMA_REVIEW_LOCK_DIR" ]]
 printf '%s\n' "$OLLAMA_REVIEW_LOCK_DIR" >>"$trace_dir/locks"
 mkdir "$OLLAMA_REVIEW_LOCK_DIR"
@@ -47,6 +69,7 @@ EOF
 cat >"$fake_repo/evals/test-fail.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+source "${REGRESSION_TEST_TRACE:?}/assert-isolation.sh"
 if [[ "${REGRESSION_TEST_FAIL:-}" == 1 ]]; then
   case "${REGRESSION_TEST_DIAGNOSTIC:-long}" in
     stdout)
@@ -93,6 +116,14 @@ root = Path(sys.argv[1])
 runner = root / "scripts" / "run-regression.py"
 env = os.environ.copy()
 env["REGRESSION_TEST_TRACE"] = str(Path(env["REGRESSION_TEST_TRACE"]))
+# Directly running this self-test also stays private: do not use the caller's
+# HOME or report destination even as a sentinel/negative-test target.
+private_home = Path(env["HOME"])
+inherited_reports = root.parent / "inherited-report-sentinel"
+inherited_reports.mkdir(mode=0o700)
+(inherited_reports / "untouched").write_text("not a test report\n")
+env["LOCAL_REVIEW_REPORT_DIR"] = str(inherited_reports)
+env["REGRESSION_TEST_INHERITED_REPORT_DIR"] = str(inherited_reports)
 env.pop("GITHUB_ACTIONS", None)
 env.pop("REGRESSION_TEST_FAIL", None)
 env.pop("REGRESSION_TEST_DIAGNOSTIC", None)
@@ -115,6 +146,13 @@ def run(*args, fail=False, ci=None, diagnostic=None):
     trace = Path(env["REGRESSION_TEST_TRACE"])
     (trace / f"runner-{run_count}.stdout").write_text(completed.stdout)
     (trace / f"runner-{run_count}.stderr").write_text(completed.stderr)
+    assert sorted(p.name for p in inherited_reports.iterdir()) == ["untouched"]
+    assert (inherited_reports / "untouched").read_text() == "not a test report\n"
+    assert not (private_home / ".local/share/local-review/reports").exists()
+    if (trace / "reports").exists():
+        reports = (trace / "reports").read_text().splitlines()
+        assert len(reports) == len(set(reports)), "report directory was reused across suites"
+        assert all(not Path(path).exists() for path in reports), "suite report directory escaped cleanup"
     return completed
 
 # Each suite waits for the other's marker, proving jobs=2 really overlaps.
@@ -123,6 +161,8 @@ assert parallel.returncode == 0, parallel.stderr + parallel.stdout
 assert "suites=2 passed=2 failed=0" in parallel.stdout
 locks = (Path(env["REGRESSION_TEST_TRACE"]) / "locks").read_text().splitlines()
 assert len(locks) == 2 and len(set(locks)) == 2, locks
+reports = (Path(env["REGRESSION_TEST_TRACE"]) / "reports").read_text().splitlines()
+assert len(reports) == 2 and len(set(reports)) == 2, reports
 
 # A failing suite propagates its non-zero status and remains visible.
 failure = run("fast", "--test", "evals/test-fail.sh", fail=True)

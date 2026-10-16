@@ -74,16 +74,20 @@ class SuiteResult:
 
 
 def run_suite(path: Path) -> SuiteResult:
-    """Run a suite with private TMPDIR and OLLAMA_REVIEW_LOCK_DIR."""
+    """Isolate each suite's temp files, model lock, and final-candidate reports."""
 
     started = time.monotonic()
     try:
         with tempfile.TemporaryDirectory(prefix=f"local-review-regression-{path.stem}-") as temporary:
-            temporary_path = Path(temporary)
+            temporary_path = Path(temporary).resolve()
             lock_dir = temporary_path / "ollama-review-lock"
+            report_dir = temporary_path / "native-reports"
+            report_dir.mkdir(mode=0o700)
             environment = os.environ.copy()
             environment["TMPDIR"] = str(temporary_path)
             environment["OLLAMA_REVIEW_LOCK_DIR"] = str(lock_dir)
+            # Never inherit a user's persistent destination for fake suite output.
+            environment["LOCAL_REVIEW_REPORT_DIR"] = str(report_dir)
             completed = subprocess.run(
                 ["bash", str(path)],
                 cwd=REPO_ROOT,

@@ -47,6 +47,20 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
+每次收到可解析的模型 final 正文，都会在过滤或重试前，完整保存在本地私有的
+`final-candidates.jsonl` 报告中，包括被排除、重复、未确认和不完整的候选。
+每次审查会在 stderr 公告一次绝对路径；使用
+`jq -r '.final_text' /path/to/final-candidates.jsonl` 可查看全部候选正文。
+stdout 仍是原有门禁处理后的工作流结果，不等于完整原始候选清单。
+
+报告默认保存在 `~/.local/share/local-review/reports`，可以用
+`--report-dir /private/absolute/directory` 或 `LOCAL_REVIEW_REPORT_DIR`
+指定另一个私有绝对目录（目录权限 `0700`，文件 `0600`；拒绝符号链接）。
+创建、写入或刷盘失败时，会把完整清洗后的 final 回退到 stderr，不能静默丢失。
+仅保留 final 正文，不保存 API 整包或非正文内部字段。继续使用已有凭据脱敏，
+但不承诺识别所有秘密：报告是明文，可能包含源码片段，仅留本地、不自动删除，
+请按私有数据管理，勿提交。保存候选不等于确认问题，也不会把截断或无效输出改成审查成功。
+
 如果当前提交删除、重命名或修改了对外 API、DTO 或声明式客户端，审查主仓库不会自动读取其他仓库。请先从与目标提交匹配的下游 Git ref 提取消费者接口、配置、调用方或测试文件，再逐个用 `--context` 传入（该参数可重复），否则只能得到当前仓库范围内的结论。历史评测可使用 `scripts/extract-context-snapshot.sh` 生成私有快照：
 
 ```bash
@@ -66,7 +80,7 @@ local-review-local
 local-review-local --repo /path/to/repo --base origin/main
 ```
 
-它保留证据、权限和安全检查，默认使用近期可重复验证的 16k/4096 个人高性能预算，并在连续审查时保留模型。只有在确实需要处理超大审查时才显式设置 `OLLAMA_REVIEW_NUM_CTX=32768`，并重新评估耗时与失败率；真实跨仓库大 diff 曾证明盲目增大上下文或输出预算会增加超时。仍可用同一组 `OLLAMA_REVIEW_*` 环境变量临时覆盖。`local-review` 是保守基线，`local-review-local` 提供个人本地高性能默认值；两者都可使用本机私有 few-shot 数据。
+它保留证据、权限和安全检查，默认使用近期可重复验证的 16k/4096 个人高性能预算，并在连续审查时保留模型。当前继续固定 16K，已经否定的慢速 32K 路线不再重试；大型审查优先组织必要的完整证据并拆分任务。仍可用同一组 `OLLAMA_REVIEW_*` 环境变量临时覆盖。`local-review` 是保守基线，`local-review-local` 提供个人本地高性能默认值；两者都可使用本机私有 few-shot 数据。
 
 实测同一个 clean 样例：保留模型 5 分钟时连续两次约 23 秒、4 秒；每次卸载时约 20 秒、21 秒。因此本地高性能版默认保留模型用于连续审查；更关注电量时可设置 `OLLAMA_REVIEW_KEEP_ALIVE=0`。
 
@@ -98,7 +112,7 @@ local-review --repo /path/to/repo
 
 如果单个 hunk 仍然超过字节预算，或检测到 Git combined diff（`diff --cc` / `diff --combined`），命令会明确拒绝，不会把超预算内容作为不安全的完整提示词发送给模型。
 
-字节预算只约束收集到的 Git diff；项目规则、显式上下文文件、README 和系统提示词还会额外占用上下文。它们较大时，应提高 `OLLAMA_REVIEW_NUM_CTX` 或进一步拆分审查。
+字节预算只约束收集到的 Git diff；项目规则、显式上下文文件、README 和系统提示词还会额外占用上下文。它们较大时，应选择必要的完整证据并进一步拆分审查，不静默裁掉证据或放宽输入保护。
 
 Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最多重试 2 次；个人高性能入口默认给多分片串行审查预留 2400 秒，也可显式设置 `OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS` 让它更快失败。可用 `OLLAMA_REVIEW_RETRY_ATTEMPTS=0` 关闭重试，或按本机稳定性调整。脚本还会按保守字节估算检查系统规则、上下文和 diff 的输入预算；可用 `OLLAMA_REVIEW_INPUT_RESERVE_TOKENS` 调整预留空间。
 
@@ -131,9 +145,15 @@ Ollama 请求遇到瞬时传输失败时，默认在整次审查总超时内最�
 
 仓库还会在 GitHub Actions 的 macOS 环境中，对每次 push 和 Pull Request 自动运行不依赖 Ollama 的回归套件，覆盖预检、分片、聚合、标签迁移和运行态校验；不会上传模型输出或私有审计数据。这样解析器规则变更不会等到本地再次使用时才暴露回归。
 
+`scripts/run-regression.py` 为每个套件分配独立的临时私有报告目录，覆盖继承的
+`LOCAL_REVIEW_REPORT_DIR`，不让替身模型输出进入用户的持久报告。
+夹具报告随套件临时目录清理；日常审查报告仍然保留。
+
 合成门禁对 23 个正例、22 个 clean 开发夹具各运行五轮，另验收显式截断处理。clean 夹具拒绝问题段，正例检查已知风险族，但不能排除所有额外误报；13 个安全 clean 夹具使用 512 输出预算和 greedy 解码，预签名票据夹具也使用 greedy。结果包含确定性预检、过滤及已记录的窄范围恢复路径，因此全绿不代表模型原生召回达标、零误报或每次模型生成都成功。独立验收目标和当前状态见 [evals/goal.md](evals/goal.md)。
 
-最新验证（2026-10-16，`49293e3`）：在 `GITHUB_ACTIONS=true` 下，本地完整无模型工程回归通过 83/83 个套件，耗时 534.18 秒，包含 sidecar 回退、提示预算、缺依赖诊断、原生 canary 采集器及 27 个 thinking 参数场景。阶段一门禁补齐命中/候选计数约束和大小写重复提交检查，正向余量测试保留合法的未分类候选。[同一提交的远端完整 CI](https://github.com/MintNiu/local-code-audit/actions/runs/38771203542) 也已通过。此前 `88ca8a6` 的远端失败没有复现，根因仍未知；新增 CI-only 安全失败摘要只改善诊断，不改变套件集合或验收阈值。thinking 选项加入前，[`ad9920a` 的远端 CI](https://github.com/MintNiu/local-code-audit/actions/runs/38757857910) 通过当时全部 82/82，耗时 670.79 秒。旧轮远端 80/82 保留在调优记录中；其中预检失败的首因尚未确认，不能归因于 locale 或某个生产过滤修复。真实模型五轮门禁**尚未通过**：前 60 次执行通过，随后在 `java-command-safe` 的资源所有权误报处停止。实验提示候选没有替换默认配置；失败记录及原始模型输出与包装器结果的区别见[调优过程](docs/tuning-process.zh-CN.md)。
+候选留存改动已通过当时全部 84/84 项本地无模型回归（545.66 秒）；随后 synthetic 的 stdout/stderr 分流改动通过 4/4 项针对性回归（17.63 秒），包含新增九场景无模型测试、history、finding signature 和 runner 隔离。CI 自动发现完整 85 个套件；这些是工程检查，不是模型质量验收。synthetic 只对 stdout 评分，完整 stderr 独立保留并展示；即使未设置 `SYNTHETIC_KEEP_RESULTS=1`，失败结果也会自动保留。前置替身预检使用隔离临时报告目录，真实模型阶段仍保留日常私有候选报告。
+
+此前验证（2026-10-16，`49293e3`）：在 `GITHUB_ACTIONS=true` 下，本地完整无模型工程回归通过 83/83 个套件，耗时 534.18 秒，包含 sidecar 回退、提示预算、缺依赖诊断、原生 canary 采集器及 27 个 thinking 参数场景。阶段一门禁补齐命中/候选计数约束和大小写重复提交检查，正向余量测试保留合法的未分类候选。[同一提交的远端完整 CI](https://github.com/MintNiu/local-code-audit/actions/runs/38771203542) 也已通过。此前 `88ca8a6` 的远端失败没有复现，根因仍未知；新增 CI-only 安全失败摘要只改善诊断，不改变套件集合或验收阈值。thinking 选项加入前，[`ad9920a` 的远端 CI](https://github.com/MintNiu/local-code-audit/actions/runs/38757857910) 通过当时全部 82/82，耗时 670.79 秒。旧轮远端 80/82 保留在调优记录中；其中预检失败的首因尚未确认，不能归因于 locale 或某个生产过滤修复。真实模型五轮门禁**尚未通过**：前 60 次执行通过，随后在 `java-command-safe` 的资源所有权误报处停止。实验提示候选没有替换默认配置；失败记录及原始模型输出与包装器结果的区别见[调优过程](docs/tuning-process.zh-CN.md)。
 
 独立评分表也尚待核准：复核发现根因记录数与提交数混用，以及身份、计数冲突。校验器现在拒绝这些冲突并分别报告记录数和提交数；人工标签与运行版本重新核准前，旧召回数字不作为当前验收依据。
 

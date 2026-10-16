@@ -63,6 +63,9 @@ repo_dir=""
 base_ref=""
 include_readme=false
 local_review_data_dir="${LOCAL_REVIEW_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/local-review}"
+native_report_dir="${LOCAL_REVIEW_REPORT_DIR:-$HOME/.local/share/local-review/reports}"
+native_report_file=""
+native_report_unavailable=false
 examples_file="${LOCAL_REVIEW_EXAMPLES_FILE:-$local_review_data_dir/examples.md}"
 context_files=()
 build_preflight_file=""
@@ -110,8 +113,8 @@ java_method_sidecar_max_methods="${OLLAMA_REVIEW_JAVA_METHOD_SIDECAR_MAX_METHODS
 # over-budget request before it reaches Ollama instead of allowing the model
 # to silently truncate the system rules or diff.
 input_reserve_tokens="${OLLAMA_REVIEW_INPUT_RESERVE_TOKENS:-1024}"
-# Optional evaluation-only sidecar.  The normal CLI leaves no metadata files;
-# run-history.sh sets this to record any budget-aware effective shard size.
+# Optional evaluation-only budget sidecar; run-history.sh sets this to record
+# the effective shard size. This is separate from the final-candidate report.
 resolved_chunk_bytes_file="${OLLAMA_REVIEW_RESOLVED_CHUNK_BYTES_FILE:-}"
 review_trace_file="${OLLAMA_REVIEW_TRACE_FILE:-}"
 chunk_budget_preflight_reserve_tokens=512
@@ -183,6 +186,7 @@ usage() {
   local-review --examples <file>       附加人工确认的 few-shot 示例
   local-review --context <file>        附加项目上下文文件，可重复指定
   local-review --with-readme           额外附带仓库 README.md
+  local-review --report-dir <dir>      完整脱敏 final 候选的私有绝对目录（不跟随符号链接）
 
 示例:
   local-review
@@ -191,6 +195,7 @@ usage() {
 
 默认模型优先选择本地已安装的 devstral-small-2-review-tuned，其次是 devstral-small-2-review，最后回退到 devstral-small-2。
 默认读取 ~/.local/share/local-review/examples.md 作为人工确认的 few-shot 示例。
+完整脱敏 final 候选默认保存到 ~/.local/share/local-review/reports；可用 --report-dir 或 LOCAL_REVIEW_REPORT_DIR 隔离目录。包含被排除或未确认的候选，不等于最终结论；保存失败时完整回退到 stderr。
 模型探测默认最多等待 10 秒，可用 OLLAMA_REVIEW_PROBE_TIMEOUT_SECONDS 覆盖；请求地址遵循 OLLAMA_HOST（默认 http://127.0.0.1:11434）。
 当差异超过 OLLAMA_REVIEW_MAX_DIFF_BYTES（默认 3000）时，会按文件再按 unified diff hunk 分片审查；任一分片失败，整次审查失败。
 Git 报告的未跟踪路径只接受普通文件或符号链接，默认普通文件单文件上限为 OLLAMA_REVIEW_MAX_UNTRACKED_FILE_BYTES=10485760、总 diff 上限为 OLLAMA_REVIEW_MAX_UNTRACKED_TOTAL_BYTES=52428800；已被 Git 报告的 FIFO、设备等特殊文件、过大文件或差异读取超时会 fail-closed，不会静默跳过。Git 忽略或不报告的路径不在审查范围内。符号链接只进入链接自身的 diff，不跟随目标做源码快照。
@@ -236,6 +241,11 @@ while [[ $# -gt 0 ]]; do
       include_readme=true
       shift
       ;;
+    --report-dir)
+      [[ $# -ge 2 ]] || { echo "--report-dir 需要一个绝对目录" >&2; exit 2; }
+      native_report_dir="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -267,6 +277,7 @@ done
 script_dir="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True).parent)' "${BASH_SOURCE[0]}")"
 java_method_window_script="$script_dir/java-method-window.py"
 java_method_sidecar_script="$script_dir/java-method-sidecar.py"
+native_output_report_script="$script_dir/native-output-report.py"
 
 repo_root="$(git -c core.fsmonitor=false -C "$repo_dir" rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$repo_root" ]]; then
@@ -2926,6 +2937,66 @@ check_prompt_budget() {
   fi
 }
 
+emit_safe_final_text() {
+  # Never dump the API envelope: it may contain private thinking or credentials.
+  jq -jr '.response' <"$1" | sanitize_terminal_text | redact_sensitive_text
+}
+
+has_final_text() {
+  jq -es 'length == 1 and (.[0] | type == "object" and (.response | type) == "string")' \
+    <"$1" >/dev/null 2>&1
+}
+
+emit_safe_response_diagnostic() {
+  if has_final_text "$1"; then
+    emit_safe_final_text "$1" >&2
+    printf '\n' >&2
+  else
+    echo '未取得可安全解析的 final 文本；不展示原始 API 包。' >&2
+  fi
+}
+
+capture_native_final() {
+  local response_file="$1" attempt="$2" curl_status="$3"
+  local final_file stage done reason
+  has_final_text "$response_file" || return 0
+  # Use a file rather than command substitution so trailing newlines survive.
+  if ! final_file="$(mktemp "${TMPDIR:-/tmp}/local-review-final.XXXXXX")"; then
+    echo '完整候选保存失败：以下完整脱敏 final 回退到 stderr（含已排除/未确认候选；非最终结论）：' >&2
+    emit_safe_response_diagnostic "$response_file"
+    return 0
+  fi
+  if ! emit_safe_final_text "$response_file" >"$final_file"; then
+    rm -f "$final_file"
+    echo '完整候选清洗失败：无法保证候选归档完整；以下安全文本回退到 stderr：' >&2
+    emit_safe_response_diagnostic "$response_file"
+    return 0
+  fi
+  stage="${response_file##*/}"
+  case "$stage" in
+    local-review-response.*) stage=initial ;;
+    *) stage="${stage%.response.json}" ;;
+  esac
+  done="$(jq -r 'if .done == true then "true" elif .done == false then "false" else "unknown" end' <"$response_file")"
+  reason="$(jq -r 'if .done_reason == "stop" or .done_reason == "length" then .done_reason else "unknown" end' <"$response_file")"
+  if [[ -z "$native_report_file" && "$native_report_unavailable" == false ]]; then
+    if native_report_file="$(python3 "$native_output_report_script" create "$native_report_dir" 2>/dev/null)"; then
+      printf '完整脱敏 final 候选报告：%s（含已排除/未确认候选；非最终结论）\n' "$native_report_file" >&2
+    else
+      native_report_unavailable=true
+    fi
+  fi
+  if [[ "$native_report_unavailable" == true ]] || \
+      ! python3 "$native_output_report_script" append "$native_report_file" "$stage" "$attempt" "$curl_status" "$done" "$reason" <"$final_file" 2>/dev/null; then
+    native_report_unavailable=true
+    printf '完整候选保存失败：阶段 %s 尝试 %s 的完整脱敏 final 回退到 stderr（报告可能不完整；含已排除/未确认候选；非最终结论）：\n' "$stage" "$attempt" >&2
+    cat "$final_file" >&2
+    printf '\n' >&2
+  fi
+  rm -f "$final_file"
+  return 0
+}
+
 invoke_ollama() {
   local prompt="$1"
   local response_file="$2"
@@ -3008,6 +3079,7 @@ invoke_ollama() {
         "$ollama_api_url/api/generate" \
         -H 'Content-Type: application/json' \
         --data-binary "@$request_body_file" >"$response_file" 2>"$curl_error_file"; then
+      capture_native_final "$response_file" "$attempt" 0
       if [[ -s "$curl_error_file" ]]; then
         sed -E 's/Operation timed out after [0-9]+ milliseconds/Operation timed out/g' \
           "$curl_error_file" >&2 || true
@@ -3019,6 +3091,8 @@ invoke_ollama() {
     else
       curl_status=$?
     fi
+    # Capture even a nonzero transport attempt before the next curl overwrites it.
+    capture_native_final "$response_file" "$attempt" "$curl_status"
     if (( attempt >= max_attempts )); then
       break
     fi
@@ -3052,14 +3126,14 @@ validate_response() {
   local response_text normalized_response raw_response raw_normalized done_reason cleaned_response
 
   if ! jq -e '(.response? | type) == "string" and (.response | length) > 0' >/dev/null <"$response_file"; then
-    echo "本地代码审查失败：Ollama 返回了空响应或错误响应。完整响应如下：" >&2
-    (jq . <"$response_file" 2>/dev/null || cat "$response_file") | redact_sensitive_text >&2
+    echo "本地代码审查失败：Ollama 返回了空响应或错误响应。安全 final 文本如下：" >&2
+    emit_safe_response_diagnostic "$response_file"
     return 11
   fi
 
   if ! jq -e '.done == true' >/dev/null <"$response_file"; then
-    echo "本地代码审查失败：Ollama 响应未确认 done=true，拒绝使用可能不完整的审查结果。完整响应如下：" >&2
-    (jq . <"$response_file" 2>/dev/null || cat "$response_file") | redact_sensitive_text >&2
+    echo "本地代码审查失败：Ollama 响应未确认 done=true，拒绝使用可能不完整的审查结果。安全 final 文本如下：" >&2
+    emit_safe_response_diagnostic "$response_file"
     return 10
   fi
 
@@ -3086,8 +3160,8 @@ validate_response() {
     return 10
       ;;
     *)
-      echo "本地代码审查失败：Ollama 响应的 done_reason 不受支持或缺失（${done_reason:-<empty>}），拒绝使用该结果。" >&2
-      (jq . <"$response_file" 2>/dev/null || cat "$response_file") | redact_sensitive_text >&2
+      echo "本地代码审查失败：Ollama 响应的 done_reason 不受支持或缺失，拒绝使用该结果。" >&2
+      emit_safe_response_diagnostic "$response_file"
       return 11
       ;;
   esac

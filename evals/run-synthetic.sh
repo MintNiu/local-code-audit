@@ -11,11 +11,28 @@ only_case="${SYNTHETIC_ONLY_CASE:-}"
 review_script="${SYNTHETIC_REVIEW_SCRIPT:-$repo_root/bin/local-review-local.sh}"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic.XXXXXX")"
 output_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-synthetic-results.XXXXXX")"
-if [[ "$keep_results" == "1" ]]; then
-  trap 'printf "synthetic results kept: %s\n" "$output_root" >&2; printf "synthetic fixtures kept: %s\n" "$fixture_root" >&2' EXIT
-else
-  trap 'rm -rf "$fixture_root" "$output_root"' EXIT
-fi
+fixture_root="$(cd "$fixture_root" && pwd -P)"
+output_root="$(cd "$output_root" && pwd -P)"
+preserve_failed_results=false
+cleanup_synthetic() {
+  if [[ "$keep_results" == "1" ]]; then
+    printf 'synthetic results kept: %s\nsynthetic fixtures kept: %s\n' "$output_root" "$fixture_root" >&2
+  elif [[ "$preserve_failed_results" == true ]]; then
+    printf 'synthetic failed results kept: %s\n' "$output_root" >&2
+    rm -rf "$fixture_root"
+  else
+    rm -rf "$fixture_root" "$output_root"
+  fi
+}
+trap cleanup_synthetic EXIT
+
+emit_synthetic_diagnostics() {
+  [[ -s "$1" ]] || return 0
+  printf 'synthetic stderr: %s (successful temporary logs are removed unless SYNTHETIC_KEEP_RESULTS=1)\n' "$1" >&2
+  # Preserve every diagnostic/fallback candidate for the user, but never mix
+  # it into stdout-based quality checks or repeatability signatures.
+  cat "$1" >&2
+}
 
 if [[ ! "$runs" =~ ^[1-9][0-9]*$ ]]; then
   echo "SYNTHETIC_REVIEW_RUNS 必须是正整数。" >&2
@@ -35,10 +52,13 @@ fi
 # The model gate cannot prove that deterministic wrapper rules still run. Run
 # the hermetic no-model preflight regression first so a broken known-pattern
 # detector fails the same synthetic command instead of silently lowering recall.
-if ! "$repo_root/evals/test-preflight.sh" >/dev/null; then
+preflight_report_dir="$(mktemp -d "$fixture_root/preflight-reports.XXXXXX")"
+if ! LOCAL_REVIEW_REPORT_DIR="$preflight_report_dir" "$repo_root/evals/test-preflight.sh" >/dev/null; then
+  rm -rf "$preflight_report_dir"
   echo "确定性预检回归失败；未发送模型请求。" >&2
   exit 1
 fi
+rm -rf "$preflight_report_dir"
 
 prepare_fixture() {
   local name="$1"
@@ -85,17 +105,19 @@ run_review() {
 
   for run in $(seq 1 "$runs"); do
     local output_file="$output_dir/run-$run.txt"
+    local stderr_file="$output_dir/run-$run.stderr.log"
     local start
     local end
     local exit_code=0
 
     start="$(date +%s)"
+    preserve_failed_results=true
     if [[ "$expected_findings" == "presigned" ]]; then
       OLLAMA_REVIEW_MODEL="$model" \
       OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
       OLLAMA_REVIEW_TOP_K="${PRESIGNED_REVIEW_TOP_K:-1}" \
       OLLAMA_REVIEW_TOP_P="${PRESIGNED_REVIEW_TOP_P:-1}" \
-        "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+        "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>"$stderr_file" || exit_code=$?
     elif [[ "$name" == "java-sql-injection-safe" || "$name" == "java-xxe-safe" || "$name" == "java-idor-safe" || "$name" == "java-open-redirect-safe" || "$name" == "java-cors-safe" || "$name" == "java-weak-password-hash-safe" || "$name" == "java-fail-open-safe" || "$name" == "java-check-then-act-safe" || "$name" == "java-partial-side-effect-safe" || "$name" == "java-mybatis-raw-substitution-safe" || "$name" == "java-url-prefix-whitelist-safe" || "$name" == "java-authorization-annotation-safe" || "$name" == "java-path-safe" ]]; then
       # These new clean security boundaries need only the canonical marker.
       # Limit optional prose so a local model cannot spend the whole timeout
@@ -106,13 +128,14 @@ run_review() {
       OLLAMA_REVIEW_NUM_PREDICT="${SYNTHETIC_SECURITY_CLEAN_NUM_PREDICT:-512}" \
       OLLAMA_REVIEW_TOP_K="${SYNTHETIC_SECURITY_CLEAN_TOP_K:-1}" \
       OLLAMA_REVIEW_TOP_P="${SYNTHETIC_SECURITY_CLEAN_TOP_P:-1}" \
-        "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+        "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>"$stderr_file" || exit_code=$?
     else
       OLLAMA_REVIEW_MODEL="$model" \
       OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
-      "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>&1 || exit_code=$?
+      "$review_script" --repo "$fixture_root/$name" >"$output_file" 2>"$stderr_file" || exit_code=$?
     fi
     end="$(date +%s)"
+    emit_synthetic_diagnostics "$stderr_file"
 
     if [[ "$exit_code" -ne 0 ]]; then
       echo "$name run $run failed with exit $exit_code: $output_file" >&2
@@ -412,6 +435,7 @@ run_review() {
 
     printf '%s run=%s exit=%s elapsed=%ss finding_signature_sha256=%s\n' \
       "$name" "$run" "$exit_code" "$((end - start))" "$stable_output_hash"
+    preserve_failed_results=false
   done
 }
 
@@ -467,16 +491,20 @@ if [[ -n "$only_case" ]]; then
 fi
 
 truncation_output="$output_root/truncation.txt"
+truncation_stderr="$output_root/truncation.stderr.log"
 truncation_exit=0
+preserve_failed_results=true
 OLLAMA_REVIEW_MODEL="$model" \
 OLLAMA_REVIEW_TIMEOUT_SECONDS="$timeout_seconds" \
 OLLAMA_REVIEW_NUM_PREDICT=1 \
-  "$review_script" --repo "$fixture_root/java-divide" >"$truncation_output" 2>&1 || truncation_exit=$?
+  "$review_script" --repo "$fixture_root/java-divide" >"$truncation_output" 2>"$truncation_stderr" || truncation_exit=$?
+emit_synthetic_diagnostics "$truncation_stderr"
 
-if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output"; then
+if [[ "$truncation_exit" -eq 0 ]] || ! grep -q '截断' "$truncation_output" "$truncation_stderr"; then
   echo "截断故障路径未按预期失败：$truncation_output" >&2
   sed -n '1,160p' "$truncation_output" >&2
   exit 1
 fi
+preserve_failed_results=false
 
 echo "synthetic evaluation passed: positives=$((runs * 23)), divide=$runs, security_url=$runs, security_query=$runs, tenant=$runs, security_ssrf=$runs, path_traversal=$runs, command_injection=$runs, unsafe_deserialization=$runs, sql_injection=$runs, xxe=$runs, idor=$runs, open_redirect=$runs, cors=$runs, weak_password_hash=$runs, fail_open=$runs, check_then_act=$runs, partial_side_effect=$runs, mybatis_raw_substitution=$runs, url_prefix_whitelist=$runs, authorization_annotation=$runs, clean=$((runs * 22)), migration=$runs, secret=$runs, presigned=$runs, truncation=explicit-failure"
