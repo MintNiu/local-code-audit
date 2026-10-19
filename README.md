@@ -243,7 +243,19 @@ The preceding token-guard fix passed 8/8 targeted cases and 87/87 suites in
 guard passed 10/10 targeted cases and 86/86 suites in 550.18 seconds, correcting
 four reproduced deterministic false positives.
 
-Latest native diagnostic (2026-10-19): a complete-material typed-framing A/B
+Latest native diagnostic (2026-10-19): a combined JSON result-protocol candidate
+retained complete materials and the existing model with 16K/4096. All four
+development inputs fit the conservative byte estimate, including the full
+added API schema cost; the tightest margin was only nine estimated tokens.
+The first correct Java implementation completed in 47.114 seconds with valid
+JSON, but falsely reported a P1 broken import and proposed replacing that
+import with the identical text. The exact source had already compiled.
+The safe-case gate closed the remaining three slots unattempted and unscored.
+Every received candidate remains private and unfiltered. The candidate was
+not adopted; recall, stability and causal speed or quality effects are not
+established. See the [tuning record](docs/tuning-process.zh-CN.md).
+
+Earlier native diagnostic (2026-10-19): a complete-material typed-framing A/B
 comparison was prepared, but the first original-format safe Java request hit
 the 4,096-output-token limit after 332.301 seconds. It falsely alleged broken
 imports and missing JDK dependencies, repeating the latter paragraph 29 times.
