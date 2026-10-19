@@ -249,6 +249,17 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
+Latest native example comparison (2026-10-19): four complete input/output
+references replaced only the original examples, keeping the full daily SYSTEM,
+the same correct Java source and contract, and 16K/4096. Both calls completed
+with matching identity. The baseline produced six unsupported P1 paragraphs;
+the candidate produced one false P2 and one harmless informational paragraph.
+The candidate still failed the correct-code gate, so the remaining six calls
+were not attempted or scored and no defaults were changed. All eight raw
+paragraphs remain privately visible. Fewer paragraphs do not establish lower
+general false positives, recall, stability or speedup; no model was downloaded
+or trained. See the [process record](docs/tuning-process.zh-CN.md).
+
 Latest local lock-preflight correction (2026-10-19): a narrowly recognized
 `finally` call to a same-class private leaf that releases the identical final
 standard lock no longer receives a method-local missing-release candidate.
