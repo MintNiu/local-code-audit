@@ -243,7 +243,17 @@ The preceding token-guard fix passed 8/8 targeted cases and 87/87 suites in
 guard passed 10/10 targeted cases and 86/86 suites in 550.18 seconds, correcting
 four reproduced deterministic false positives.
 
-Latest native development screen (2026-10-19): a candidate consolidated duplicate
+Latest native diagnostic (2026-10-19): a complete-material typed-framing A/B
+comparison was prepared, but the first original-format safe Java request hit
+the 4,096-output-token limit after 332.301 seconds. It falsely alleged broken
+imports and missing JDK dependencies, repeating the latter paragraph 29 times.
+The exact target had already compiled with the existing JDK. The pre-registered
+stop rule closed the other seven slots before any typed request or defect
+control ran. Every received final byte remains private and unfiltered;
+treatment effectiveness, recall and stability are unmeasured. No defaults or
+weights changed. See the [tuning record](docs/tuning-process.zh-CN.md).
+
+Earlier native development screen (2026-10-19): a candidate consolidated duplicate
 output instructions, saving 585 SYSTEM bytes while retaining all other rules,
 examples, source and contracts. Four frozen Java/Python requests completed with
 the expected model identity and 16K runtime. Both correct implementations were
