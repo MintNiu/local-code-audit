@@ -6,6 +6,7 @@ fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-java-token-header.XXXXXX
 fake_bin="$fixture_root/bin"
 repo="$fixture_root/repo"
 trap 'rm -rf "$fixture_root"' EXIT
+export LOCAL_REVIEW_TEST_ENVELOPE="$fixture_root/response.json"
 mkdir -p "$fake_bin" "$repo/src"
 
 cat >"$fake_bin/ollama" <<'EOF'
@@ -14,7 +15,7 @@ exit 0
 EOF
 cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '{"response":"P1 src/TokenProxy.java:12-15 - 将请求参数 token 直接放入 HTTP header X-Token，可能泄漏。\\n影响：如果 header 被日志、持久化或外部边界记录，会导致凭据泄漏。\\n修复建议：改用安全认证通道。\\n验证方式：检查日志和请求边界。","done":true,"done_reason":"stop"}\n'
+printf '{"response":"P1 src/TokenProxy.java:12-15 - 将请求参数 token 直接放入 HTTP header X-Token，可能泄漏。\\n影响：如果 header 被日志、持久化或外部边界记录，会导致凭据泄漏。\\n修复建议：改用安全认证通道。\\n验证方式：检查日志和请求边界。","done":true,"done_reason":"stop"}\n' | tee "$LOCAL_REVIEW_TEST_ENVELOPE"
 EOF
 chmod +x "$fake_bin/ollama" "$fake_bin/curl"
 
@@ -51,9 +52,12 @@ review() {
     "$repo_root/bin/local-review.sh" --repo "$repo"
 }
 
+# The internal-only response is unsupported advice, not factual gold.
+# Its valid structure/location still requires complete retention.
 safe_output="$(review)"
-printf '%s\n' "$safe_output" | grep -Fx '未发现阻塞问题' >/dev/null || {
-  echo 'internal header-only token safe boundary was not filtered' >&2
+expected_output="$(jq -r '.response' "$LOCAL_REVIEW_TEST_ENVELOPE")"
+[[ "$safe_output" == "$expected_output" ]] || {
+  echo 'internal header-only token candidate was changed or hidden' >&2
   printf '%s\n' "$safe_output" >&2
   exit 1
 }
@@ -62,8 +66,9 @@ git -C "$repo" add src/TokenProxy.java
 git -C "$repo" commit -qm safe
 sed -i '' 's#https://internal.example/data#https://api.example.com/data#' "$repo/src/TokenProxy.java"
 external_output="$(review)"
-printf '%s\n' "$external_output" | grep -F 'P1 src/TokenProxy.java:12-15' >/dev/null || {
-  echo 'external token header finding was incorrectly filtered' >&2
+expected_output="$(jq -r '.response' "$LOCAL_REVIEW_TEST_ENVELOPE")"
+[[ "$external_output" == "$expected_output" ]] || {
+  echo 'external token header candidate was changed or hidden' >&2
   printf '%s\n' "$external_output" >&2
   exit 1
 }

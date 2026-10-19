@@ -121,7 +121,6 @@ chunk_budget_preflight_reserve_tokens=512
 resolved_budget_mode=shard
 active_request_body_file=""
 active_request_error_file=""
-current_evidence_file=""
 ollama_lock_dir="${OLLAMA_REVIEW_LOCK_DIR:-${TMPDIR:-/tmp}/local-review-ollama.lock}"
 ollama_lock_acquired=false
 
@@ -712,547 +711,6 @@ has_unsafe_line_path_chars() {
   [[ "$path_value" == *$'\n'* || "$path_value" == *$'\r'* ]]
 }
 
-filter_unsupported_shard_findings() {
-  # A shard is intentionally incomplete. Drop only findings whose stated
-  # reason is that incompleteness itself, rather than hiding any finding with
-  # concrete code evidence. This is a deterministic guard for a recurrent
-  # model failure mode ("please provide the complete file").
-  local symlink_paths_file candidate_path filter_status
-  symlink_paths_file="$(mktemp "${TMPDIR:-/tmp}/local-review-symlink-paths.XXXXXX")"
-  if [[ -f "${changed_paths_file:-}" ]]; then
-    while IFS= read -r candidate_path; do
-      [[ -n "$candidate_path" ]] || continue
-      path_has_symlink_component "$candidate_path" || continue
-      printf '%s\n' "$candidate_path"
-    done <"$changed_paths_file" >"$symlink_paths_file"
-  fi
-  LC_ALL=C sort -u -o "$symlink_paths_file" "$symlink_paths_file"
-  if awk -v evidence_file="$current_evidence_file" -v repo_root="$repo_root" -v symlink_file="$symlink_paths_file" '
-    BEGIN {
-      if (evidence_file != "") {
-        evidence_path = ""
-        while ((getline line < evidence_file) > 0) {
-          if (line ~ /^diff --git /) {
-            evidence_path = ""
-            continue
-          }
-          if (line ~ /^\+\+\+ b\//) {
-            evidence_path = substr(line, 7)
-            sub(/[[:space:]]+$/, "", evidence_path)
-            continue
-          }
-          if (evidence_path != "") evidence_by_path[evidence_path] = evidence_by_path[evidence_path] line "\n"
-        }
-        close(evidence_file)
-      }
-      if (symlink_file != "") {
-        while ((getline line < symlink_file) > 0) {
-          if (line != "") symlink_by_path[line] = 1
-        }
-        close(symlink_file)
-      }
-    }
-    function finding_path(text,    header) {
-      header = text
-      sub(/[\r\n].*$/, "", header)
-      sub(/^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/, "", header)
-      sub(/[[:space:]]+-.*$/, "", header)
-      # Model locations may contain comma-separated ranges such as
-      # `config.yml:26-29,37-40,47-50`; remove the complete location suffix so
-      # evidence lookup still reaches the repository-relative path.
-      sub(/:[0-9][0-9, -]*$/, "", header)
-      sub(/^[.][\/]/, "", header)
-      sub(/^a[\/]/, "", header)
-      sub(/^b[\/]/, "", header)
-      return header
-    }
-    function incomplete_only_finding(text,    line_count, lines, first, description, i) {
-      line_count = split(text, lines, "\n")
-      first = lines[1]
-      sub(/^.* -[[:space:]]*/, "", first)
-      if (first !~ /^(文件内容不完整，缺少类声明和字段定义，导致无法验证代码逻辑是否正确|代码片段[^。！？\n]*缺少上下文|提供完整的文件内容)[。.!！]?$/) return 0
-      for (i = 2; i <= line_count; i++) {
-        line = lines[i]
-        if (line == "") continue
-        if (line !~ /^(影响|修复建议|验证方式)[：:][[:space:]]*(无法确定代码是否符合项目规则|提供完整的文件内容|补充完整文件内容|请提供完整代码)[。.!！]?$/) return 0
-      }
-      return 1
-    }
-    function fail_closed_config_only(text, evidence, path) {
-      # Removing an insecure configuration fallback and requiring an explicit
-      # environment variable is intentional fail-closed behavior. Models
-      # often turn the absence of that variable into a speculative startup or
-      # connectivity P1. Filter only this narrow shape when the diff visibly
-      # adds an un-defaulted `${ENV_NAME}` placeholder; concrete security,
-      # tenancy, compatibility, migration, or concurrency claims remain.
-      if (path !~ /\.(ya?ml|properties|conf|ini|env|toml|json)$/) return 0
-      if (text !~ /默认值|默认凭据/ || text !~ /移除|删除|取消/) return 0
-      if (text !~ /环境变量|未配置|缺少|无法启动|无法连接/) return 0
-      if (text ~ /硬编码|明文|泄漏|公开|弱密码|默认密码|URL|URI|查询参数|租户|越权|权限|SSRF|注入|迁移|并发|竞态|重放/) return 0
-      if (evidence !~ /\+[^\n]*\$\{[A-Za-z_][A-Za-z0-9_]*\}/) return 0
-      return 1
-    }
-    function safe_credential_replacement_only(text, evidence, path,    lines, line_count, i, current_secret, current_placeholder) {
-      # A model may still format a fully resolved security fix as a P1 while
-      # saying the old credential is already gone.  Remove only that
-      # self-contradictory paragraph when the current diff proves every
-      # credential property now uses a placeholder and no current/context line
-      # retains a literal value.  Independent findings in the same paragraph
-      # are preserved by requiring explicit clean/no-fix wording and rejecting
-      # continuation cues such as "仍在" or "另外".
-      if (path !~ /\.(ya?ml|properties|conf|ini|env|toml|json)$/) return 0
-      if (text !~ /旧.*(凭据|密钥|令牌)|凭据.*(已从文件中|已被|已经).*(移除|删除)|当前状态.*(移除|删除)/) return 0
-      if (text !~ /无需.*修复|不构成.*问题|保持[[:space:]]*clean|已修复/) return 0
-      if (text ~ /仍在|依然|依旧|但是|然而|同时|另外|此外|其它|其他|另一个/) return 0
-      current_secret = 0
-      current_placeholder = 0
-      line_count = split(evidence, lines, "\n")
-      for (i = 1; i <= line_count; i++) {
-        line = lines[i]
-        if (line ~ /^\+\+\+/ || line ~ /^-/) continue
-        if (line ~ /(^|[[:space:]-])(access[-_ ]?key|secret|password|passwd|token)([-_ ]?(id|key|secret))?[[:space:]]*[:=]/) {
-          if (line ~ /\$\{[A-Za-z_][A-Za-z0-9_]*\}/) current_placeholder = 1
-          else current_secret = 1
-        }
-      }
-      return (current_placeholder && !current_secret)
-    }
-    function generic_standard_library_info(text) {
-      # Informational prose such as "java.net.http is a standard library and
-      # needs no extra dependency" is not a defect or an actionable review
-      # result. Models may emit it nondeterministically; dropping only this
-      # narrow shape keeps repeated reviews stable without hiding a concrete
-      # compatibility or build claim.
-      if (text !~ /^[[:space:]]*信息[[:space:]:：]+/) return 0
-      if (text !~ /标准库|标准组件|无需额外依赖|不需要额外依赖/) return 0
-      if (text ~ /缺少|冲突|不兼容|编译失败|构建失败|依赖版本|风险|问题/) return 0
-      return 1
-    }
-    function safe_negative_info(text) {
-      # The model occasionally explains why an internal header-only token
-      # transport is safe as an `信息` paragraph.  That is not a finding and
-      # violates the clean-output contract, but only this explicit negative
-      # shape is removable; concrete leakage, tenancy, permission, or other
-      # risk wording remains visible.
-      if (text !~ /^[[:space:]]*信息[[:space:]:：]/) return 0
-      if (text !~ /安全负例|安全边界负例|安全边界规则|符合安全负例/) return 0
-      if (text !~ /无需修复|不构成问题/) return 0
-      if (text !~ /没有证据|未见|没有.*(日志|外部|持久化)/) return 0
-      if (text ~ /仍.*(泄漏|越权|风险|问题)|同时.*(泄漏|越权|风险|问题)|但是|然而/) return 0
-      return 1
-    }
-    function safe_internal_header_token_only(text, evidence, path,    lower_evidence, lower_text, contradiction_text) {
-      # A narrow contradiction guard for the recurrent false positive where
-      # the model treats any method parameter named `token` as request input.
-      # It is safe to remove only a conditional/logging-based leak claim when
-      # the visible source proves an internal literal URI and sends the token
-      # through a header, with no URL, persistence, logging, redirect, or
-      # external-boundary evidence. Direct evidence remains visible.
-      if (path !~ /\.java$/) return 0
-      lower_text = tolower(text)
-      if (lower_text !~ /token|令牌|凭据/) return 0
-      if (lower_text !~ /header|请求头|http/) return 0
-      if (lower_text !~ /日志|持久化|外部边界|代理|记录/) return 0
-      if (lower_text !~ /可能|如果|若|假如/) return 0
-      # The model often lists “没有……禁止该 header 的契约” as part of the
-      # same unsupported conditional sentence. Remove that negated clause
-      # before checking for a real contract conflict; a direct “契约禁止”
-      # statement must remain visible.
-      contradiction_text = lower_text
-      gsub(/没有[^。！？\n]*(契约|禁止)/, "", contradiction_text)
-      if (contradiction_text ~ /契约|禁止|公网|公开|跨边界|未授权|外部请求|external[[:space:]]+(uri|url|request)/) return 0
-      if (lower_text ~ /直接[[:space:]]*(写入|记录|进入)|已[[:space:]]*(写入|记录)|明确.*(日志|持久化|外部边界)/) return 0
-      lower_evidence = tolower(evidence)
-      if (lower_evidence !~ /[.]header[[:space:]]*\([^)]*"[^"]*(token|authorization)[^"]*"[[:space:]]*,[[:space:]]*token[[:space:]]*\)/) return 0
-      if (lower_evidence !~ /uri[.]create[[:space:]]*\([[:space:]]*"https?:\/\/(internal[.:\/]|localhost[:\/]|127[.]0[.]0[.]1[:\/]|0[.]0[.]0[.]0[:\/]|\[::1\][:\/]|[^"\/]+[.](internal|intranet|svc)([:\/]|"))/) return 0
-      if (lower_evidence ~ /getparameter|query|path[[:space:]]*\(|redirect|logger|log[.]|printstacktrace|persist|save[[:space:]]*\(|insert|update[[:space:]]*\(|external|public[[:space:]]+(uri|url)/) return 0
-      return 1
-    }
-    function non_finding_doc_summary(text) {
-      # A model may turn a documentation-only synchronization note into a
-      # fully formatted information block.  It is not an actionable finding:
-      # drop only an explicit positive/no-fix summary and keep any concrete
-      # mismatch, compatibility, build, or security claim visible.
-      if (text !~ /^[[:space:]]*信息[[:space:]:：]/) return 0
-      if (text !~ /文档|README|Javadoc/) return 0
-      if (text !~ /一致|实现正确|无需.*修复|符合.*契约/) return 0
-      if (text ~ /不一致|冲突|缺少|矛盾|兼容|构建|风险|问题|错误|不匹配|过时|漏洞/) return 0
-      return 1
-    }
-    function username_only_credential_default(text, evidence, path,    header, line_number, source_path, source_line, cursor, target_line) {
-      # A username such as `nacos` is an identifier, not a secret by itself.
-      # Models sometimes report a generic hardcoded-credential finding for a
-      # username placeholder next to a real password default.  Inspect only
-      # the exact changed source line; keep password/token/secret findings and
-      # any independent security claim visible.
-      if (path !~ /\.(ya?ml|properties|conf|ini|env|toml|json)$/) return 0
-      if (evidence == "" || path in symlink_by_path ||
-          path ~ /(^|\/)\.\.($|\/)/ || path ~ /^\// || path ~ /^[A-Za-z]:/) return 0
-      if (text !~ /配置文件新增了疑似硬编码凭据|硬编码凭据/) return 0
-      if (text ~ /密码|password|passwd|token|secret|AccessKey|access[-_]?key|api[-_]?key|权限|租户|越权|SSRF|SQL[[:space:]]*注入/) return 0
-      header = text
-      sub(/[\r\n].*$/, "", header)
-      if (header !~ /:[0-9]+([[:space:]]|$)/) return 0
-      sub(/^.*:/, "", header)
-      sub(/[[:space:]]+-.*$/, "", header)
-      line_number = header + 0
-      if (line_number <= 0 || repo_root == "") return 0
-      source_path = repo_root "/" path
-      cursor = 0
-      target_line = ""
-      while ((getline source_line < source_path) > 0) {
-        cursor++
-        if (cursor == line_number) target_line = source_line
-      }
-      close(source_path)
-      if (target_line == "") return 0
-      target_line = tolower(target_line)
-      if (target_line !~ /(^|[.[:space:]_"-])username([.[:space:]_:"-]|=)/) return 0
-      return target_line ~ /\$\{[a-z_][a-z0-9_]*:(nacos|admin|root)\}/
-    }
-    function correlated_tenant_guard(text, evidence, path,    header, location, start_line, end_line, lines, line_count, i, window) {
-      # A correlated EXISTS/subquery that compares the inner and outer
-      # tenant_id is direct evidence of tenant scoping.  Do not let the model
-      # report a generic "missing tenant isolation" finding for that shape;
-      # keep concrete alias mismatches, permission, SQL-injection, and other
-      # independent claims visible.
-      if (text !~ /租户|tenant|Tenant|TENANT/) return 0
-      if (text !~ /缺少|未.*限制|未.*校验|没有.*租户|隔离/) return 0
-      if (text ~ /错误|不一致|不匹配|绕过|越权.*已发生|SQL[[:space:]]*注入|权限/) return 0
-      # Use the current source snapshot and only the reported line window.
-      # Path-wide diff evidence is unsafe here: a deleted tenant predicate or
-      # a different SELECT in the same mapper must not prove this finding
-      # false.  The snapshot is loaded only for a real changed, non-symlink
-      # path by flush() below.
-      if (path == "" || !(path in full_evidence)) return 0
-      header = text
-      sub(/[\r\n].*$/, "", header)
-      if (match(header, /:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?/)) {
-        location = substr(header, RSTART, RLENGTH)
-        sub(/^:/, "", location)
-        start_line = location + 0
-        end_line = start_line
-        if (location ~ /-/) {
-          sub(/^.*-/, "", location)
-          end_line = location + 0
-        }
-      }
-      if (start_line <= 0) return 0
-      if (end_line < start_line) end_line = start_line
-      line_count = split(full_evidence[path], lines, "\n")
-      for (i = start_line - 4; i <= end_line + 4; i++) {
-        if (i < 1 || i > line_count) continue
-        window = window lines[i] "\n"
-      }
-      if (window !~ /EXISTS|子查询/) return 0
-      if (window !~ /[A-Za-z_][A-Za-z0-9_]*[.]tenant_id[[:space:]]*=[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[.]tenant_id/) return 0
-      return 1
-    }
-    function flush(    invalid, path_evidence, finding_body) {
-      if (block == "") return
-      finding_path_value = finding_path(block)
-      finding_body = block
-      sub(/^[^\n]*\n/, "", finding_body)
-      path_evidence = evidence_by_path[finding_path_value]
-      # A shard may show only the hunk that triggered a finding.  For a small
-      # set of contradiction guards, also load the current snapshot of that
-      # changed source file.  This is evidence for filtering only; it never
-      # invents a finding or turns an unseen file into review scope.
-      # The model output is untrusted.  Only load a full source snapshot for a
-      # path that was actually present in this diff evidence; otherwise a
-      # crafted `../outside.yml` finding could make the contradiction guard
-      # read an arbitrary file before normal location validation rejects it.
-      if (repo_root != "" && finding_path_value != "" &&
-          (finding_path_value in evidence_by_path) &&
-          !(finding_path_value in symlink_by_path) &&
-          finding_path_value ~ /\.(java|ya?ml|properties|sql|xml)$/ &&
-          !(finding_path_value in full_loaded)) {
-        full_file = repo_root "/" finding_path_value
-        full_line_count = 0
-        while ((getline full_line < full_file) > 0) {
-          if (full_line_count < 20000) full_evidence[finding_path_value] = full_evidence[finding_path_value] full_line "\n"
-          full_line_count++
-        }
-        close(full_file)
-        full_loaded[finding_path_value] = 1
-      }
-      path_evidence = path_evidence full_evidence[finding_path_value]
-      # Auto-configuration classes often put defaults and generated accessors
-      # in a sibling *Properties.java file.  Load only the explicitly bound
-      # properties type from the same package; this is still contradiction
-      # evidence for the changed target, not a new review target.
-      related_class = path_evidence
-      if (match(related_class, /@EnableConfigurationProperties\([A-Z][A-Za-z0-9_]*\.class/)) {
-        related_class = substr(related_class, RSTART, RLENGTH)
-        sub(/^.*\(/, "", related_class)
-        sub(/\.class.*$/, "", related_class)
-        package_dir = finding_path_value
-        sub(/\/[^\/]+$/, "", package_dir)
-        related_file = repo_root "/" package_dir "/" related_class ".java"
-        if (!(related_file in related_loaded)) {
-          related_line_count = 0
-          while ((getline related_line < related_file) > 0) {
-            if (related_line_count < 12000) related_evidence[finding_path_value] = related_evidence[finding_path_value] related_line "\n"
-            related_line_count++
-          }
-          close(related_file)
-          related_loaded[related_file] = 1
-        }
-        path_evidence = path_evidence related_evidence[finding_path_value]
-      }
-      # Drop only a wholly generic "the shard is incomplete" paragraph. If
-      # the same block also contains concrete evidence, keep the finding so
-      # output filtering can never hide an independently actionable problem.
-      invalid = incomplete_only_finding(block)
-      # Java `x instanceof Type t` is false when x is null; reject the
-      # specific contradiction only when the visible evidence has that form.
-      if (block ~ /instanceof/ && block ~ /attributes/ && block ~ /null/ && block ~ /检查会通过/ && path_evidence ~ /instanceof[[:space:]]+ServletRequestAttributes/) invalid = 1
-      # Do not let the model claim missing header/parameter guards when the
-      # current shard visibly contains both guards.
-      if (block ~ /getHeader/ && block ~ /getParameter/ && block ~ /null/ &&
-          (block ~ /没有.*检查/ || block ~ /没有.*isBlank/) &&
-          path_evidence ~ /header[[:space:]]*!=[[:space:]]*null/ &&
-          path_evidence ~ /parameter[[:space:]]*==[[:space:]]*null/ && path_evidence ~ /parameter\.isBlank\(\)/) invalid = 1
-      # Spring supplies @Bean method arguments; do not report a generic null
-      # check for an injected properties object when the annotation and type
-      # are visible in the current evidence.
-      if (block ~ /[Pp]roperties/ && block ~ /null/ && block ~ /缺少/ &&
-          path_evidence ~ /@Bean/ && path_evidence ~ /[A-Z][A-Za-z0-9]*Properties[[:space:]]+properties/) invalid = 1
-      # ConditionalOnClass deliberately makes optional Spring client types
-      # conditional.  Do not turn their absence from the local source tree
-      # into a build finding unless the model has an independent annotation or
-      # dependency contradiction.
-      if (block ~ /(RestClient|HttpServiceProxyFactory)/ &&
-          block ~ /缺少|未找到|不存在|无法/ &&
-          path_evidence ~ /@ConditionalOnClass/ &&
-          path_evidence ~ /RestClient/ && path_evidence ~ /HttpServiceProxyFactory/ &&
-          block !~ /ConditionalOnClass.*(错误|缺失|冲突)/) invalid = 1
-      # A file-wide token guard need not dominate the reported dereference:
-      # deleted lines, comments, other scopes or later statements can match.
-      # Keep these candidates for validation instead of inferring clean.
-      # Require* token getters commonly guard both null and blank/length
-      # before being passed to a RestClient default header.  A shard can split
-      # those guards from the header call; the full-file evidence makes this
-      # contradiction deterministic without suppressing a different token or
-      # an independent authentication root.
-      if (block ~ /gatewayInternalToken/ && block ~ /null|空/ && block ~ /缺少|没有|未见/ &&
-          path_evidence ~ /getGatewayInternalToken\(\)[[:space:]]*==[[:space:]]*null/ &&
-          path_evidence ~ /isBlank|length\(\)[[:space:]]*</) invalid = 1
-      if (block ~ /fileInternalToken/ && block ~ /null|空/ && block ~ /缺少|没有|未见/ &&
-          path_evidence ~ /getFileInternalToken\(\)[[:space:]]*==[[:space:]]*null/ &&
-          path_evidence ~ /isBlank|length\(\)[[:space:]]*</) invalid = 1
-      # A DTO ternary protects only that access, not later use of its result.
-      # Preserve candidates for field/range validation instead of inferring clean.
-      if (block ~ /connectTimeout|readTimeout|超时/ && block ~ /默认|校验|无限/ &&
-          path_evidence ~ /DEFAULT_(CONNECT|READ)_TIMEOUT/ && path_evidence ~ /requireFinitePositiveTimeout/) invalid = 1
-      if (block ~ /baseUrl/ && block ~ /缺少/ && block ~ /格式|空/ && path_evidence ~ /baseUrl[[:space:]]*=[[:space:]]*"http/) invalid = 1
-      # A constant assignment proves existence, not value/contract correctness.
-      # Keep TOKEN_HEADER candidates instead of inferring clean from a declaration.
-      # A visible normalize-and-prefix check is the intended path-traversal
-      # boundary.  Do not let an information-level model guess about a bypass
-      # when the current snapshot has no symlink, TOCTOU, or permission
-      # evidence; concrete bypasses remain visible.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /路径遍历|目录逃逸|越界/ && block ~ /可能|绕过|不严格/ &&
-          path_evidence ~ /\.resolve\([^)]*\)\.normalize\(\)/ &&
-          path_evidence ~ /startsWith\(/ &&
-          block !~ /符号链接|symlink|TOCTOU|竞态|并发|权限|越权|真实路径|toRealPath|getCanonicalPath/) invalid = 1
-      # The presigned-ticket preflight is authoritative when the visible
-      # source already checks expiry.  Remove only speculative duplicate
-      # validation paragraphs in that lifecycle shape; a paragraph that also
-      # carries replay, tenant, permission, or another independent root stays.
-      if (path_evidence ~ /presign[A-Za-z0-9_]*[[:space:]]*\(/ &&
-          path_evidence ~ /expiresAt[[:space:]]*\(\)[[:space:]]*\.[[:space:]]*isAfter/ &&
-          block ~ /过期/ && block ~ /缺少|没有|未见|未进行/ && block ~ /校验|检查|验证/ &&
-          block !~ /重放|竞态|孤儿|撤销|租户|权限|越权|契约/) invalid = 1
-      if (path_evidence ~ /presign[A-Za-z0-9_]*[[:space:]]*\(/ &&
-          block ~ /objectKey|ticket|id/ && block ~ /缺少|没有|未见/ &&
-          block ~ /有效性|格式|校验|验证|检查/ && block !~ /重放|竞态|孤儿|撤销|租户|权限|越权|契约/) invalid = 1
-      if (path_evidence ~ /findActiveExpired/ && block ~ /cleanupExpired/ &&
-          block ~ /只清理活动|仅.*活动|无法.*取消/ && block !~ /重放|竞态|孤儿|撤销|租户|权限|越权|契约/) invalid = 1
-      # An interface-return null guess is not evidence that a presign provider
-      # can actually return null.  In the visible ticket lifecycle, keep the
-      # deterministic cancellation/replay race and suppress only this
-      # information-level speculation unless the diff shows a real contract,
-      # implementation, or build failure.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /issueTicket|presignPut|预签名/ &&
-          block ~ /null|空/ && block ~ /返回值|判空|空检查|NPE|异常/ &&
-          path_evidence ~ /UploadTicket[[:space:]]+issueTicket/ &&
-          path_evidence ~ /return[[:space:]]+store\.presignPut/ &&
-          block !~ /明确.*契约|接口.*规定|@Nullable|实现.*返回|编译失败|构建失败|依赖冲突/) invalid = 1
-      # Likewise, a bare `store.delete` call does not prove a cancellation
-      # transaction must catch an unchecked exception.  Keep explicit
-      # rollback/transaction or implementation evidence visible, but remove
-      # the generic information-level "delete may throw" paragraph.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /cancel|取消/ && block ~ /store\.delete|删除/ &&
-          block ~ /异常|抛出|失败|一致/ &&
-          path_evidence ~ /void[[:space:]]+cancel\([^)]*\)/ &&
-          path_evidence ~ /store\.delete\([^)]*\)/ &&
-          path_evidence ~ /sessions\.markCancelled/ &&
-          block !~ /事务.*(处理|一致|回滚)|回滚.*(逻辑|策略)|重试|实现.*抛出|明确.*契约|编译失败|构建失败/) invalid = 1
-      # A concrete finding can also state which callers or implementations
-      # are unseen. That limitation does not disprove its visible evidence or
-      # bypass validation. Only incomplete_only_finding removes a wholly
-      # generic request for more source, not a mixed evidence paragraph.
-      # The xxl-job permission preflight is authoritative for the narrow
-      # interceptor-migration/route family.  A shard-local model often turns
-      # the absence of an unseen service method into repeated conditional
-      # findings such as "if the service layer does not validate".  Those
-      # paragraphs are not evidence of a second defect; the deterministic
-      # preflight is merged after this filter.  Keep paragraphs that carry a
-      # distinct, directly evidenced root cause visible.
-      if (path_evidence ~ /PermissionInterceptor|valid(JobGroup)?Permission/ &&
-          block ~ /权限|越权|job.?group/ &&
-          block ~ /当前分片|未展示|没有展示|如果服务层|若服务层|缺少服务层|服务层.*校验/ &&
-          block !~ /SSRF|租户|SQL[[:space:]]*注入|重放|竞态|并发|编译|构建|凭据|令牌.*日志|日志.*令牌/) invalid = 1
-      if (path_evidence ~ /PermissionInterceptor|valid(JobGroup)?Permission/ &&
-          block ~ /权限拦截器重构后仍有同类任务\/日志入口未执行/ &&
-          block !~ /SSRF|租户|SQL[[:space:]]*注入|重放|竞态|并发|编译|构建|凭据|令牌.*日志|日志.*令牌/) invalid = 1
-      # DDL without an explicit tenant column is not a finding without a
-      # visible multi-tenant contract, and a MySQL generated column that
-      # visibly uses STORED/VIRTUAL is valid syntax. Keep this gate limited
-      # to information-level, schema-local speculation; concrete P0-P3
-      # tenant/SQL/compatibility evidence remains visible.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ && finding_path_value ~ /\.sql$/ &&
-          block ~ /缺少.*(租户|tenant)[^。！？\n]*(字段|列)|没有.*(租户|tenant)[^。！？\n]*(字段|列)/ &&
-          block ~ /可能|或许/ &&
-          block !~ /明确契约|越权|泄漏|权限|SQL[[:space:]]*注入/) invalid = 1
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ && finding_path_value ~ /\.sql$/ &&
-          block ~ /性能|复杂|索引|优化/ &&
-          path_evidence ~ /GENERATED[[:space:]]+ALWAYS[[:space:]]+AS/ &&
-          path_evidence ~ /(^|[^[:alnum:]_])(STORED|VIRTUAL)([^[:alnum:]_]|$)/) invalid = 1
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ && finding_path_value ~ /\.sql$/ &&
-          block ~ /GENERATED[[:space:]]+ALWAYS[[:space:]]+AS/ &&
-          block ~ /STORED|VIRTUAL/ &&
-          (block ~ /影响[：:]?[[:space:]]*无|修复建议[：:]?[[:space:]]*无|合法.*(存储方式|语法)|不构成.*(问题|风险|语法错误)/)) invalid = 1
-      # Commenting out an authorization annotation is a concrete P1 when the
-      # same block says the endpoint is now reachable without permission. A
-      # separate information paragraph that only complains about readability
-      # or maintenance is not an actionable finding and must not survive the
-      # clean-output contract.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /权限注解|@PreAuthorize/ &&
-          block ~ /可读性|维护人员|代码一致性/ &&
-          block !~ /绕过|越权|未授权|未认证|敏感操作|数据破坏|权限控制失效/) invalid = 1
-      # A deleted migration file has no current contents to inspect. Do not
-      # turn that absence itself into an information-level finding; the
-      # deletion/upgrade-path risk remains reportable as a concrete finding.
-      if (block ~ /^信息[[:space:]:：]/ && block ~ /\.sql/ &&
-          block ~ /删除|移除/ && block ~ /无法验证|未展示|内容/) invalid = 1
-      # Likewise, a visible method body is not an unimplemented declaration.
-      if (block ~ /方法/ && block ~ /未实现|没有方法体/ &&
-          path_evidence ~ /->/ && path_evidence ~ /return/) invalid = 1
-      # A logging reference in evidence, impact, a fix or verification does not
-      # disprove an independent root. Even generic logging advice must remain
-      # visible for verification; words alone cannot prove clean or bypass
-      # the normal structure and location checks below.
-      # An untracked file is deliberately included in the review diff, so its
-      # Git status is not itself a defect.  Drop only the informational claim
-      # that the author must `git add` it; preserve concrete code/security
-      # findings in the same paragraph.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /未跟踪|未包含在 Git|未被 Git/ &&
-          block ~ /添加到 Git|加入 Git|检查 Git 状态|确保文件已被跟踪/ &&
-          finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
-      # The same non-defect can be phrased as "new code is not committed".
-      # Review intentionally includes staged, unstaged, and untracked changes;
-      # only remove this Git-state explanation when it also asks to commit or
-      # add the file and carries no independent code/security evidence.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /新增.*(未提交|没有提交)|未提交到 Git|尚未提交/ &&
-          block ~ /添加到 Git|提交到 Git|纳入版本控制|检查 Git 状态/ &&
-          block !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /代码新增但未提交到 Git|未提交到 Git 仓库/ &&
-          block ~ /未发现阻塞问题/ &&
-          finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /代码新增但未提交到 Git/ &&
-          block ~ /当前差异|仅审查/ &&
-          block ~ /影响[：:][[:space:]]*(无|没有阻塞)/ &&
-          block ~ /修复建议[：:][[:space:]]*无/ &&
-          block ~ /验证方式[：:][[:space:]]*无/ &&
-          finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|命令执行|路径遍历/) invalid = 1
-      # A fully hardened HTTP XML parser is not defective merely because the
-      # model suggests optional namespace/size/depth refinements. Keep any
-      # concrete XXE or parser-bypass claim visible, but drop this narrow
-      # information-only contradiction when all visible hardening controls and
-      # a request-size bound are present in the current source.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /XML|解析|命名空间|namespace|文档大小|深度|实体膨胀/ &&
-          path_evidence ~ /DocumentBuilderFactory/ &&
-          path_evidence ~ /disallow-doctype-decl/ &&
-          path_evidence ~ /external-general-entities/ &&
-          path_evidence ~ /external-parameter-entities/ &&
-          path_evidence ~ /ACCESS_EXTERNAL_(DTD|SCHEMA)/ &&
-          path_evidence ~ /getContentLengthLong/ &&
-          block !~ /XXE|外部实体.*(启用|允许)|绕过|漏洞|读取本地文件|访问内网/) invalid = 1
-      # A concrete allowed origin, methods, headers, and credentials setting
-      # is a safe CORS boundary. Drop only generic information-level advice
-      # that claims the boundary is missing; wildcard-origin findings remain
-      # visible because the source evidence still contains the wildcard.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /CORS|跨域|Origin|allowedOrigin|allowCredentials/ &&
-          block ~ /缺少|未明确|没有|可能.*风险|凭据.*泄露/ &&
-          path_evidence ~ /allowedOrigins[[:space:]]*\(/ &&
-          path_evidence !~ /allowedOriginPatterns[[:space:]]*\([[:space:]]*["\047]\*["\047]/ &&
-          path_evidence ~ /allowedMethods[[:space:]]*\(/ &&
-          path_evidence ~ /allowedHeaders[[:space:]]*\(/ &&
-          block !~ /任意来源|任意 Origin|通配符|绕过|漏洞|越权|跨站读取/) invalid = 1
-      # Some clean shards use a fully formed information paragraph instead of
-      # the canonical marker.  Normalize only the explicit no-finding shape;
-      # any concrete security, tenancy, permission, build, or compatibility
-      # cue keeps the paragraph visible.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /没有任何可修复问题|未发现.*(可修复|阻塞).*问题/ &&
-          block ~ /修复建议[：:][[:space:]]*无/ &&
-          block ~ /验证方式[：:][[:space:]]*无/ &&
-          finding_body !~ /凭据|密码|token|Token|令牌|密钥|Secret|漏洞|SQL[[:space:]]*注入|租户|权限|越权|SSRF|请求伪造|命令执行|路径遍历|构建|编译|兼容|并发|竞态|迁移/) invalid = 1
-      if (fail_closed_config_only(block, path_evidence, finding_path(block))) invalid = 1
-      if (safe_credential_replacement_only(block, path_evidence, finding_path(block))) invalid = 1
-      if (generic_standard_library_info(block)) invalid = 1
-      if (non_finding_doc_summary(block)) invalid = 1
-      # Lombok annotations generate the accessors/constructors referenced by
-      # the class.  Do not let an information-level shard guess that Lombok is
-      # missing merely because the dependency declaration is outside the
-      # changed file.  Keep real build failures, version conflicts, explicit
-      # dependency removal, and P0-P3 findings visible.
-      if (block ~ /^[[:space:]]*信息[[:space:]:：]/ &&
-          block ~ /Lombok|@Data|@Getter|@Setter|@Value/ &&
-          block ~ /缺少.*依赖|缺失.*依赖|构建依赖|没有显式依赖|未找到.*Lombok/ &&
-          path_evidence ~ /@Data|@Getter|@Setter|@Value/ &&
-          block !~ /编译失败|构建失败|依赖冲突|版本不兼容|明确.*移除|删除.*依赖|删除了.*Lombok/) invalid = 1
-      if (safe_negative_info(block)) invalid = 1
-      # Use only the current source snapshot for this contradiction guard. The
-      # unified diff also contains deleted parent lines; treating an old
-      # internal URI as current evidence would hide a newly external request.
-      if (safe_internal_header_token_only(block, full_evidence[finding_path_value], finding_path_value)) invalid = 1
-      if (username_only_credential_default(block, path_evidence, finding_path(block))) invalid = 1
-      if (correlated_tenant_guard(block, path_evidence, finding_path_value)) invalid = 1
-      # Do not suppress configuration findings just because their consequence
-      # includes "可能"/"如果". Wording is not evidence against a defect;
-      # invalid locations and incomplete fields must reach validation below.
-      if (!invalid) {
-        if (printed) printf "\n"
-        printf "%s", block
-        printed = 1
-      }
-      block = ""
-    }
-    /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/ { flush() }
-    { block = block $0 "\n" }
-    END { flush() }
-  '
-  then
-    filter_status=0
-  else
-    filter_status=$?
-  fi
-  rm -f "$symlink_paths_file"
-  return "$filter_status"
-}
 
 dedup_exact_findings() {
   # Preserve every distinct finding, including same-location/same-family and
@@ -2447,27 +1905,37 @@ dedup_deterministic_preflight_blocks() {
 sort_findings_by_severity() {
   # Split on every severity header, not only blank lines. This keeps the
   # global P0..P3 ordering even when a model emits adjacent findings without
-  # an empty separator.
+  # an empty separator. Buffer the whole stream and reject unknown blocks;
+  # ordering is never permission to silently drop a candidate.
   LC_ALL=C awk '
+    function reject() {
+      failed = 1
+      print "本地代码审查失败：问题排序遇到非规范段落，拒绝丢弃候选。" > "/dev/stderr"
+      exit 2
+    }
     function flush(    header, target) {
       if (block == "") return
+      sub(/\n+$/, "", block)
       header = block
       sub(/[\r\n].*$/, "", header)
-      if (header ~ /^[[:space:]]*P0[[:space:]:：]+/) target = "p0"
-      else if (header ~ /^[[:space:]]*P1[[:space:]:：]+/) target = "p1"
-      else if (header ~ /^[[:space:]]*P2[[:space:]:：]+/) target = "p2"
-      else if (header ~ /^[[:space:]]*P3[[:space:]:：]+/) target = "p3"
-      else if (header ~ /^[[:space:]]*信息[[:space:]:：]+/) target = "info"
-      else { block = ""; return }
+      if (header ~ /^[[:space:]]*P0([[:space:]:]|：)+/) target = "p0"
+      else if (header ~ /^[[:space:]]*P1([[:space:]:]|：)+/) target = "p1"
+      else if (header ~ /^[[:space:]]*P2([[:space:]:]|：)+/) target = "p2"
+      else if (header ~ /^[[:space:]]*P3([[:space:]:]|：)+/) target = "p3"
+      else if (header ~ /^[[:space:]]*信息([[:space:]:]|：)+/) target = "info"
+      else reject()
       values[target] = values[target] (values[target] == "" ? "" : "\n\n") block
       block = ""
     }
     {
-      if ($0 ~ /^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+/) flush()
+      if ($0 ~ /^[[:space:]]*(P[0-3]|信息)([[:space:]:]|：)+/) flush()
+      else if ($0 ~ /^[[:space:]]*P[0-9]+([[:space:]:]|：|（)/) reject()
+      if (block == "" && $0 ~ /^[[:space:]]*$/) next
       if (block != "") block = block "\n"
       block = block $0
     }
     END {
+      if (failed) exit 2
       flush()
       output = values["p0"]
       if (values["p1"] != "") output = output (output == "" ? "" : "\n\n") values["p1"]
@@ -3170,16 +2638,16 @@ validate_response() {
     return 12
   fi
 
-  # Keep the raw response local while applying evidence filters; redact only
-  # after filtering/deduplication so guards such as `token: null` remain
-  # visible to the deterministic shard-boundary checks.
-  response_text="$(jq -r '.response' <"$response_file" | sanitize_terminal_text | filter_unsupported_shard_findings | redact_sensitive_text)"
+  # Every final candidate reaches structural/scope validation. Source-keyword
+  # heuristics cannot establish that a paragraph is false and must never erase
+  # it into a successful clean result. Sanitization/redaction are presentation
+  # boundaries, not factual adjudication; the complete safe final is archived.
+  response_text="$(jq -r '.response' <"$response_file" | sanitize_terminal_text | redact_sensitive_text)"
   normalized_response="$(printf '%s' "$response_text" | tr -d '[:space:]')"
 
   if [[ -z "$normalized_response" ]]; then
-    printf '未发现阻塞问题\n' >"$output_file"
-    printf 'clean\n' >"$kind_file"
-    return 0
+    echo "本地代码审查失败：安全 final 文本为空，拒绝将其改写为 clean。" >&2
+    return 12
   fi
 
   case "$normalized_response" in
@@ -3354,7 +2822,10 @@ validate_response() {
     return 12
   fi
 
-  response_text="$(printf '%s\n' "$response_text" | sort_findings_by_severity)"
+  if ! response_text="$(printf '%s\n' "$response_text" | sort_findings_by_severity)"; then
+    echo "本地代码审查失败：候选排序未能保留全部问题，拒绝返回部分结果。" >&2
+    return 12
+  fi
   printf '%s\n' "$response_text" >"$output_file"
   printf 'findings\n' >"$kind_file"
   return 0
@@ -3546,10 +3017,6 @@ run_one_prompt() {
   local kind_file="$4"
   local paths_file="${5:-$changed_paths_file}"
   local request_timeout="${6:-$timeout_seconds}"
-  local evidence_file="${7:-$chunk_input_file}"
-
-  current_evidence_file="$evidence_file"
-
   if ! check_prompt_budget "$prompt"; then
     return 13
   fi
@@ -3568,7 +3035,6 @@ run_specialist_prompt() {
   local kind_file="$4"
   local paths_file="${5:-$changed_paths_file}"
   local request_timeout="${6:-$timeout_seconds}"
-  local evidence_file="${7:-$chunk_input_file}"
   local base_review_system="$review_system"
   local instruction
 
@@ -3576,7 +3042,7 @@ run_specialist_prompt() {
   instruction="$(specialist_instruction)"
   review_system="${base_review_system}"$'\n\n'"$instruction"
   local status=0
-  if run_one_prompt "$prompt" "$response_file" "$output_file" "$kind_file" "$paths_file" "$request_timeout" "$evidence_file"; then
+  if run_one_prompt "$prompt" "$response_file" "$output_file" "$kind_file" "$paths_file" "$request_timeout"; then
     status=0
   else
     status=$?
@@ -3636,7 +3102,22 @@ merge_preflight_findings() {
   local kind_file="$2"
   local preflight_file="$3"
   local deterministic_file="${4:-}"
-  local merged_file finding_preflight_file
+  local merged_file finding_preflight_file model_kind
+
+  model_kind="$(cat "$kind_file")" || return 12
+  case "$model_kind" in
+    findings) [[ -s "$output_file" ]] || return 12 ;;
+    clean)
+      if [[ "$(cat "$output_file")" != '未发现阻塞问题' ]]; then
+        echo "本地代码审查失败：clean 状态与输出不一致，拒绝合并。" >&2
+        return 12
+      fi
+      ;;
+    *)
+      echo "本地代码审查失败：缺少有效的审查完成状态，拒绝合并。" >&2
+      return 12
+      ;;
+  esac
 
   if [[ ! -s "$preflight_file" && ! -s "$deterministic_file" ]]; then
     return 0
@@ -3652,8 +3133,8 @@ merge_preflight_findings() {
     ' "$preflight_file" >"$finding_preflight_file"
   fi
   merged_file="$(mktemp "${TMPDIR:-/tmp}/local-review-preflight-merged.XXXXXX")"
-  {
-    if grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$output_file"; then
+  if ! {
+    if [[ "$model_kind" == findings ]]; then
       cat "$output_file"
     fi
     if [[ -s "$finding_preflight_file" ]]; then
@@ -3662,7 +3143,11 @@ merge_preflight_findings() {
     if [[ -s "$deterministic_file" ]]; then
       annotate_preflight_blocks "$deterministic_file" "确定性锁序预检（代码证据，非模型原文）"
     fi
-  } | sort_findings_by_severity >"$merged_file"
+  } | sort_findings_by_severity >"$merged_file"; then
+    rm -f "$merged_file" "$finding_preflight_file"
+    echo "本地代码审查失败：全局候选合并失败，拒绝返回部分结果。" >&2
+    return 12
+  fi
   if [[ -s "$merged_file" ]]; then
     cat "$merged_file" >"$output_file"
     printf 'findings\n' >"$kind_file"
@@ -4269,7 +3754,7 @@ collect_tenant_lifecycle_login_preflight() {
   mapper_line="$(grep -En 'SELECT[[:space:]]+id[[:space:]]+FROM[[:space:]]+sys_tenant|selectIdByCode' "$mapper_file" | head -1 | cut -d: -f1)"
   login_line="$(grep -En 'parseTenantId|TenantContextHolder[.]setTenantId' "$login_file" | head -1 | cut -d: -f1)"
   [[ -n "$mapper_line" && -n "$login_line" ]] || return 0
-  printf 'P1（条件） src/main/java/com/bit/auth/mapper/SysTenantMapper.java:%s - 登录租户解析只按 code/is_deleted 或请求中的数字 tenantId 选择租户，未校验租户启用状态与过期时间；同一流程在 LoginServiceImpl.java:%s 将该租户写入认证上下文并继续签发会话。\n影响：停用或到期租户在仍有有效账号时可能继续密码登录并获得 JWT/Redis 会话，绕过租户生命周期控制；该结论依赖显式 context 证明租户存在 status/expireTime 契约。\n修复建议：登录前通过带 status=1、is_deleted=0 且 expire_time 为空或未到期的查询解析 tenantId；拒绝停用/到期租户，并在刷新令牌时重新执行同一检查。\n验证方式：分别使用启用、停用、已到期和不存在的租户登录/刷新令牌，确认只有启用且未到期的租户能进入认证流程，并检查 SQL 与集成测试覆盖 status、expire_time 和软删除条件。\n\n' "$mapper_line" "$login_line" >>"$output_file"
+  printf 'P1 src/main/java/com/bit/auth/mapper/SysTenantMapper.java:%s - （条件）登录租户解析只按 code/is_deleted 或请求中的数字 tenantId 选择租户，未校验租户启用状态与过期时间；同一流程在 LoginServiceImpl.java:%s 将该租户写入认证上下文并继续签发会话。\n影响：停用或到期租户在仍有有效账号时可能继续密码登录并获得 JWT/Redis 会话，绕过租户生命周期控制；该结论依赖显式 context 证明租户存在 status/expireTime 契约。\n修复建议：登录前通过带 status=1、is_deleted=0 且 expire_time 为空或未到期的查询解析 tenantId；拒绝停用/到期租户，并在刷新令牌时重新执行同一检查。\n验证方式：分别使用启用、停用、已到期和不存在的租户登录/刷新令牌，确认只有启用且未到期的租户能进入认证流程，并检查 SQL 与集成测试覆盖 status、expire_time 和软删除条件。\n\n' "$mapper_line" "$login_line" >>"$output_file"
   dedup_preflight_blocks "$output_file"
 }
 
@@ -7420,7 +6905,7 @@ collect_hr_default_password_policy_preflight() {
       continue
     fi
     {
-      printf '%s\n' "P1（有条件） $candidate_path:$candidate_line - HR 投影账号使用共享初始密码哈希，但当前快照明确没有首次登录强制改密策略。"
+      printf '%s\n' "P1 $candidate_path:$candidate_line - （有条件）HR 投影账号使用共享初始密码哈希，但当前快照明确没有首次登录强制改密策略。"
       printf '%s\n' '影响：若默认密码或其交付方式被非受控人员获得，新投影账号可能长期复用同一初始口令，攻击者可直接登录多个员工账号；风险取决于默认密码保密性和部署策略。'
       printf '%s\n' '修复建议：为首次投影账号增加强制改密/一次性激活流程，或为每个账号生成短期随机初始密码并只返回一次；不要把共享默认口令当作长期凭据。'
       printf '%s\n' '验证方式：使用真实投影账号完成首次登录，确认旧初始密码立即失效；在多租户、多账号和重复同步场景验证不会复用可预测口令，并审计初始凭据不会写入日志。'
@@ -7431,45 +6916,6 @@ collect_hr_default_password_policy_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
-can_return_weak_password_hash_preflight_on_model_failure() {
-  local preflight_file="$1"
-  local paths_file="$2"
-  local path_count finding_count
-
-  [[ -s "$preflight_file" && -s "$paths_file" ]] || return 1
-  grep -Fq '密码直接使用快速哈希算法' "$preflight_file" || return 1
-  path_count="$(awk 'NF { count++ } END { print count + 0 }' "$paths_file")"
-  [[ "$path_count" -eq 1 ]] || return 1
-  grep -Eq '\.java$' "$paths_file" || return 1
-  finding_count="$(grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$preflight_file" || true)"
-  [[ "$finding_count" -eq 1 ]] || return 1
-  return 0
-}
-
-can_return_migration_delete_preflight_on_model_failure() {
-  local preflight_file="$1"
-  local paths_file="$2"
-  local response_file="${3:-}" failure_status="${4:-}" path_count finding_count response_text
-
-  # This fallback is intentionally narrower than the normal preflight merge:
-  # it is only safe when the diff is one deleted versioned migration and the
-  # model produced one migration-themed finding that failed location
-  # validation.  An incomplete/truncated or transport response may hide an
-  # unrelated finding, so those statuses remain fail-closed.
-  [[ "$failure_status" == 12 ]] || return 1
-  [[ -s "$preflight_file" && -s "$paths_file" && -s "$response_file" ]] || return 1
-  grep -Fq '删除版本化迁移脚本会中断已有数据库升级路径' "$preflight_file" || return 1
-  path_count="$(awk 'NF { count++ } END { print count + 0 }' "$paths_file")"
-  [[ "$path_count" -eq 1 ]] || return 1
-  grep -Eq '(^|/)(sql|db)/migration/V[0-9]{8}[^/]*\.sql$' "$paths_file" || return 1
-  finding_count="$(grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$preflight_file" || true)"
-  [[ "$finding_count" -eq 1 ]] || return 1
-  response_text="$(jq -r '.response // empty' <"$response_file" 2>/dev/null || true)"
-  [[ -n "$response_text" ]] || return 1
-  [[ "$(printf '%s\n' "$response_text" | grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' || true)" -eq 1 ]] || return 1
-  printf '%s\n' "$response_text" | grep -Eiq '迁移|migration|已有数据库|升级路径|数据库升级' || return 1
-  return 0
-}
 
 collect_check_then_act_preflight() {
   local diff_file="$1"
@@ -11828,28 +11274,6 @@ collect_presigned_replay_preflight() {
   dedup_preflight_blocks "$output_file"
 }
 
-can_return_presigned_preflight_on_model_failure() {
-  local preflight_file="$1"
-  local paths_file="$2"
-  local response_file="${3:-}" failure_status="${4:-}" path_count finding_count
-
-  [[ -s "$preflight_file" && -s "$paths_file" ]] || return 1
-  # A length-limited model response is known to be incomplete. Even when the
-  # deterministic preflight is complete, returning it as a successful review
-  # could hide an unrelated model finding that appeared before truncation.
-  # Transport/budget failures with no model body can still use the narrow
-  # deterministic fallback below.
-  if [[ "$failure_status" == 10 && -s "$response_file" ]]; then
-    return 1
-  fi
-  grep -Fq '取消后仍可重放有效的预签名上传票据' "$preflight_file" || return 1
-  path_count="$(awk 'NF { count++ } END { print count + 0 }' "$paths_file")"
-  [[ "$path_count" -eq 1 ]] || return 1
-  grep -Eq '\.java$' "$paths_file" || return 1
-  finding_count="$(grep -Ec '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]+' "$preflight_file" || true)"
-  [[ "$finding_count" -eq 1 ]] || return 1
-  return 0
-}
 
 collect_storage_delete_preflight() {
   local diff_file="$1"
@@ -14239,24 +13663,6 @@ if [[ "$needs_split" != true ]]; then
     cat "$response_output_file"
     exit 0
   fi
-  if [[ -z "$specialist_channel" && ( "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 13 ) ]] &&
-     can_return_presigned_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file" "$response_file" "$initial_status"; then
-    echo "本地代码审查：模型请求未完成，但当前差异仅包含一个已由确定性预检完整证明的预签名票据生命周期问题；返回该 P1，未将模型半截输出视为完整结果。" >&2
-    cat "$build_preflight_file"
-    exit 0
-  fi
-  if [[ -z "$specialist_channel" && ( "$initial_status" -eq 10 || "$initial_status" -eq 11 || "$initial_status" -eq 12 || "$initial_status" -eq 13 ) ]] &&
-     can_return_weak_password_hash_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file"; then
-    echo "本地代码审查：模型请求未完成，但当前差异仅包含一个已由确定性预检完整证明的弱密码哈希问题；返回该 P1，未将模型半截输出视为完整结果。" >&2
-    cat "$build_preflight_file"
-    exit 0
-  fi
-  if [[ -z "$specialist_channel" && "$initial_status" -eq 12 ]] &&
-     can_return_migration_delete_preflight_on_model_failure "$build_preflight_file" "$changed_paths_file" "$response_file" "$initial_status"; then
-    echo "本地代码审查：模型迁移问题的文件定位无法验证，但当前单一迁移删除风险已由确定性预检完整证明；返回该 P1，未将其他不完整模型内容视为完整结果。" >&2
-    cat "$build_preflight_file"
-    exit 0
-  fi
   if [[ "$initial_status" -ne 10 && "$initial_status" -ne 11 && "$initial_status" -ne 12 && "$initial_status" -ne 13 ]]; then
     emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
     exit 1
@@ -14313,7 +13719,6 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
   chunk_paths_file="$chunk_output_dir/$chunk_name.paths"
   chunk_status_file="$chunk_output_dir/$chunk_name.status"
   chunk_preflight_file="$chunk_output_dir/$chunk_name.preflight"
-  chunk_merge_preflight_file="$chunk_output_dir/$chunk_name.merge-preflight"
   : >"$chunk_paths_file"
   while IFS= read -r candidate_path; do
     [[ -n "$candidate_path" ]] || continue
@@ -14392,9 +13797,8 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
           next
         }
       }
-      # Authorization-annotation preflight is merged deterministically after
-      # the model call and its full paragraph is only needed by the duplicate
-      # filter. Omitting it from large shard prompts avoids spending the fixed
+      # Authorization-annotation preflight is merged globally after all model
+      # calls. Omitting it from large shard prompts avoids spending the fixed
       # context budget on repeated evidence for every controller shard.
       if (index(header, "声明式权限注解被注释/删除") > 0) {
         next
@@ -14418,28 +13822,13 @@ for chunk_file in "$chunk_dir"/chunk-*.diff; do
       # Keep comma-separated locations (for example `:3,4,5`) attached to
       # the same path when routing aggregated deterministic findings.
       sub(/:[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?([,，][[:space:]]*[0-9]+([[:space:]]*-[[:space:]]*[0-9]+)?)*[[:space:]]+-.*$/, "", header)
-      # Route the complete deterministic finding to every shard that contains
-      # the path. A large file can span multiple shards; each shard needs the
-      # evidence so its model duplicate is filtered locally. Final aggregation
-      # removes the identical preflight paragraph once, while preserving any
-      # independently worded finding that has different evidence.
+      # Route relevant evidence to this shard prompt only. Final membership
+      # comes from the whole-review preflight union, never from this routing.
       if (header in allowed) {
         print $0
       }
     }
   ' "$build_preflight_file" >"$chunk_preflight_file"
-  # Keep authorization-annotation findings out of the model prompt (they are
-  # deterministic evidence), but restore them for the final merge. They are
-  # marked as deterministic additions; model findings remain intact.
-  cp "$chunk_preflight_file" "$chunk_merge_preflight_file"
-  awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "声明式权限注解被注释/删除") > 0 { print }' \
-    "$build_preflight_file" >>"$chunk_merge_preflight_file"
-  awk 'BEGIN { RS = ""; ORS = "\n\n" } index($0, "第三方登录绑定按外部身份查询未带租户边界") > 0 { print }' \
-    "$build_preflight_file" >>"$chunk_merge_preflight_file"
-  awk 'BEGIN { RS = ""; ORS = "\n\n" }
-       index($0, "排版任务证据写入端点仅受普通 execute 权限保护") > 0 ||
-       index($0, "排版质量门禁允许人工把 ERROR/BLOCKER") > 0 { print }' \
-    "$build_preflight_file" >>"$chunk_merge_preflight_file"
   chunk_prompt_preflight_file="$chunk_output_dir/$chunk_name.prompt-preflight"
   if [[ "$chunk_preflight_prompt_enabled" == true ]]; then
     bound_preflight_prompt_file "$chunk_preflight_file" "$chunk_prompt_preflight_file" "$chunk_preflight_context_bytes"
@@ -14476,7 +13865,7 @@ $(build_shard_scope_metadata "$changed_paths_file")"
     write_review_trace "$trace_line"
   fi
   chunk_start="$(date +%s)"
-  run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_status=$?
+  run_one_prompt "$chunk_prompt" "$chunk_response" "$chunk_output" "$chunk_kind" "$chunk_paths_file" "$chunk_timeout_seconds" || chunk_status=$?
   chunk_bytes="$(wc -c <"$chunk_file" | tr -d ' ')"
   printf -v trace_line 'chunk_status\t%s\t%s\t%s\t%s' "$chunk_name" "$chunk_status" "$(( $(date +%s) - chunk_start ))" "$chunk_bytes"
   write_review_trace "$trace_line"
@@ -14484,15 +13873,6 @@ $(build_shard_scope_metadata "$changed_paths_file")"
   printf -v trace_line 'chunk_paths\t%s\t%s' "$chunk_name" "$chunk_paths_trace"
   write_review_trace "$trace_line"
   num_predict="$original_num_predict"
-  if [[ "$chunk_status" -ne 0 ]]; then
-    if [[ "$chunk_status" -eq 12 ]] &&
-       can_return_migration_delete_preflight_on_model_failure "$chunk_merge_preflight_file" "$chunk_paths_file" "$chunk_response" "$chunk_status"; then
-      echo "本地代码审查：分片 ${chunk_name} 的迁移问题文件定位无法验证，但该分片的单一迁移删除风险已由确定性预检完整证明；保留规范 P1 并继续其余分片。" >&2
-      cat "$chunk_merge_preflight_file" >"$chunk_output"
-      printf 'findings\n' >"$chunk_kind"
-      chunk_status=0
-    fi
-  fi
   if [[ "$chunk_status" -ne 0 ]]; then
     emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
     echo "本地代码审查失败：以下是已完成分片的原始结果（仅供定位，整次审查不完整，不能视为通过）：" >&2
@@ -14510,7 +13890,7 @@ $(build_shard_scope_metadata "$changed_paths_file")"
     chunk_specialist_start="$(date +%s)"
     specialist_original_num_predict="$num_predict"
     num_predict="$chunk_num_predict"
-    run_specialist_prompt "$chunk_prompt" "$chunk_specialist_response" "$chunk_specialist_output" "$chunk_specialist_kind" "$chunk_paths_file" "$chunk_timeout_seconds" "$chunk_file" || chunk_specialist_status=$?
+    run_specialist_prompt "$chunk_prompt" "$chunk_specialist_response" "$chunk_specialist_output" "$chunk_specialist_kind" "$chunk_paths_file" "$chunk_timeout_seconds" || chunk_specialist_status=$?
     num_predict="$specialist_original_num_predict"
     printf -v trace_line 'specialist_status\t%s\t%s\t%s\t%s' "$chunk_name" "$specialist_channel" "$chunk_specialist_status" "$(( $(date +%s) - chunk_specialist_start ))"
     write_review_trace "$trace_line"
@@ -14522,45 +13902,39 @@ $(build_shard_scope_metadata "$changed_paths_file")"
     fi
     merge_model_pass_outputs "$chunk_output" "$chunk_kind" "$chunk_specialist_output" "$chunk_specialist_kind" "$chunk_specialist_merged"
   fi
-  merge_preflight_findings "$chunk_output" "$chunk_kind" "$chunk_merge_preflight_file" "$deterministic_lock_order_file"
 done
 
+# Model scope stays shard-local. Deterministic preflight is a separate global
+# candidate set: prompt routing/budget must never decide final membership.
 has_findings=false
-has_clean=false
+: >"$combined_output_file"
 for kind_file in "$chunk_kind_dir"/*.kind; do
-  if grep -q '^findings$' "$kind_file"; then
-    has_findings=true
-  else
-    has_clean=true
-  fi
+  case "$(cat "$kind_file")" in
+    findings) has_findings=true ;;
+    clean) ;;
+    *)
+      emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
+      echo "本地代码审查失败：分片缺少有效完成状态，整次审查不完整。" >&2
+      exit 1
+      ;;
+  esac
 done
 
 if [[ "$has_findings" == true ]]; then
-  : >"$combined_output_file"
   for output_file in "$chunk_output_dir"/*.txt; do
-    if ! grep -q '^未发现阻塞问题$' "$output_file"; then
+    if ! grep -qx '未发现阻塞问题' "$output_file"; then
       cat "$output_file" >>"$combined_output_file"
       printf '\n\n' >>"$combined_output_file"
     fi
   done
-  # Re-establish the global severity order after shard aggregation. Each shard
-  # is ordered independently, so lexical chunk order cannot guarantee P0/P1
-  # findings appear before lower-severity findings. Keep every model block;
-  # source markers distinguish deterministic preflight additions.
-  # A large diff can surface the same semantic finding from several shards
-  # with slightly different wording. Collapse only same-root duplicates after
-  # restoring severity order; distinct locations, expressions, and independent
-  # roots remain visible. Deterministic preflight blocks are then deduplicated
-  # by their complete provenance-marked paragraph.
-  if [[ -n "$specialist_channel" ]]; then
-    sort_findings_by_severity <"$combined_output_file" \
-      | dedup_identical_model_blocks \
-      | dedup_deterministic_preflight_blocks
-  else
-    sort_findings_by_severity <"$combined_output_file" \
-      | dedup_exact_findings \
-      | dedup_deterministic_preflight_blocks
+  if ! sort_findings_by_severity <"$combined_output_file" >"$response_output_file"; then
+    emit_preflight_failure_diagnostic "$build_preflight_file" "$deterministic_lock_order_file"
+    exit 1
   fi
+  printf 'findings\n' >"$response_kind_file"
 else
-  printf '未发现阻塞问题\n'
+  printf '未发现阻塞问题\n' >"$response_output_file"
+  printf 'clean\n' >"$response_kind_file"
 fi
+merge_preflight_findings "$response_output_file" "$response_kind_file" "$build_preflight_file" "$deterministic_lock_order_file"
+cat "$response_output_file"

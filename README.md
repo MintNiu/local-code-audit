@@ -44,7 +44,7 @@ local-review --context src/main/java/path/to/RelatedService.java
 local-review --examples /path/to/private/examples.md
 ```
 
-Every parseable model final response is now retained **before filtering or retry**
+Every parseable model final response is retained **before validation or retry**
 in a private local `final-candidates.jsonl` report, including excluded, repeated,
 unconfirmed, and incomplete candidates. The command announces its absolute path
 on stderr once per review. Read all candidate text with
@@ -64,6 +64,13 @@ finding or turn a truncated/invalid response into a successful review.
 
 Workflow gates are not semantic certification: even exit code `0` does not prove
 a finding, severity, suggested repair, or absence of defects is correct.
+
+Source-keyword heuristics no longer remove model paragraphs. Every complete
+candidate, including informational or unsupported advice, must pass the same
+required-field, path and line-range checks; invalid output fails rather than
+becoming clean. Only an original canonical clean response can establish model
+clean. A deterministic preflight finding cannot turn an unfinished model review
+into success: known evidence remains visible in failure diagnostics.
 
 For an evidence-first review, use an existing trusted test task or a separately
 reviewed fixed probe, then pass its private text/JSON observations through the
@@ -137,7 +144,7 @@ unset, no `think` field or extra capability request is added. Boolean `false` is
 not omission or the string `"false"`. Request traces record the sent setting;
 this option does not download a model, change defaults, or waive format/quality gates.
 
-When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (core default `3000`), `local-review` automatically performs deterministic file- and unified-hunk-boundary sharding. Each shard is reviewed separately; only byte-identical repeated paragraphs are removed during aggregation, while distinct findings remain visible. The general command uses `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` and `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048`; the personal high-performance wrapper uses a validated 6000-byte default and raises the shard output budget to 4096. Any shard timeout, truncation, or invalid output fails the whole review and prints completed shards only as diagnostic output.
+When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (core default `3000`), `local-review` automatically performs deterministic file- and unified-hunk-boundary sharding. Each shard is reviewed separately; model paragraphs remain visible, including repeated paragraphs across shards. The general command uses `OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS=180` and `OLLAMA_REVIEW_CHUNK_NUM_PREDICT=2048`; the personal high-performance wrapper uses a 6000-byte default and raises the shard output budget to 4096. Any shard timeout, truncation, or invalid output fails the whole review and prints completed shards only as diagnostic output. After all shards complete, the whole-review deterministic preflight is merged once, including evidence at unchanged importers; prompt routing never decides final membership or expands a model shard's permitted paths.
 
 Each shard also receives a paths-only inventory of all files changed by the commit. This is scope metadata, not extra source context: it helps the model distinguish “implemented in another shard” from “missing”, while preserving the rule that absence from the current shard is never evidence of a defect.
 
@@ -242,7 +249,32 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
-Latest targeted workflow verification (2026-10-19): guard-scope retention
+Latest workflow verification (2026-10-19): the whole-paragraph semantic
+suppression layer has been removed. All candidates, including informational
+and unsupported suggestions, reach the same required-field and location
+checks; invalid output cannot become successful clean. Incomplete model
+calls cannot be replaced by preflight-only success. Global preflight findings
+are merged once after every shard completes, without widening model scope.
+Ordinary shard aggregation retains repeated model paragraphs.
+
+The paired fixed-response retention suite improved from 4/15 to 15/15;
+the eight preflight/sorter/completeness checks improved from 1/8 to 8/8.
+These are protocol scenarios, not independent model-quality samples.
+The final frozen code passed all 92/92 local no-model suites in 596.16 seconds,
+including both new suites; runtime/test/fixture checksums matched before and
+after the full run. Shell syntax checks and the runner self-test also passed.
+This does not certify native recall, false-positive rate, severity or overall
+acceptance. Weights, SYSTEM, examples and 16K/4096 defaults are unchanged;
+formal quality metrics remain unqualified. See the [process record](docs/tuning-process.zh-CN.md).
+The unchanged five-repeat model gate stopped on call 21: the internal-header
+clean fixture received an unsupported P1. The first four fixtures completed
+five calls each; the remaining 204 planned calls and explicit truncation check
+were not attempted. All 21 received finals remain privately visible. The model
+gate is failed, not waived or certified by the 92 engineering suites.
+The older entries below describe their then-current controls, not semantic
+suppression retained in the current code.
+
+Previous targeted workflow verification (2026-10-19): guard-scope retention
 improved from 3/10 to 10/10 offline cases. Two broad suppression predicates
 had turned three concrete-response cases (two roots, one mixed response)
 and four malformed-response cases into successful clean. The fix preserves
@@ -376,9 +408,9 @@ times each, plus explicit truncation handling. Clean fixtures reject findings;
 positive fixtures check known risk families, not every possible extra false
 positive. Thirteen security-clean fixtures use 512 output tokens and greedy
 decoding, and the presigned fixture also uses greedy decoding. Results include
-deterministic preflight, filtering, and narrowly documented recovery paths, so
-passing this gate is not evidence of model-native recall, zero false positives,
-or successful model generation on every call. See [evals/goal.md](evals/goal.md)
+deterministic preflight additions and structural validation, not semantic
+filtering or preflight-only success recovery. Passing this gate is still not
+evidence of model-native recall or zero false positives. See [evals/goal.md](evals/goal.md)
 for the independent acceptance target and current status.
 
 The visibility-retention change passed all 84 then-existing model-independent

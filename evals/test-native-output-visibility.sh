@@ -5,6 +5,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 - "$repo_root" <<'PY'
 import concurrent.futures
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import stat
@@ -22,7 +23,7 @@ fake.mkdir(mode=0o700)
 private_marker = 'SYNTHETIC_NONFINAL_FIELD'
 secret = 'DummyPass12345678'
 fake_source = r'''
-import json, os, runpy, sys
+import json, os, re, runpy, sys
 from pathlib import Path
 case = Path(os.environ['VIS_CASE'])
 args = sys.argv[1:]
@@ -48,13 +49,21 @@ assert request['model'] == 'visibility-fake'
 ledger = case / 'emitted.jsonl'
 ordinal = len(ledger.read_text().splitlines()) + 1 if ledger.exists() else 1
 mode = os.environ['VIS_MODE']
-# Exercise retention of an explicitly non-finding final without depending on
-# logging-word suppression, which must not erase independently concrete roots.
+is_shard = '--- 当前审查分片：' in request['prompt']
+scope_text = request['prompt'].split('--- 当前审查分片：', 1)[-1] if is_shard else request['prompt']
+scope_paths = re.findall(r'^\+\+\+ b/(src/Case[ABC]\.js)$', scope_text, re.MULTILINE)
+# Keep the original non-finding final unchanged. Legal candidate visibility
+# does not certify its factual value or turn it into model-quality gold.
 filtered = ('信息 src/CaseA.js:1 - CANDIDATE_' + str(ordinal) + ' 实现符合契约\n'
             '证据：当前实现符合契约。\n影响：没有任何可修复问题。\n修复建议：无。\n验证方式：无。')
 retained = ('P2 src/CaseA.js:1 - RETAINED_' + str(ordinal) + ' 返回值不符\n'
             '证据：函数返回常量。\n影响：返回不同结果。\n修复建议：核对固定值。\n验证方式：断言返回值。')
 final, done, reason, status = filtered, True, 'stop', 0
+if mode == 'sharded-scoped':
+    # Separate legal-stage control: bind only to the actual current shard
+    # diff, not the global changed-path inventory appended to the prompt.
+    assert is_shard and len(scope_paths) == 1
+    final = filtered.replace('src/CaseA.js:', scope_paths[0] + ':', 1)
 if mode == 'mixed': final += '\n\n' + retained
 if mode == 'specialist' and ordinal == 1: final = '未发现阻塞问题'
 if mode == 'retry':
@@ -75,7 +84,7 @@ payload = {'response': final, 'done': done, 'done_reason': reason,
            'thinking': 'SYNTHETIC_NONFINAL_FIELD', 'error': 'password=DummyPass12345678'}
 with ledger.open('a') as out:
     out.write(json.dumps({'final': final, 'curl_status': status, 'done': done,
-                          'reason': reason, 'shard': '当前审查分片' in request['prompt']}) + '\n')
+                          'reason': reason, 'shard': is_shard, 'scope_paths': scope_paths}) + '\n')
 if mode == 'invalid-json':
     print('{"thinking":"SYNTHETIC_NONFINAL_FIELD","error":"password=DummyPass12345678"')
 elif mode == 'wrong-type':
@@ -94,7 +103,7 @@ for dependency in ('jq', 'rg'):
     executable = shutil.which(dependency)
     assert executable, dependency + ' is required to run the existing core'
     (fake / dependency).symlink_to(Path(executable).resolve())
-scenarios = ['initial', 'personal', 'mixed', 'sharded', 'specialist', 'retry', 'nonzero',
+scenarios = ['initial', 'personal', 'mixed', 'sharded', 'sharded-scoped', 'specialist', 'retry', 'nonzero',
              'length', 'done-false', 'unsupported', 'empty', 'invalid-json', 'wrong-type',
              'invalid-format', 'secret-controls', 'directory-file', 'symlink-dir',
              'symlink-ancestor', 'public-mode', 'relative-dir', 'control-dir',
@@ -105,6 +114,10 @@ def require(condition, message, case):
     if not condition:
         stderr = (case / 'stderr').read_text() if (case / 'stderr').exists() else ''
         raise AssertionError(message + '\n' + stderr)
+
+
+def candidate_blocks(text):
+    return re.split(r'\n+(?=(?:P[0-3]|信息) )', text.rstrip('\n')) if text.rstrip('\n') else []
 
 
 def run_case(name):
@@ -120,7 +133,7 @@ def run_case(name):
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_TERMINAL_PROMPT': '0',
            'OLLAMA_HOST': 'http://127.0.0.1:11434', 'OLLAMA_REVIEW_MODEL': 'visibility-fake',
            'OLLAMA_REVIEW_LOCK_DIR': str(tmp / 'model-lock'), 'OLLAMA_REVIEW_RETRY_ATTEMPTS': '1' if name == 'retry' else '0',
-           'OLLAMA_REVIEW_MAX_DIFF_BYTES': '1000' if name == 'sharded' else '60000',
+           'OLLAMA_REVIEW_MAX_DIFF_BYTES': '1000' if name in ('sharded', 'sharded-scoped') else '60000',
            'OLLAMA_REVIEW_NUM_CTX': '16384', 'OLLAMA_REVIEW_NUM_PREDICT': '4096',
            'OLLAMA_REVIEW_CHUNK_NUM_PREDICT': '4096', 'OLLAMA_REVIEW_TIMEOUT_SECONDS': '60',
            'OLLAMA_REVIEW_TOTAL_TIMEOUT_SECONDS': '60', 'OLLAMA_REVIEW_CHUNK_TIMEOUT_SECONDS': '30',
@@ -160,12 +173,26 @@ def run_case(name):
     require((case / 'emitted.jsonl').is_file(),
             name + ': no fake inference recorded; core exit=' + str(result.returncode), case)
     emitted = [json.loads(line) for line in (case / 'emitted.jsonl').read_text().splitlines()]
-    failed = name in ('nonzero', 'length', 'done-false', 'unsupported', 'empty', 'invalid-json', 'wrong-type', 'invalid-format')
+    failed = name in ('sharded', 'nonzero', 'length', 'done-false', 'unsupported', 'empty', 'invalid-json', 'wrong-type', 'invalid-format')
     require(result.returncode == (1 if failed else 0), name + ': return code changed', case)
-    if not failed and name not in ('mixed', 'secret-controls'):
-        require(stdout.strip() == '未发现阻塞问题', name + ': stdout gate changed', case)
-    if name != 'secret-controls':
-        require('CANDIDATE_' not in stdout, name + ': non-finding candidate entered final stdout', case)
+    if failed:
+        require(not stdout, name + ': incomplete/invalid review produced successful stdout', case)
+    else:
+        expected_blocks = []
+        for attempt in emitted:
+            if attempt['curl_status'] == 0 and attempt['done'] and attempt['reason'] == 'stop':
+                expected = attempt['final']
+                if name == 'secret-controls':
+                    expected = expected.replace(secret, '<REDACTED>').replace('\x1b[31m', '').replace('\x1b[0m', '').replace('\x00', '')
+                if expected != '未发现阻塞问题':
+                    expected_blocks += candidate_blocks(expected)
+        ranks = {'P0': 0, 'P1': 1, 'P2': 2, 'P3': 3, '信息': 4}
+        expected_blocks.sort(key=lambda block: ranks[block.split(' ', 1)[0]])
+        if expected_blocks:
+            require(candidate_blocks(stdout) == expected_blocks and '未发现阻塞问题' not in stdout,
+                    name + ': complete ordered candidates were rewritten, hidden or turned clean', case)
+        else:
+            require(stdout == '未发现阻塞问题\n', name + ': canonical clean changed', case)
     require(private_marker not in stdout + stderr and secret not in stdout + stderr, name + ': secret/nonfinal leaked', case)
     require(not (case / 'unexpected-network').exists(), name + ': unrecognized transport', case)
     reports = list(report_dir.glob('review-*/final-candidates.jsonl')) if report_dir.is_dir() else []
@@ -201,10 +228,22 @@ def run_case(name):
     if name in ('symlink-dir', 'symlink-ancestor'):
         require(not list((case / 'untouched').iterdir()), name + ': followed directory link', case)
     if name == 'public-mode': require(stat.S_IMODE(report_dir.stat().st_mode) == 0o755, name + ': changed existing permissions', case)
-    if name == 'sharded': require(len(records) == 3 and all(r['stage'].startswith('chunk-') for r in records), 'missing shard capture', case)
+    if name == 'sharded':
+        # The unchanged fixed CaseA response is legal for A, then illegal for B.
+        # Stop on the first cross-scope final; preserve both attempted archives.
+        require(len(records) == len(emitted) == 2 and all(r['stage'].startswith('chunk-') for r in records),
+                'missing failed shard attempt capture', case)
+        require([entry['scope_paths'] for entry in emitted] == [['src/CaseA.js'], ['src/CaseB.js']],
+                'cross-scope stimulus did not reach its intended shard', case)
+        require('模型输出缺少可验证' in stderr, 'cross-scope finding bypassed validation', case)
+    if name == 'sharded-scoped':
+        require(len(records) == 3 and all(r['stage'].startswith('chunk-') for r in records),
+                'missing legal scoped shard capture', case)
+        require([entry['scope_paths'] for entry in emitted] == [[f'src/Case{letter}.js'] for letter in 'ABC'],
+                'legal shard response was not bound to each actual request', case)
     if name == 'specialist': require(len(records) == 2 and records[1]['stage'] == 'initial.specialist', 'missing specialist capture', case)
     if name == 'retry': require([r['attempt'] for r in records] == [1, 2] and records[0]['curl_status'] == 28, 'retry overwritten', case)
-    if name == 'mixed': require('RETAINED_1' in stdout and 'CANDIDATE_1' not in stdout, 'mixed stdout gate changed', case)
+    if name == 'mixed': require('RETAINED_1' in stdout and 'CANDIDATE_1' in stdout, 'mixed candidate disappeared', case)
     if name != 'default-home': require(not (home / '.local/share/local-review/reports').exists(), name + ': ignored isolated report directory', case)
     return len(emitted)
 

@@ -61,7 +61,7 @@ count="$(printf '%s\n' "$output" | grep -cF "$marker" || true)"
   printf '%s\n' "$output" >&2
   exit 1
 }
-printf '%s\n' "$output" | grep -F 'P1（有条件）' >/dev/null
+printf '%s\n' "$output" | grep -E '^P1 src/main/java/com/bit/system/application/HrAccountProjectionApplication[.]java:[0-9]+ - （有条件）' >/dev/null
 for field in '影响：' '修复建议：' '验证方式：'; do
   printf '%s\n' "$output" | grep -F "$field" >/dev/null || {
     echo "HR default-password preflight omitted $field" >&2

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Regression coverage for evidence-sensitive output filtering.  This suite
-# never contacts Ollama: a fake curl returns fixed model blocks and a fake
-# ollama satisfies the local model probe.
+# Regression coverage for candidate retention and scope validation, not
+# factual model accuracy. A fake curl returns the unchanged fixed final blocks
+# and a fake ollama satisfies the local model probe; no real model is called.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/local-review-filter-evidence.XXXXXX")"
 trap 'rm -rf "$fixture_root"' EXIT
@@ -49,7 +49,7 @@ new_repo() {
 }
 
 run_review() {
-  local name="$1" repo="$2" response="$3" output error
+  local name="$1" repo="$2" response="$3" expected="${4:-retain}" output error
   output="$fixture_root/$name.out"
   error="$fixture_root/$name.err"
   local status=0
@@ -59,12 +59,24 @@ run_review() {
   else
     status=$?
   fi
-  if [[ "$status" != 0 ]]; then
+  printf '%s\n' "$status" >"$fixture_root/$name.status"
+  if [[ "$status" != 0 && "$expected" != reject ]]; then
     printf 'FAIL %s: review exited %s\n' "$name" "$status" >&2
+    cat "$output" "$error" >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+}
+
+assert_rejected() {
+  local name="$1" output="$2" diagnostic="$3"
+  local error="$fixture_root/$name.err" status
+  status="$(<"$fixture_root/$name.status")"
+  if [[ "$status" == 0 || -s "$output" ]] || ! grep -F "$diagnostic" "$error" >/dev/null; then
+    printf 'FAIL %s: expected nonzero rejection, empty stdout and diagnostic %s\n' "$name" "$diagnostic" >&2
     cat "$output" "$error" >&2
     filter_evidence_failures=$((filter_evidence_failures + 1))
   fi
-  printf '%s\n' "$output"
 }
 
 assert_truncated_independent_finding_fails() {
@@ -126,7 +138,7 @@ assert_truncated_response_recovers_deterministic_only() {
 assert_contains() {
   local name="$1" output="$2" marker="$3"
   grep -F "$marker" "$output" >/dev/null || {
-    printf 'FAIL %s: expected independent finding marker %s\n' "$name" "$marker" >&2
+    printf 'FAIL %s: expected candidate/diagnostic marker %s\n' "$name" "$marker" >&2
     cat "$output" >&2
     filter_evidence_failures=$((filter_evidence_failures + 1))
   }
@@ -170,6 +182,7 @@ P1 src/main/resources/EmployeeMapper.xml:11-13 - MIXED_UNSAFE_MARKER：另一条
 修复建议：在该查询中绑定当前租户并补充跨租户回归。
 验证方式：使用两个租户分别执行 findUnsafe，确认结果集合互不相交。')"
 assert_contains mixed-mapper "$mixed_output" MIXED_UNSAFE_MARKER
+assert_contains mixed-mapper "$mixed_output" SAFE_GENERIC_MARKER
 
 # A deleted tenant guard is evidence of a regression, not proof that a guard
 # still exists.  The deleted line is intentionally present in the diff input;
@@ -227,9 +240,8 @@ alias_output="$(run_review alias-mismatch "$alias_repo" 'P1 src/main/resources/E
 验证方式：执行 findById 的 SQL 解析/集成测试，确认别名可解析且两个租户结果隔离。')"
 assert_contains alias-mismatch "$alias_output" ALIAS_MISMATCH_MARKER
 
-# A structured P1 for a token that is actually written to logs is concrete
-# evidence.  It must survive the generic "missing logging is out of scope"
-# filter even when the wording contains 日志记录.
+# The structured token-logging candidate remains visible independently of
+# wording such as 日志记录; this test does not grade model factual accuracy.
 log_repo="$(new_repo token-log)"
 mkdir -p "$log_repo/src/main/java/example"
 cat >"$log_repo/src/main/java/example/AuditLogger.java" <<'EOF'
@@ -258,23 +270,17 @@ log_output="$(run_review token-log "$log_repo" 'P1 src/main/java/example/AuditLo
 验证方式：执行 record 并检查应用、网关和集中式日志，确认不再出现 token 值。')"
 assert_contains token-log "$log_output" STRUCTURED_TOKEN_LOG_MARKER
 
-# A model explanation of a safe header-only transport is not an information
-# finding.  It must normalize to the clean marker without hiding a concrete
-# security claim.
+# A structurally valid model explanation remains visible even when it says
+# the transport is safe. Visibility is not factual certification of this prose.
 safe_output="$(run_review safe-negative "$mixed_repo" '信息 src/main/resources/EmployeeMapper.xml:1-13 - 令牌只通过内部请求头传递，符合安全边界规则，无需修复。
 影响：没有证据表明该请求会进入日志或外部边界。
 修复建议：无需修复，当前实现符合安全负例契约。
 验证方式：确认差异中没有日志、持久化或外部跳转证据。')"
-if ! grep -Fx '未发现阻塞问题' "$safe_output" >/dev/null; then
-  printf 'FAIL safe-negative: expected clean marker\n' >&2
-  cat "$safe_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+assert_contains safe-negative "$safe_output" '信息 src/main/resources/EmployeeMapper.xml:1-13'
+assert_contains safe-negative "$safe_output" '令牌只通过内部请求头传递'
 
-# A permission-interceptor migration has a deterministic preflight finding.
-# The model must not turn the missing service implementation from a shard into
-# repeated conditional "if the service does not validate" findings; the
-# preflight paragraph remains the authoritative visible issue.
+# Keep both the fixed speculative model candidate and the independently
+# emitted preflight. Retention does not turn the conditional prose into gold.
 permission_repo="$(new_repo xxl-permission-migration)"
 mkdir -p "$permission_repo/src/main/java/example"
 cat >"$permission_repo/src/main/java/example/JobInfoController.java" <<'EOF'
@@ -294,9 +300,9 @@ permission_output="$(run_review permission-migration "$permission_repo" 'P1 src/
 影响：如果服务层缺少权限校验，可能发生越权。
 修复建议：检查服务层是否调用 validJobGroupPermission。
 验证方式：检查服务层实现并执行跨组请求。')"
-if grep -F 'SPECULATIVE_PERMISSION_MARKER' "$permission_output" >/dev/null ||
+if ! grep -F 'SPECULATIVE_PERMISSION_MARKER' "$permission_output" >/dev/null ||
    ! grep -F '权限拦截器重构后仍有同类任务/日志入口未执行' "$permission_output" >/dev/null; then
-  printf 'FAIL permission-migration: speculative model duplicate was not filtered or preflight finding missing\n' >&2
+  printf 'FAIL permission-migration: model candidate or preflight finding missing\n' >&2
   cat "$permission_output" >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
@@ -316,9 +322,8 @@ P1 src/main/java/example/JobInfoController.java:1-8 - 权限拦截器重构后�
 验证方式：执行跨组请求。' '权限拦截器重构后仍有同类任务/日志入口未执行'
 export LOCAL_REVIEW_TEST_DONE_REASON=stop
 
-# Legal generated-column syntax and an unconstrained DDL tenant-column
-# suggestion are information-level speculation without a visible contract;
-# both must normalize to clean while concrete SQL/tenant findings remain.
+# The unchanged legal-syntax explanation and unsupported tenant suggestion
+# must both remain visible. Neither becomes factual gold by passing structure.
 ddl_repo="$(new_repo ddl-safe-info)"
 mkdir -p "$ddl_repo/sql"
 cat >"$ddl_repo/sql/schema.sql" <<'EOF'
@@ -340,29 +345,24 @@ ddl_output="$(run_review ddl-safe-info "$ddl_repo" '信息 sql/schema.sql:1-5 - 
 影响：无。
 修复建议：无。
 验证方式：无。')"
-if ! grep -Fx '未发现阻塞问题' "$ddl_output" >/dev/null || grep -Eq '^[[:space:]]*(P[0-3]|信息)[[:space:]:：]' "$ddl_output"; then
-  printf 'FAIL ddl-safe-info: legal/generated-column information was not filtered to clean\n' >&2
-  cat "$ddl_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+assert_contains ddl-safe-info "$ddl_output" '信息 sql/schema.sql:1-5'
+assert_contains ddl-safe-info "$ddl_output" '信息 sql/schema.sql:4'
 
-# Commented authorization annotations are a concrete P1, but a second
-# information paragraph that only repeats the readability/maintenance angle
-# must not leak into the final report.
+# The maintenance-only information paragraph is unverified advice, but its
+# legal structure and location require retention alongside the preflight.
 permission_info_output="$(run_review permission-info "$permission_repo" '信息 src/main/java/example/JobInfoController.java:1-8 - 注释掉的权限注解会降低代码可读性，可能导致维护人员忽略权限要求。
 影响：代码一致性下降。
 修复建议：移除注释并保持代码一致性。
 验证方式：检查代码风格规范。')"
 if ! grep -F '权限拦截器重构后仍有同类任务/日志入口未执行' "$permission_info_output" >/dev/null ||
-   grep -Eq '^[[:space:]]*信息[[:space:]:：]' "$permission_info_output"; then
-  printf 'FAIL permission-info: non-actionable authorization information was not filtered\n' >&2
+   ! grep -Eq '^[[:space:]]*信息[[:space:]:：]' "$permission_info_output"; then
+  printf 'FAIL permission-info: information candidate or preflight was hidden\n' >&2
   cat "$permission_info_output" >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
-# A changed controller that comments out an authorization annotation must be
-# covered by deterministic preflight. The model's duplicate wording and its
-# maintenance-only information paragraph are both discarded.
+# Preserve the model's duplicate wording and maintenance advice as well as
+# the deterministic preflight; the wrapper must not decide their factual value.
 authorization_repo="$(new_repo authorization-annotation)"
 mkdir -p "$authorization_repo/src/main/java/example"
 cat >"$authorization_repo/src/main/java/example/BrandController.java" <<'EOF'
@@ -389,15 +389,14 @@ authorization_output="$(run_review authorization-annotation "$authorization_repo
 验证方式：检查代码风格。')"
 if ! grep -F '声明式权限注解被注释/删除' "$authorization_output" >/dev/null ||
    ! grep -F 'MODEL_AUTH_DUPLICATE' "$authorization_output" >/dev/null ||
-   grep -Eq '^[[:space:]]*信息[[:space:]:：]' "$authorization_output"; then
+   ! grep -Eq '^[[:space:]]*信息[[:space:]:：]' "$authorization_output"; then
   printf 'FAIL authorization-annotation: model and deterministic findings were not both preserved\n' >&2
   cat "$authorization_output" >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
-# A presigned-ticket fixture has a deterministic replay preflight. Repeated
-# lifecycle variants from the model are duplicates, not independent findings;
-# keep the deterministic P1 and discard the model's speculative paragraphs.
+# Preserve both fixed lifecycle candidates and the deterministic preflight.
+# The speculative second model paragraph remains advice, not an extra gold root.
 presigned_repo="$(new_repo presigned-replay)"
 mkdir -p "$presigned_repo/src"
 cp "$repo_root/evals/fixtures/java-presigned-replay/src/UploadSessionService.java" \
@@ -415,7 +414,8 @@ P1 src/UploadSessionService.java:18-21 - MODEL_PRESIGNED_DUPLICATE_2：缺少过
 修复建议：校验过期时间。
 验证方式：使用过期票据测试。')"
 if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_output" >/dev/null ||
-   ! grep -F 'MODEL_PRESIGNED_DUPLICATE' "$presigned_output" >/dev/null; then
+   ! grep -F 'MODEL_PRESIGNED_DUPLICATE：' "$presigned_output" >/dev/null ||
+   ! grep -F 'MODEL_PRESIGNED_DUPLICATE_2：' "$presigned_output" >/dev/null; then
   printf 'FAIL presigned-replay: model and deterministic findings were not both preserved\n' >&2
   cat "$presigned_output" >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
@@ -443,12 +443,20 @@ P2 src/main/java/example/JobLogController.java:6 - MODEL_NPE_MARKER：executorBi
 验证方式：覆盖无效地址/客户端构造失败场景。'
 export LOCAL_REVIEW_TEST_DONE_REASON=stop
 export LOCAL_REVIEW_TEST_TRANSPORT_FAIL=1
-presigned_transport_output="$(run_review presigned-replay-transport "$presigned_repo" '未使用的响应体')"
+presigned_transport_output="$(run_review presigned-replay-transport "$presigned_repo" '未使用的响应体' reject)"
 unset LOCAL_REVIEW_TEST_TRANSPORT_FAIL
-if ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_transport_output" >/dev/null ||
-   grep -F '未使用的响应体' "$presigned_transport_output" >/dev/null; then
-  printf 'FAIL presigned-replay-transport: deterministic singleton preflight was not recovered safely\n' >&2
-  cat "$presigned_transport_output" >&2
+assert_rejected presigned-replay-transport "$presigned_transport_output" '整次审查仍按失败处理'
+presigned_transport_error="$fixture_root/presigned-replay-transport.err"
+for preflight_line in \
+  '取消后仍可重放有效的预签名上传票据，存在对象存储竞态和孤儿对象资源耗尽风险。' \
+  '影响：取消流程删除 objectKey 并标记终态后，未过期票据仍可写入同一对象，而只扫描活动会话的清理流程不会回收该对象。' \
+  '修复建议：取消时撤销或版本化所有未过期票据，并让终态对象进入可靠的删除/补偿队列。' \
+  '验证方式：在票据有效期内先取消会话再上传，确认写入被拒绝且对象最终被回收；重复测试终态和过期清理路径。'
+do
+  assert_contains presigned-replay-transport "$presigned_transport_error" "$preflight_line"
+done
+if grep -F '未使用的响应体' "$presigned_transport_error" >/dev/null; then
+  printf 'FAIL presigned-replay-transport: unused fake response appeared in diagnostic\n' >&2
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
@@ -535,8 +543,8 @@ if ! grep -Fx '未发现阻塞问题' "$safe_ssrf_output" >/dev/null ||
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
-# A raw MyBatis scalar assignment is a deterministic SQL-injection shape. The
-# model duplicate must be removed while the authoritative preflight remains.
+# A raw MyBatis scalar assignment has a deterministic preflight. Retain the
+# complete fixed model candidate independently instead of semantic deduplication.
 mybatis_raw_repo="$(new_repo mybatis-raw-substitution)"
 mkdir -p "$mybatis_raw_repo/src/main/resources/mybatis-mapper"
 cat >"$mybatis_raw_repo/src/main/resources/mybatis-mapper/JobMapper.xml" <<'EOF'
@@ -562,9 +570,8 @@ if ! grep -F 'MyBatis Mapper 将表达式' "$mybatis_raw_output" >/dev/null ||
   filter_evidence_failures=$((filter_evidence_failures + 1))
 fi
 
-# Untracked files are intentionally part of the review scope; their Git
-# status is not an information-level code defect. Concrete findings must still
-# survive, but a model request to `git add` the file must normalize to clean.
+# Untracked files are intentionally in scope. Their status is not a code
+# defect, but legal fixed Git-state advice must remain visible, not become clean.
 untracked_info_repo="$(new_repo untracked-info)"
 mkdir -p "$untracked_info_repo/src/main/java/example"
 cat >"$untracked_info_repo/src/main/java/example/LocalProperties.java" <<'EOF'
@@ -578,45 +585,25 @@ untracked_info_output="$(run_review untracked-info "$untracked_info_repo" '信�
 影响：如果不提交，构建可能缺少配置类。
 修复建议：将该文件添加到 Git 仓库中，并检查 Git 状态。
 验证方式：确认文件已被跟踪。')"
-if ! grep -Fx '未发现阻塞问题' "$untracked_info_output" >/dev/null ||
-   grep -F 'UNTRACKED_INFO_MARKER' "$untracked_info_output" >/dev/null; then
-  printf 'FAIL untracked-info: Git status prose was not filtered\n' >&2
-  cat "$untracked_info_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+assert_contains untracked-info "$untracked_info_output" UNTRACKED_INFO_MARKER
 
 untracked_clean_marker_output="$(run_review untracked-clean-marker "$untracked_info_repo" '信息 src/main/java/example/LocalProperties.java:1-5 - UNTRACKED_CLEAN_MARKER：代码新增但未提交到 Git；仅审查当前差异内容。
 影响：无阻塞问题。
 修复建议：无。
 验证方式：无。')"
-if ! grep -Fx '未发现阻塞问题' "$untracked_clean_marker_output" >/dev/null ||
-   grep -F 'UNTRACKED_CLEAN_MARKER' "$untracked_clean_marker_output" >/dev/null; then
-  printf 'FAIL untracked-clean-marker: clean Git-state prose was not filtered\n' >&2
-  cat "$untracked_clean_marker_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+assert_contains untracked-clean-marker "$untracked_clean_marker_output" UNTRACKED_CLEAN_MARKER
 
 generic_clean_info_output="$(run_review generic-clean-info "$untracked_info_repo" '信息 src/main/java/example/LocalProperties.java:1-5 - GENERIC_CLEAN_INFO_MARKER：
 影响：该类是一个新增的 Java 类，没有任何可修复问题。
 修复建议：无。
 验证方式：无。')"
-if ! grep -Fx '未发现阻塞问题' "$generic_clean_info_output" >/dev/null ||
-   grep -F 'GENERIC_CLEAN_INFO_MARKER' "$generic_clean_info_output" >/dev/null; then
-  printf 'FAIL generic-clean-info: explicit no-finding information was not normalized\n' >&2
-  cat "$generic_clean_info_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+assert_contains generic-clean-info "$generic_clean_info_output" GENERIC_CLEAN_INFO_MARKER
 
 doc_sync_info_output="$(run_review doc-sync-info "$untracked_info_repo" '信息 doc/README.md:1-5 - DOC_SYNC_INFO_MARKER：文档更新与代码实现一致，无需额外修复。
 影响：无。
 修复建议：无。
-验证方式：无。')"
-if ! grep -Fx '未发现阻塞问题' "$doc_sync_info_output" >/dev/null ||
-   grep -F 'DOC_SYNC_INFO_MARKER' "$doc_sync_info_output" >/dev/null; then
-  printf 'FAIL doc-sync-info: documentation synchronization summary was not filtered\n' >&2
-  cat "$doc_sync_info_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+验证方式：无。' reject)"
+assert_rejected doc-sync-info "$doc_sync_info_output" '模型输出缺少可验证'
 
 path_safe_repo="$(new_repo path-safe)"
 mkdir -p "$path_safe_repo/src/main/java/example"
@@ -639,16 +626,10 @@ path_safe_output="$(run_review path-safe "$path_safe_repo" '信息 src/main/java
 影响：攻击者可能读取根目录之外的文件。
 修复建议：使用 normalize 后的绝对路径进行更严格检查。
 验证方式：测试 ../etc/passwd。')"
-if ! grep -Fx '未发现阻塞问题' "$path_safe_output" >/dev/null ||
-   grep -F 'PATH_SAFE_BOUNDARY_MARKER' "$path_safe_output" >/dev/null; then
-  printf 'FAIL path-safe: visible normalize/startsWith boundary was over-reported\n' >&2
-  cat "$path_safe_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+assert_contains path-safe "$path_safe_output" PATH_SAFE_BOUNDARY_MARKER
 
-# Visible Lombok annotations supply generated members.  A missing-dependency
-# guess without compiler/build evidence is not an actionable finding; keep
-# explicit build failures and dependency-removal claims reportable.
+# Keep the fixed Lombok speculation unchanged: this source has only nine
+# lines, so its reported 1-16 range must fail validation rather than become clean.
 lombok_repo="$(new_repo lombok-safe)"
 mkdir -p "$lombok_repo/src/main/java/example"
 cat >"$lombok_repo/src/main/java/example/PlatformFileInternalClientProperties.java" <<'EOF'
@@ -670,18 +651,12 @@ lombok_output="$(run_review lombok-safe "$lombok_repo" '信息 src/main/java/exa
 
 修复建议：在构建文件（例如 `pom.xml` 或 `build.gradle`）中添加 Lombok 依赖。
 
-验证方式：构建项目并确认 `@Data` 注解被正确处理。')"
-if ! grep -Fx '未发现阻塞问题' "$lombok_output" >/dev/null ||
-   grep -F 'LOMBOK_DEPENDENCY_MARKER' "$lombok_output" >/dev/null; then
-  printf 'FAIL lombok-safe: Lombok dependency speculation was not filtered\n' >&2
-  cat "$lombok_output" >&2
-  filter_evidence_failures=$((filter_evidence_failures + 1))
-fi
+验证方式：构建项目并确认 `@Data` 注解被正确处理。' reject)"
+assert_rejected lombok-safe "$lombok_output" '模型报告的文件/行号超出当前文件'
 
-# A presign provider's interface return and a bare delete call do not, by
-# themselves, prove nullability or rollback requirements.  The deterministic
-# lifecycle preflight must remain visible while these speculative information
-# paragraphs are removed.
+# An interface return or bare delete call does not prove these speculative
+# claims. Preserve every legally structured paragraph for independent review,
+# together with the deterministic lifecycle preflight, without certifying gold.
 presigned_repo="$(new_repo presigned-speculation)"
 mkdir -p "$presigned_repo/src"
 cat >"$presigned_repo/src/UploadSessionService.java" <<'EOF'
@@ -757,8 +732,8 @@ presigned_output="$(run_review presigned-speculation "$presigned_repo" 'P1 src/U
 
 验证方式：模拟 store.delete 失败，确认会话状态被正确回滚。')"
 if ! grep -F 'PRESIGN_LIFECYCLE_DUPLICATE_MARKER' "$presigned_output" >/dev/null ||
-   grep -F 'PRESIGN_NULL_SPECULATION_MARKER' "$presigned_output" >/dev/null ||
-   grep -F 'DELETE_EXCEPTION_SPECULATION_MARKER' "$presigned_output" >/dev/null ||
+   ! grep -F 'PRESIGN_NULL_SPECULATION_MARKER' "$presigned_output" >/dev/null ||
+   ! grep -F 'DELETE_EXCEPTION_SPECULATION_MARKER' "$presigned_output" >/dev/null ||
    ! grep -F '取消后仍可重放有效的预签名上传票据' "$presigned_output" >/dev/null; then
   printf 'FAIL presigned-speculation: concrete model finding or preflight finding was missing\n' >&2
   cat "$presigned_output" >&2
@@ -769,4 +744,4 @@ if (( filter_evidence_failures > 0 )); then
   printf 'filter evidence regression failed: %s cases\n' "$filter_evidence_failures" >&2
   exit 1
 fi
-printf 'filter evidence regression passed: 24 cases\n'
+printf 'filter evidence regression passed: 26 cases\n'

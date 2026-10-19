@@ -96,11 +96,11 @@ run_review() {
 }
 
 run_review "$unsafe_repo" "$fixture_root/unsafe.out"
-grep -F 'P1（条件） src/main/java/com/bit/auth/mapper/SysTenantMapper.java:' "$fixture_root/unsafe.out" >/dev/null
+grep -E '^P1 src/main/java/com/bit/auth/mapper/SysTenantMapper[.]java:[0-9]+ - （条件）' "$fixture_root/unsafe.out" >/dev/null
 grep -F '停用或到期租户' "$fixture_root/unsafe.out" >/dev/null
 
 run_review "$safe_repo" "$fixture_root/safe.out"
-if grep -F 'P1（条件） src/main/java/com/bit/auth/mapper/SysTenantMapper.java:' "$fixture_root/safe.out" >/dev/null; then
+if grep -E '^P1 src/main/java/com/bit/auth/mapper/SysTenantMapper[.]java:[0-9]+ - （条件）' "$fixture_root/safe.out" >/dev/null; then
   echo 'safe tenant lifecycle query incorrectly reported' >&2
   cat "$fixture_root/safe.out" >&2
   exit 1

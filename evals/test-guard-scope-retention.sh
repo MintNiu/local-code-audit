@@ -168,7 +168,8 @@ cases = [
     dict(name='header-line-999', roots=('header',), expected='invalid-range',
          response=finding('header', invalid_range=True)),
     dict(name='canonical-clean', roots=('dto', 'header'), safe=True, expected='clean', response=clean),
-    dict(name='strict-incomplete-only', roots=('dto', 'header'), safe=True, expected='clean', response=(
+    # Visibility-only control, not a source-proven defect or model-quality gold.
+    dict(name='strict-incomplete-only', roots=('dto', 'header'), safe=True, expected='unconfirmed', response=(
         '信息 ' + dto_path + ':1 - 提供完整的文件内容\n'
         '影响：无法确定代码是否符合项目规则\n修复建议：提供完整的文件内容\n验证方式：补充完整文件内容\n')),
     dict(name='mixed-length', roots=('dto', 'header'), expected='length', response=mixed),
@@ -271,9 +272,12 @@ def run_case(spec):
                 rb'\n+(?=P2 )', response_bytes.rstrip(b'\n'))
         if status != 0 or not exact_candidates or clean in output:
             problems.append('concrete candidates must survive completely and never become clean')
+    elif expected == 'unconfirmed':
+        if status != 0 or stdout != response_bytes or clean in output:
+            problems.append('complete unconfirmed information must remain visible, not become clean')
     elif expected == 'clean':
         if status != 0 or stdout != (clean + '\n').encode('utf-8'):
-            problems.append('canonical clean and strict pure incomplete-only explanation must normalize to clean')
+            problems.append('canonical clean must remain clean')
     else:
         message = {'invalid': '模型输出缺少可验证', 'invalid-range': '模型报告的文件/行号超出当前文件',
                    'length': '模型输出因长度限制被截断'}[expected]

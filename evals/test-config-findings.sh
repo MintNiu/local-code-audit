@@ -168,7 +168,8 @@ aliyun:
     access-key-id: ${ALIYUN_OSS_ACCESS_KEY_ID}
     access-key-secret: ${ALIYUN_OSS_ACCESS_KEY_SECRET}
 EOF
-run_case resolved-credential-replacement clean <<'EOF'
+# This resolved/non-finding prose is a retained candidate, not factual gold.
+run_case resolved-credential-replacement retain <<'EOF'
 P1 security.yml:3-4 - 删除旧凭据并改用环境变量占位符
 影响：旧凭据已从文件中移除，当前状态已移除旧凭据。
 修复建议：无需额外修复，但确保环境变量注入机制正常工作。

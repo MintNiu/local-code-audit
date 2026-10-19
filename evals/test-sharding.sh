@@ -76,12 +76,40 @@ actual="$(grep -o '@@ -[0-9,]* +[0-9,]* @@' "$capture" | sort -u)"
   exit 1
 }
 
-shard_finding_count="$(printf '%s\n' "$sharded_output" | grep -c '^P1 A.txt:1' || true)"
-[[ "$shard_finding_count" == "1" ]] || {
-  echo 'semantic shard aggregation retained repeated findings at one location' >&2
-  printf '%s\n' "$sharded_output" >&2
-  exit 1
-}
+# Repeated fixed paragraphs are protocol stimuli, not independent defect gold.
+# Decode the existing fake JSON exactly once; do not reinterpret a literal
+# backslash-n as a real newline or copy a different expected candidate here.
+python3 -I -B - "$fake_bin/curl" "$trace_file" "$capture.count" "$sharded_output" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+prefix = "printf '%s\\n' '"
+payloads = [json.loads(line[len(prefix):-1])
+            for line in Path(sys.argv[1]).read_text().splitlines()
+            if line.startswith(prefix) and line.endswith("'")]
+if len(payloads) != 1 or payloads[0].get('done') is not True or payloads[0].get('done_reason') != 'stop':
+    raise SystemExit('expected one unchanged complete fixed response in the fake transport')
+fixed_candidate = payloads[0]['response']
+if not isinstance(fixed_candidate, str) or not fixed_candidate:
+    raise SystemExit('fixed response must contain a nonempty candidate string')
+request_count = int(Path(sys.argv[3]).read_text().strip())
+rows = [line.split('\t') for line in Path(sys.argv[2]).read_text().splitlines()]
+statuses = [row for row in rows if row[0] == 'chunk_status']
+counts = [int(row[1]) for row in rows if row[0] == 'chunk_count']
+if (request_count < 2 or counts != [request_count] or len(statuses) != request_count
+        or any(len(row) < 5 or row[2] != '0' for row in statuses)
+        or len({row[1] for row in statuses}) != request_count):
+    raise SystemExit('expected at least two requests, one per distinct successful planned shard')
+# Only sorter separator blank lines may vary. Every ordered paragraph body
+# must equal the actual JSON-decoded fixed final, including literal escapes.
+actual_candidates = re.split(r'\n+(?=(?:P[0-3]|信息) )', sys.argv[4].rstrip('\n'))
+if actual_candidates != [fixed_candidate] * request_count:
+    print('shard aggregation changed, omitted or added a fixed candidate; expected ' + str(request_count), file=sys.stderr)
+    print(sys.argv[4], file=sys.stderr)
+    raise SystemExit(1)
+PY
 
 grep -E '^chunk_count[[:space:]]+[2-9][0-9]*$' "$trace_file" >/dev/null || {
   echo 'sharding trace did not record the generated chunk count' >&2
