@@ -280,6 +280,13 @@ baseline; neither recipe reported the Python root. All eight calls completed
 with matching model/resident identity. This covers two ordinary P2 roots,
 not eight independent roots or holdout quality. The candidate was not adopted;
 all six clean finals and two candidate paragraphs remain privately visible.
+A separate native read-only tool round trip succeeded, but its subsequent
+four-cell, one-root Java development comparison did not improve audit quality.
+Both recipes used the same existing general SYSTEM and full examples, not
+the daily long-SYSTEM profile. The agent read both complete source files,
+yet still flagged the correct implementation and gave a wrong-location,
+wrong-counterexample bug review. All four finals were retained; no tool loop
+was added to the default command. Protocol completion is not quality acceptance.
 The older entries below describe their then-current controls, not semantic
 suppression retained in the current code.
 
