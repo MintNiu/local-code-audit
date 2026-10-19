@@ -249,7 +249,18 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
-Latest native example comparison (2026-10-19): four complete input/output
+Latest temperature-only comparison (2026-10-19): the existing weights, complete
+daily inputs and 16K/4096 were held fixed, changing only 0 to the model-author
+configuration's 0.15. All four calls for one ordinary P2 development root
+completed with matching identity. The candidate returned canonical clean for
+correct code; the baseline acknowledged equivalence but added harmless
+information plus clean. Both temperatures missed the defective version.
+The candidate was rejected, with no default change, retry or temperature sweep;
+all four finals remain privately visible. Cleaner delivery on one safe case
+does not certify recall, stability or general false-positive improvement.
+See the [process record](docs/tuning-process.zh-CN.md).
+
+Previous native example comparison (2026-10-19): four complete input/output
 references replaced only the original examples, keeping the full daily SYSTEM,
 the same correct Java source and contract, and 16K/4096. Both calls completed
 with matching identity. The baseline produced six unsupported P1 paragraphs;
