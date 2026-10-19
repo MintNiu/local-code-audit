@@ -233,7 +233,20 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
-Latest model-independent verification (2026-10-19): logging-word retention
+Latest targeted workflow verification (2026-10-19): shard-qualification
+retention improved from 5/12 to 12/12 offline cases with byte-identical
+requests and fixed responses. A concrete finding is no longer deleted just
+because it also says that callers are not shown. Five supported-response
+cases (two source roots, including one mixed response) and two malformed
+responses had incorrectly become successful clean results. Required-field
+and line-range checks now reject the latter; strict incomplete-only, clean
+and truncation controls remain intact. Original finals were already archived
+before filtering. The complete local no-model regression passed 89/89 suites
+in 549.51 seconds; shell syntax and the runner self-test also passed.
+This is not native model quality, proof of every remaining
+filter, or overall acceptance; unsupported suggestions may remain visible.
+
+Preceding model-independent verification (2026-10-19): logging-word retention
 passed 10/10 targeted cases and all 88/88 suites in 529.03 seconds, plus shell
 syntax checks and the runner self-test. This fixes reproduced workflow
 false-clean cases and restores structure/range rejection; generic logging

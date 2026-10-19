@@ -1094,11 +1094,10 @@ filter_unsupported_shard_findings() {
           path_evidence ~ /store\.delete\([^)]*\)/ &&
           path_evidence ~ /sessions\.markCancelled/ &&
           block !~ /事务.*(处理|一致|回滚)|回滚.*(逻辑|策略)|重试|实现.*抛出|明确.*契约|编译失败|构建失败/) invalid = 1
-      # A shard does not contain the whole repository. Claims that a type or
-      # build declaration is missing merely because the current shard does
-      # not show it are not evidence of a defect.
-      if (block ~ /当前分片/ && block ~ /没有提供|没有展示|未展示|找不到|无法验证/ &&
-          block ~ /类型|依赖|构建配置|实现/) invalid = 1
+      # A concrete finding can also state which callers or implementations
+      # are unseen. That limitation does not disprove its visible evidence or
+      # bypass validation. Only incomplete_only_finding removes a wholly
+      # generic request for more source, not a mixed evidence paragraph.
       # The xxl-job permission preflight is authoritative for the narrow
       # interceptor-migration/route family.  A shard-local model often turns
       # the absence of an unseen service method into repeated conditional
