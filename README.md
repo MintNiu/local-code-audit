@@ -256,7 +256,21 @@ The preceding token-guard fix passed 8/8 targeted cases and 87/87 suites in
 guard passed 10/10 targeted cases and 86/86 suites in 550.18 seconds, correcting
 four reproduced deterministic false positives.
 
-Latest native diagnostic (2026-10-19): a combined JSON result-protocol candidate
+Latest native diagnostic (2026-10-19): a one-paragraph evidence-gate A/B
+kept the existing model, complete inputs and 16K/4096. The candidate changed
+evidence sufficiency wording, not the output protocol; all other SYSTEM bytes
+and request fields were retained. On the same correct Java source, A completed
+in 96.151 seconds but repeated one false immutable-list-copy P1 three times.
+B completed in 34.495 seconds but falsely claimed that sharing immutable
+Integer references lets a caller's list replacement change its independent
+copy. Both source-qualified reviewers rejected that mechanism. The frozen
+safe-case gate closed the other six slots unattempted and unscored; the
+candidate was not adopted. All received finals remain private and unfiltered.
+These two calls do not establish recall, repetition stability, general speed
+or quality improvement. No model, weights or defaults changed. See the
+[tuning record](docs/tuning-process.zh-CN.md).
+
+Earlier native diagnostic (2026-10-19): a combined JSON result-protocol candidate
 retained complete materials and the existing model with 16K/4096. All four
 development inputs fit the conservative byte estimate, including the full
 added API schema cost; the tightest margin was only nine estimated tokens.
