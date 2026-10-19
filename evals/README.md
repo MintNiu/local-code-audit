@@ -18,6 +18,17 @@ python3 scripts/run-native-canary.py \
 
 对应无模型回归是 `bash evals/test-native-canary.sh`，使用本机受控假 HTTP 服务，不启动真实模型。
 
+## 锁预检工作流回归
+
+```bash
+bash evals/test-java-lock-helper-release.sh
+bash evals/test-java-lock-helper-scope.sh
+```
+
+前者固定14次无网络替身调用，核对完整源码／实际请求、同字段私有finally释放、八个保守控制、完整建议留存与length失败；旧核心11/14，修复版14/14。14份源码与固定响应相同，10份请求逐字相同，另4份仅移除错误预检块，不宣称全请求相等。后者是59项受控字符串识别单元（6接受、53不认证），检查CR、忽略标识符字符、同类其他成员重入获取及不支持语法。目标Java或模型建议不执行，没有真实推理，也不将场景数当作根因或模型质量成绩。
+
+最终本地标准完整回归94/94、567.04秒、退出0，前后191文件清单一致；shell语法和运行器自测通过。只认证这一轮工程行为，不豁免既有真实模型门禁失败、未知语法或正式holdout要求。模型、SYSTEM、示例和16K/4096不变，全部过程见[调优记录](../docs/tuning-process.zh-CN.md)。
+
 ## 初始验收标准
 
 公开的合成回归入口是 `./evals/run-synthetic.sh`，目标、夹具和当前状态记录在 [goal.md](goal.md)。它用于每次调参后的快速回归，但不能替代真实历史提交评测。

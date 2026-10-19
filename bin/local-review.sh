@@ -6530,14 +6530,11 @@ collect_java_lock_lifecycle_preflight() {
   local diff_file="$1"
   local output_file="$2"
   local source_root="$3"
-  local candidates candidate_path candidate_line receiver source_file method_text
+  local candidates candidate_path candidate_line receiver source_file method_text helper_release
 
-  # A newly added ReentrantLock/Lock acquisition (lock or
-  # lockInterruptibly) with no matching release in
-  # the containing Java method is a high-confidence resource leak. Keep the
-  # check method-local: a later helper method may legitimately release a
-  # different lock, while try/finally and try-with-resources-like wrappers
-  # remain visible in the same method and therefore stay clean.
+  # Keep the existing method-local missing-release candidate, but first exempt
+  # the narrow proved finally -> private leaf -> same final standard lock case.
+  # Unknown helpers are not safety evidence. Never remove a model paragraph.
   candidates="$(mktemp "${TMPDIR:-/tmp}/local-review-java-lock-lifecycle-candidates.XXXXXX")"
   awk '
     /^diff --git / { path = $4; sub(/^b\//, "", path); next }
@@ -6598,6 +6595,8 @@ collect_java_lock_lifecycle_preflight() {
     '; then
       continue
     fi
+    helper_release="$(python3 "$script_dir/java-lock-helper-scope.py" "$source_file" "$candidate_line" "$receiver" 2>/dev/null || true)"
+    [[ "$helper_release" == released ]] && continue
     printf '%s\n' \
       "P1 $candidate_path:$candidate_line - Java 锁获取后在当前方法内未观察到同一接收者的完整 unlock 对应关系，可能存在锁生命周期不完整。" \
       '影响：线程在锁持有期间抛出异常或提前返回后，后续请求可能永久阻塞，逐步耗尽线程池并造成拒绝服务。' \

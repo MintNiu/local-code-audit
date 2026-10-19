@@ -249,7 +249,19 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
-Latest workflow verification (2026-10-19): the whole-paragraph semantic
+Latest local lock-preflight correction (2026-10-19): a narrowly recognized
+`finally` call to a same-class private leaf that releases the identical final
+standard lock no longer receives a method-local missing-release candidate.
+The frozen fake-response workflow suite improved from 11/14 to 14/14; 59
+structure/lexical units also passed. The complete local no-model run passed
+94/94 suites in 567.04 seconds, with all 191 runtime/test/fixture checksums
+unchanged across the run; shell syntax and runner self-tests passed too.
+Unproved cases keep the existing preflight,
+not a safety certificate, and every model paragraph remains visible. These
+checks do not establish native model quality; weights, SYSTEM, examples and
+16K/4096 are unchanged. See the [process record](docs/tuning-process.zh-CN.md).
+
+Previous workflow verification (2026-10-19): the whole-paragraph semantic
 suppression layer has been removed. All candidates, including informational
 and unsupported suggestions, reach the same required-field and location
 checks; invalid output cannot become successful clean. Incomplete model
@@ -604,6 +616,15 @@ python3 scripts/prepare-juliet-java.py \
 
 The converter reads the archive manifest for CWE names and flaw lines, emits bad/good pairs, and keeps the generated JSONL outside this repository.
 The runner also has narrow Java external-security preflights: it deterministically reports a literal password flowing into `DriverManager.getConnection` within one method, a non-empty literal flowing into `SecretKeySpec`, `readLine()` data flowing directly into `sendRedirect`, weak cryptographic algorithms, password fields submitted by GET forms, sensitive cookies without `Secure`, external counts used as unbounded loop bounds, modulo counters paired with provably-true `do/while` conditions, `HttpSession.setMaxInactiveInterval(-1)`, file resources closed only on the success path, `ReentrantLock`/`Lock` `lock()` or `lockInterruptibly()` acquisitions without a matching release for the same receiver in the same method, and a non-volatile static field used in a structurally nested double-checked initialization; fixed redirects, environment/secret injection, modern AES, POST forms, secured cookies, bounded loops, loops with reachable `break`, finite session timeouts, `finally`/try-with-resources or explicit lock-release protection, `volatile` DCL fields, method-synchronized initialization, and incomplete/non-nested null checks remain clean. The regression entry point is `evals/test-java-external-preflight.sh`; it neither downloads nor commits external source.
+The lock-helper exemption only recognizes one non-inheriting class, a private
+final field with a fully qualified standard `ReentrantLock` type and constructor,
+one acquisition immediately followed by ordinary `try/finally`, and an exclusive
+private zero-argument leaf containing only the same-field `unlock()`. Other
+members must not reference the field. Unsupported binding/lexical forms remain
+uncertified; this is not a Java compiler or general call graph. Run
+`bash evals/test-java-lock-helper-release.sh` for the end-to-end fake controls and
+`bash evals/test-java-lock-helper-scope.sh` for structural controls. Target Java
+and model suggestions are never executed by these tests.
 The DCL check requires nested braced conditions and a direct `field = new Type(...)` assignment; it handles same-line and next-line braces without joining evidence from adjacent blocks. Factory calls and unsupported syntax remain outside this deterministic check and still go through model review. Run `PYTHONDONTWRITEBYTECODE=1 python3 evals/test-java-dcl-scope.py` for fast parser-boundary tests. The external-security suite also exercises both globally installed entry points in an isolated directory, including relative symlinks and paths with spaces.
 The Java command-injection preflight separately reports only a changed `Runtime.getRuntime().exec`/`ProcessBuilder` sink whose `command`/`cmd`/`args`/`script` variable is visibly assigned from request input in the same method; constant commands and environment-only configuration remain clean. Its positive/negative regression is `bash evals/test-java-command-injection-preflight.sh`, and it is also part of `test-preflight.sh`.
 The runner also checks a narrow SQL delivery-upgrade boundary: when a standalone delivery script removes a parent menu ID that an older version deleted, but provides no scoped restoration for the menu and its tenant/role relations, it reports the existing-database migration risk; fresh-install bootstrap SQL is not treated as upgrade evidence. The regression entry point is `evals/test-sql-menu-delivery-preflight.sh`.
