@@ -219,6 +219,17 @@ passed 10/10 targeted cases and the complete 86/86 suites in 550.18 seconds,
 plus shell syntax checks and the runner self-test. It corrects four reproduced
 deterministic false positives, not model-native quality or overall acceptance.
 
+Latest native development screen (2026-10-19): a candidate consolidated duplicate
+output instructions, saving 585 SYSTEM bytes while retaining all other rules,
+examples, source and contracts. Four frozen Java/Python requests completed with
+the expected model identity and 16K runtime. Both correct implementations were
+clean, but both defective implementations were also clean: the model missed a
+constructor array alias and a sibling-directory prefix escape. The candidate
+failed the four-case gate and was not adopted. These exposed functional cases
+are not formal P0/P1 holdout scores; without a matched original-instruction
+baseline, they do not establish a causal quality or speed change. Defaults and
+weights remain unchanged. See the [tuning record](docs/tuning-process.zh-CN.md).
+
 The synthetic gate checks 23 positive and 22 clean development fixtures five
 times each, plus explicit truncation handling. Clean fixtures reject findings;
 positive fixtures check known risk families, not every possible extra false
