@@ -171,7 +171,7 @@ fresh shard-budget calculation. Evaluation metadata records `budget_mode` as
 
 For diagnostic A/B runs only, set `OLLAMA_REVIEW_SPECIALIST_CHANNEL` to `auth-tenant`, `concurrency-state`, or `external-io`. The runner performs one additional serial, narrow risk-family pass and unions both complete outputs; the default is empty, so normal reviews keep one request. Any specialist timeout, truncation, or invalid output fails closed, and specialist union results are not counted as model-native scorecard recall until independently validated.
 
-The output gate rejects generic or incomplete summaries: every finding paragraph must include a severity, a file/line location that matches a changed file or an explicitly supplied context file, and explicit `影响：`, `修复建议：`, and `验证方式：` fields. A basename is accepted only when it is unambiguous in the review set.
+The output gate validates structure, not defect truth: every finding paragraph must include a severity, a file/line location that matches a changed file or an explicitly supplied context file, and explicit `影响：`, `修复建议：`, and `验证方式：` fields. A basename is accepted only when it is unambiguous in the review set.
 
 Configuration findings are not suppressed merely for saying “may” or “if”.
 These words can describe the impact of a real defect. Structurally valid
@@ -187,6 +187,16 @@ text match. `bash evals/test-token-guard-filtering.sh` covers five false-clean
 shapes and three protocol controls: the old code passed 3/8; the fix passed 8/8
 with byte-identical requests and fixed fake responses. This proves workflow
 retention, not model-native recall, lower false positives or candidate truth.
+
+Logging-related wording in evidence, impact, a fix or verification no longer
+discards an entire candidate. Normal structure and location checks still apply.
+Generic “add logging” advice may therefore reappear and needs independent
+verification; it is not a confirmed defect. Run
+`bash evals/test-logging-word-retention.sh` for ten offline cases: five
+source-supported response variants, one explicitly non-gold noise-visibility
+control and four protocol controls. The old filter passed 2/10; its removal
+passed 10/10 with byte-identical requests and fixed responses. These are
+retention/protocol checks, not independent-root or model-quality scores.
 
 The only configuration exception is an evidence-backed contradiction guard:
 when the diff removes literal credential values, every current credential line
@@ -223,12 +233,15 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
-Latest model-independent verification (2026-10-19): the token-guard retention
-fix passed 8/8 targeted cases and all 87/87 suites in 525.67 seconds, plus shell
-syntax checks and the runner self-test. It corrects five reproduced workflow
-false-clean cases, not model-native quality or overall acceptance. The preceding
-Java source-root guard passed 10/10 targeted cases and 86/86 suites in 550.18
-seconds, correcting four reproduced deterministic false positives.
+Latest model-independent verification (2026-10-19): logging-word retention
+passed 10/10 targeted cases and all 88/88 suites in 529.03 seconds, plus shell
+syntax checks and the runner self-test. This fixes reproduced workflow
+false-clean cases and restores structure/range rejection; generic logging
+noise remains visible. It is not model-native quality or overall acceptance.
+The preceding token-guard fix passed 8/8 targeted cases and 87/87 suites in
+525.67 seconds, correcting five false-clean cases. The earlier Java source-root
+guard passed 10/10 targeted cases and 86/86 suites in 550.18 seconds, correcting
+four reproduced deterministic false positives.
 
 Latest native development screen (2026-10-19): a candidate consolidated duplicate
 output instructions, saving 585 SYSTEM bytes while retaining all other rules,

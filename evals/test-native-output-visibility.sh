@@ -48,8 +48,10 @@ assert request['model'] == 'visibility-fake'
 ledger = case / 'emitted.jsonl'
 ordinal = len(ledger.read_text().splitlines()) + 1 if ledger.exists() else 1
 mode = os.environ['VIS_MODE']
-filtered = ('信息 src/CaseA.js:1 - CANDIDATE_' + str(ordinal) + ' 缺少日志\n'
-            '证据：函数没有日志。\n影响：排查调用需要额外信息。\n修复建议：补日志。\n验证方式：观察调用。')
+# Exercise retention of an explicitly non-finding final without depending on
+# logging-word suppression, which must not erase independently concrete roots.
+filtered = ('信息 src/CaseA.js:1 - CANDIDATE_' + str(ordinal) + ' 实现符合契约\n'
+            '证据：当前实现符合契约。\n影响：没有任何可修复问题。\n修复建议：无。\n验证方式：无。')
 retained = ('P2 src/CaseA.js:1 - RETAINED_' + str(ordinal) + ' 返回值不符\n'
             '证据：函数返回常量。\n影响：返回不同结果。\n修复建议：核对固定值。\n验证方式：断言返回值。')
 final, done, reason, status = filtered, True, 'stop', 0
@@ -163,7 +165,7 @@ def run_case(name):
     if not failed and name not in ('mixed', 'secret-controls'):
         require(stdout.strip() == '未发现阻塞问题', name + ': stdout gate changed', case)
     if name != 'secret-controls':
-        require('缺少日志' not in stdout, name + ': filtered candidate entered final stdout', case)
+        require('CANDIDATE_' not in stdout, name + ': non-finding candidate entered final stdout', case)
     require(private_marker not in stdout + stderr and secret not in stdout + stderr, name + ': secret/nonfinal leaked', case)
     require(not (case / 'unexpected-network').exists(), name + ': unrecognized transport', case)
     reports = list(report_dir.glob('review-*/final-candidates.jsonl')) if report_dir.is_dir() else []

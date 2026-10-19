@@ -1147,10 +1147,10 @@ filter_unsupported_shard_findings() {
       # Likewise, a visible method body is not an unimplemented declaration.
       if (block ~ /方法/ && block ~ /未实现|没有方法体/ &&
           path_evidence ~ /->/ && path_evidence ~ /return/) invalid = 1
-      # Missing logging/monitoring by itself is explicitly outside the audit
-      # contract; concrete secret logging remains reportable by its evidence.
-      if (block ~ /缺少.*日志|没有.*日志|日志记录/ &&
-          block !~ /秘密|Secret|password|密码|token|Token|令牌|凭据|credential|AccessKey/) invalid = 1
+      # A logging reference in evidence, impact, a fix or verification does not
+      # disprove an independent root. Even generic logging advice must remain
+      # visible for verification; words alone cannot prove clean or bypass
+      # the normal structure and location checks below.
       # An untracked file is deliberately included in the review diff, so its
       # Git status is not itself a defect.  Drop only the informational claim
       # that the author must `git add` it; preserve concrete code/security
