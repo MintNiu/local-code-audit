@@ -179,6 +179,15 @@ candidates remain visible for independent verification; passing the output
 gate does not confirm their correctness. Unknown paths, invalid line ranges,
 and missing required fields still fail the review rather than becoming clean.
 
+The generic file-wide `token`/`currentToken` null-guard filter has been removed.
+A check in deleted lines, another method, a comment/string or after the failing
+operation cannot disprove a concrete dereference finding. The launcher retains
+these candidates for normal validation rather than inferring clean from that
+text match. `bash evals/test-token-guard-filtering.sh` covers five false-clean
+shapes and three protocol controls: the old code passed 3/8; the fix passed 8/8
+with byte-identical requests and fixed fake responses. This proves workflow
+retention, not model-native recall, lower false positives or candidate truth.
+
 The only configuration exception is an evidence-backed contradiction guard:
 when the diff removes literal credential values, every current credential line
 uses an environment placeholder, and the model itself says the old value was
@@ -214,10 +223,12 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
-Latest model-independent verification (2026-10-19): the Java source-root guard
-passed 10/10 targeted cases and the complete 86/86 suites in 550.18 seconds,
-plus shell syntax checks and the runner self-test. It corrects four reproduced
-deterministic false positives, not model-native quality or overall acceptance.
+Latest model-independent verification (2026-10-19): the token-guard retention
+fix passed 8/8 targeted cases and all 87/87 suites in 525.67 seconds, plus shell
+syntax checks and the runner self-test. It corrects five reproduced workflow
+false-clean cases, not model-native quality or overall acceptance. The preceding
+Java source-root guard passed 10/10 targeted cases and 86/86 suites in 550.18
+seconds, correcting four reproduced deterministic false positives.
 
 Latest native development screen (2026-10-19): a candidate consolidated duplicate
 output instructions, saving 585 SYSTEM bytes while retaining all other rules,

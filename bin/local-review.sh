@@ -1027,9 +1027,9 @@ filter_unsupported_shard_findings() {
           path_evidence ~ /@ConditionalOnClass/ &&
           path_evidence ~ /RestClient/ && path_evidence ~ /HttpServiceProxyFactory/ &&
           block !~ /ConditionalOnClass.*(错误|缺失|冲突)/) invalid = 1
-      # These are already visible guards/defaults, not actionable findings.
-      if (block ~ /currentToken|token/ && block ~ /null/ && block ~ /空/ &&
-          path_evidence ~ /token[[:space:]]*!=[[:space:]]*null/ && path_evidence ~ /token\.isBlank\(\)/) invalid = 1
+      # A file-wide token guard need not dominate the reported dereference:
+      # deleted lines, comments, other scopes or later statements can match.
+      # Keep these candidates for validation instead of inferring clean.
       # Require* token getters commonly guard both null and blank/length
       # before being passed to a RestClient default header.  A shard can split
       # those guards from the header call; the full-file evidence makes this
