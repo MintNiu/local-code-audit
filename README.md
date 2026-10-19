@@ -271,6 +271,15 @@ clean fixture received an unsupported P1. The first four fixtures completed
 five calls each; the remaining 204 planned calls and explicit truncation check
 were not attempted. All 21 received finals remain privately visible. The model
 gate is failed, not waived or certified by the 92 engineering suites.
+The exact published workflow revision also passed its complete
+[GitHub engineering run](https://github.com/MintNiu/local-code-audit/actions/runs/39241316611).
+An eight-call development A/B then kept the original SYSTEM, examples and
+16K/4096, adding complete target source only through existing `--context`.
+It removed one Java false positive but lost a Java root matched by the
+baseline; neither recipe reported the Python root. All eight calls completed
+with matching model/resident identity. This covers two ordinary P2 roots,
+not eight independent roots or holdout quality. The candidate was not adopted;
+all six clean finals and two candidate paragraphs remain privately visible.
 The older entries below describe their then-current controls, not semantic
 suppression retained in the current code.
 
