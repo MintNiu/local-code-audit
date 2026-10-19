@@ -141,6 +141,12 @@ When the collected diff exceeds `OLLAMA_REVIEW_MAX_DIFF_BYTES` (core default `30
 
 Each shard also receives a paths-only inventory of all files changed by the commit. This is scope metadata, not extra source context: it helps the model distinguish “implemented in another shard” from “missing”, while preserving the rule that absence from the current shard is never evidence of a defect.
 
+The deterministic Java missing-import preflight is limited to conventional
+`src/main/java` and `src/test/java` paths, including module prefixes. A custom
+or legacy source root does not establish a build classpath, so its imports
+cannot alone trigger a compile-failure finding; its diff remains in the model
+review. This preflight is not a compiler or a build-configuration resolver.
+
 Java reviews can opt into a bounded method-context sidecar for a private A/B evaluation:
 
 ```bash
@@ -208,6 +214,11 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
+Latest model-independent verification (2026-10-19): the Java source-root guard
+passed 10/10 targeted cases and the complete 86/86 suites in 550.18 seconds,
+plus shell syntax checks and the runner self-test. It corrects four reproduced
+deterministic false positives, not model-native quality or overall acceptance.
+
 The synthetic gate checks 23 positive and 22 clean development fixtures five
 times each, plus explicit truncation handling. Clean fixtures reject findings;
 positive fixtures check known risk families, not every possible extra false
@@ -221,8 +232,8 @@ for the independent acceptance target and current status.
 The visibility-retention change passed all 84 then-existing model-independent
 local suites in 545.66 seconds. The subsequent synthetic stdout/stderr separation
 passed four targeted suites (17.63 seconds), including its new nine-scenario
-no-model test, history, signatures, and runner isolation. CI discovers the full
-85-suite set; these are engineering checks, not model-quality acceptance.
+no-model test, history, signatures, and runner isolation. That addition brought
+CI discovery to 85 suites; these are engineering checks, not model-quality acceptance.
 Synthetic scores use only stdout, retain and show complete stderr separately,
 and automatically keep failed-run results even without `SYNTHETIC_KEEP_RESULTS=1`.
 Fake preflight reports use an isolated temporary directory; actual model reviews

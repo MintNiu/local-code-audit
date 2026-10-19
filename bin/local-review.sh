@@ -3993,10 +3993,20 @@ collect_build_preflight() {
     source_file="$repo_root/$changed_path"
     path_has_symlink_component "$changed_path" && continue
     [[ -f "$source_file" ]] || continue
-    source_index="$java_main_source_index"
-    if [[ "$changed_path" == src/test/java/* || "$changed_path" == */src/test/java/* ]]; then
-      source_index="$java_source_index"
-    fi
+    case "$changed_path" in
+      src/test/java/*|*/src/test/java/*)
+        source_index="$java_source_index"
+        ;;
+      src/main/java/*|*/src/main/java/*)
+        source_index="$java_main_source_index"
+        ;;
+      *)
+        # A custom/legacy source root does not establish a main/test classpath.
+        # Keep its diff in the review, but do not turn an empty conventional
+        # main-source index into a deterministic missing-type compile failure.
+        continue
+        ;;
+    esac
     package_name="$(awk '$1 == "package" { gsub(/[;\r]/, "", $2); print $2; exit }' "$source_file")"
     [[ -n "$package_name" ]] || continue
     local_prefix="$(awk -F. '{ if (NF >= 3) print $1 "." $2 "." $3; else print $0 }' <<<"$package_name")"
