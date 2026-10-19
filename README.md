@@ -256,7 +256,39 @@ The preceding token-guard fix passed 8/8 targeted cases and 87/87 suites in
 guard passed 10/10 targeted cases and 86/86 suites in 550.18 seconds, correcting
 four reproduced deterministic false positives.
 
-Latest native diagnostic (2026-10-19): a one-paragraph evidence-gate A/B
+Latest source qualification (2026-10-19): a bounded read-only inventory of
+26 local repositories found three commits from one feature, not three
+independent evaluation groups. Source review retained one conditional static
+P2 root and a separate binding-dependent P2 candidate; neither adds formal
+P0/P1 gold or certified holdout. Annotation alone is not model training or
+prompt tuning, but unknown historical exposure cannot be treated as unseen.
+A complete selected cross-file packet of 18,481 bytes plus the unchanged
+24,118-byte SYSTEM estimated 14,201 input tokens against 11,264 available.
+It was rejected before HTTP without trimming evidence or raising context.
+This standalone packet omitted optional examples; it is not a daily-wrapper
+A/B or evidence that removing examples improves quality. The byte estimate
+is not tokenizer/render proof or a model miss. Source,
+diffs and private assessments remain local; defaults and weights are unchanged.
+
+Latest native diagnostic (2026-10-19): a different scoped Java validation
+candidate used the original SYSTEM, existing model and 16K/4096. Its fixed
+5,382-byte source packet estimated 9,834 input tokens, without examples and
+without claiming daily-wrapper equivalence. A metadata-only first attempt
+stopped before generation because the private client mishandled stored SYSTEM
+boundary newlines; its record was retained. An explicitly disclosed
+pre-generation amendment fixed only that check, passed six offline comparator
+controls and received fresh reviews; all request bytes stayed identical.
+The sole generation completed in 97.49 seconds with HTTP 200/stop, 1,084 output
+tokens and matching model/resident 16K. It reported four P1s and one information
+item, but source review found no supported actionable finding: visible
+validation was overlooked and additional metadata, error-code and logging
+requirements were invented. It did not identify the conditional null-element
+path qualified for this unit-level diagnostic. Every received final is retained
+unfiltered. A single known candidate, without a clean control or repeat, does
+not establish recall, false-positive rate, stability, live HTTP behavior or
+overall acceptance; no model, rules, defaults or examples were adopted.
+
+Earlier native diagnostic (2026-10-19): a one-paragraph evidence-gate A/B
 kept the existing model, complete inputs and 16K/4096. The candidate changed
 evidence sufficiency wording, not the output protocol; all other SYSTEM bytes
 and request fields were retained. On the same correct Java source, A completed
