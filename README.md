@@ -198,6 +198,15 @@ control and four protocol controls. The old filter passed 2/10; its removal
 passed 10/10 with byte-identical requests and fixed responses. These are
 retention/protocol checks, not independent-root or model-quality scores.
 
+A nullable DTO ternary or a `TOKEN_HEADER` assignment no longer suppresses
+an entire candidate. The ternary may still return a value that is later
+dereferenced; a declared constant may hold the wrong contract value. These
+candidates now reach the existing required-field and line-range checks.
+`bash evals/test-guard-scope-retention.sh` covers two functional P2 roots,
+complete single/mixed outputs, malformed responses, clean controls and
+truncation. The fixed ten-case test improved from 3/10 to 10/10; this is
+workflow retention, not new model recall or proof of all remaining filters.
+
 The only configuration exception is an evidence-backed contradiction guard:
 when the diff removes literal credential values, every current credential line
 uses an environment placeholder, and the model itself says the old value was
@@ -233,7 +242,19 @@ directory, overriding an inherited `LOCAL_REVIEW_REPORT_DIR`, so fake model
 responses never enter the user's persistent reports. Those fixture reports are
 removed with the suite's temporary files; ordinary review reports are retained.
 
-Latest targeted workflow verification (2026-10-19): shard-qualification
+Latest targeted workflow verification (2026-10-19): guard-scope retention
+improved from 3/10 to 10/10 offline cases. Two broad suppression predicates
+had turned three concrete-response cases (two roots, one mixed response)
+and four malformed-response cases into successful clean. The fix preserves
+the former and restores required-field/range rejection for the latter;
+canonical clean, strict incomplete-only and truncation controls are unchanged.
+All ten paired actual requests, sources, fixed responses and archives were
+byte-identical; original finals were already saved before filtering.
+The complete local no-model regression passed 90/90 suites in 592.18 seconds;
+shell syntax checks and the runner self-test also passed. This is workflow
+retention, not native model quality, proof of all filters or overall acceptance.
+
+Preceding targeted workflow verification (2026-10-19): shard-qualification
 retention improved from 5/12 to 12/12 offline cases with byte-identical
 requests and fixed responses. A concrete finding is no longer deleted just
 because it also says that callers are not shown. Five supported-response
@@ -270,7 +291,22 @@ A/B or evidence that removing examples improves quality. The byte estimate
 is not tokenizer/render proof or a model miss. Source,
 diffs and private assessments remain local; defaults and weights are unchanged.
 
-Latest native diagnostic (2026-10-19): a different scoped Java validation
+Latest fixed development panel (2026-10-19): two previously qualified,
+conditional Java P2 roots and private repaired controls formed eight cells
+using the same installed weights, 16K/4096 and two existing SYSTEM profiles.
+Five new calls completed with HTTP 200/stop and matching model/resident 16K;
+one exact historical A result was reused, and two long-profile cells were
+rejected for capacity without inference or semantic scores. The short profile
+admitted the complete larger packets but missed both designated roots.
+Its outputs contained 25 original candidate paragraphs, including duplicates;
+main and independent AI-assisted source review supported none as actionable.
+One proposed repair would reintroduce the corrected length defect. The long
+validation repair control emitted no candidate. All finals remain visible
+privately; the short profile is not adopted. These exposed roots and derived
+controls do not establish formal recall, false-positive rate, stability,
+general speed or overall acceptance. See the [tuning log](docs/tuning-process.zh-CN.md).
+
+Preceding native diagnostic (2026-10-19): a different scoped Java validation
 candidate used the original SYSTEM, existing model and 16K/4096. Its fixed
 5,382-byte source packet estimated 9,834 input tokens, without examples and
 without claiming daily-wrapper equivalence. A metadata-only first attempt

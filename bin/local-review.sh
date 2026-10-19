@@ -1041,15 +1041,13 @@ filter_unsupported_shard_findings() {
       if (block ~ /fileInternalToken/ && block ~ /null|空/ && block ~ /缺少|没有|未见/ &&
           path_evidence ~ /getFileInternalToken\(\)[[:space:]]*==[[:space:]]*null/ &&
           path_evidence ~ /isBlank|length\(\)[[:space:]]*</) invalid = 1
-      # A DTO access guarded by `dto == null ? null : ... dto.getX()` is not
-      # a null-dereference or empty-value defect merely because the model
-      # speculates about the alternate branch.
-      if (block ~ /dto/ && block ~ /null|空/ && block ~ /NPE|NullPointerException|空字符串/ &&
-          path_evidence ~ /dto[[:space:]]*==[[:space:]]*null[[:space:]]*\?[[:space:]]*null[[:space:]]*:/) invalid = 1
+      # A DTO ternary protects only that access, not later use of its result.
+      # Preserve candidates for field/range validation instead of inferring clean.
       if (block ~ /connectTimeout|readTimeout|超时/ && block ~ /默认|校验|无限/ &&
           path_evidence ~ /DEFAULT_(CONNECT|READ)_TIMEOUT/ && path_evidence ~ /requireFinitePositiveTimeout/) invalid = 1
       if (block ~ /baseUrl/ && block ~ /缺少/ && block ~ /格式|空/ && path_evidence ~ /baseUrl[[:space:]]*=[[:space:]]*"http/) invalid = 1
-      if (block ~ /TOKEN_HEADER/ && block ~ /常量|校验|定义/ && path_evidence ~ /TOKEN_HEADER[[:space:]]*=/) invalid = 1
+      # A constant assignment proves existence, not value/contract correctness.
+      # Keep TOKEN_HEADER candidates instead of inferring clean from a declaration.
       # A visible normalize-and-prefix check is the intended path-traversal
       # boundary.  Do not let an information-level model guess about a bypass
       # when the current snapshot has no symlink, TOCTOU, or permission
