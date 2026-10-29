@@ -1,5 +1,7 @@
 # Local Code Audit
 
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/MintNiu/badge.svg)](https://hub.xerj.org/contributors/MintNiu)
+
 [中文说明](README.zh-CN.md)
 
 A local code-audit workflow for individual developers:
@@ -7,6 +9,12 @@ A local code-audit workflow for individual developers:
 `Git diff → project rules and relevant context → Ollama model → complete findings → human verification → fixed evaluation set`
 
 The default model is `devstral-small-2-review-tuned`. It is an Ollama-derived configuration based on the locally installed `devstral-small-2-review`; it does not retrain or replace the base model weights.
+
+## XERJ Corpus Hub / 收录情况
+
+**English** · This project is included in [XERJ Corpus Hub](https://hub.xerj.org/corpus/mintniu--local-code-audit) as a searchable code reference for AI coding agents. The corpus is pinned to a specific commit and retains attribution to the author and original repository.
+
+**中文** · 本项目已被 [XERJ Corpus Hub](https://hub.xerj.org/corpus/mintniu--local-code-audit) 收录，作为 AI 编程助手可检索的代码参考。收录语料固定在特定提交版本，并保留作者及原仓库署名。
 
 ## Goals
 

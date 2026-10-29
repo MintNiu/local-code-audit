@@ -1,5 +1,7 @@
 # Local Code Audit（本地代码审计）
 
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/MintNiu/badge.svg)](https://hub.xerj.org/contributors/MintNiu)
+
 [English README](README.md)
 
 这是一个面向个人开发者的本地代码审计闭环：
@@ -7,6 +9,12 @@
 `Git diff → 项目规则和相关上下文 → Ollama 本地模型 → 完整审计结果 → 人工验证 → 固定评测集`
 
 默认模型是 `devstral-small-2-review-tuned`。它基于本机已有的 `devstral-small-2-review` 创建 Ollama 派生配置，不会重新训练或替换基础模型权重。
+
+## XERJ Corpus Hub / 收录情况
+
+**中文** · 本项目已被 [XERJ Corpus Hub](https://hub.xerj.org/corpus/mintniu--local-code-audit) 收录，作为 AI 编程助手可检索的代码参考。收录语料固定在特定提交版本，并保留作者及原仓库署名。
+
+**English** · This project is included in [XERJ Corpus Hub](https://hub.xerj.org/corpus/mintniu--local-code-audit) as a searchable code reference for AI coding agents. The corpus is pinned to a specific commit and retains attribution to the author and original repository.
 
 ## 目标
 
